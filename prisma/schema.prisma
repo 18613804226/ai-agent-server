@@ -1,0 +1,32 @@
+datasource db {
+    provider = "postgresql"
+}
+
+generator client {
+    provider = "prisma-client-js"
+}
+
+model ChatSession {
+    id        String    @id @default(uuid())
+    title     String    @default("新对话")
+    createdAt DateTime  @default(now())
+    updatedAt DateTime  @updatedAt
+    messages  Message[]
+}
+
+model Message {
+    id        String      @id @default(uuid())
+    sessionId String
+    session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+    role      String      @default("user")
+    content   String      @db.Text
+    createdAt DateTime    @default(now())
+}
+
+model DocumentChunk {
+    id        String                       @id @default(uuid())
+    content   String                       @db.Text
+    metadata  Json?
+    embedding Unsupported("vector(1024)")?
+    createdAt DateTime                     @default(now())
+}

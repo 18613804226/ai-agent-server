@@ -1,0 +1,8 @@
+allowBuilds:
+  '@prisma/engines': false
+  esbuild: false
+  msgpackr-extract: false
+  prisma: true
+  workerd: false
+minimumReleaseAgeExclude:
+  - '@nestjs/observe@0.3.0'
