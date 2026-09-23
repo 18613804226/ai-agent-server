@@ -27,14 +27,20 @@ export class VectorService {
 
   // 2. 写入带有向量的文档切片
   async addDocument(content: string, metadata: any) {
-    const embedding = await this.generateEmbedding(content);
-    const vectorString = `[${embedding.join(',')}]`;
+    try {
+      const embedding = await this.generateEmbedding(content);
+      const vectorString = `[${embedding.join(',')}]`;
 
-    // 通过 Prisma 原生 SQL 写入向量
-    await this.prisma.$executeRaw`
+      // 通过 Prisma 原生 SQL 写入向量
+      await this.prisma.$executeRaw`
       INSERT INTO "DocumentChunk" (id, content, metadata, embedding)
       VALUES (gen_random_uuid(), ${content}, ${metadata}::jsonb, ${vectorString}::vector)
     `;
+    } catch (error: any) {
+      console.error('添加文档切片并生成向量失败:', error.message || error);
+      // 💡 抛出一个清晰的错误，让外层或前端能够捕获到提示
+      throw new Error(`向量化失败: ${error.message || '未知错误'}`);
+    }
   }
 
   // 3. 核心：语义向量相似度检索 (KNN 检索)

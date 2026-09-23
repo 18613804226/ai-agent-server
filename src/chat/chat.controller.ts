@@ -37,13 +37,20 @@ export class ChatController {
       .sendMessageStream(
         sessionId,
         body.query,
-        (chunk) => {
+        (type, text) => {
+          // 💡 1. 接收两个参数：type ('thought' | 'content') 和 文本内容
           // 如果没断开，才推送数据
           if (!isClientDisconnected) {
-            subject$.next({ data: { content: chunk } } as MessageEvent);
+            // 💡 2. 将 type 和 content 一起打包进 data 中发送给前端
+            subject$.next({
+              data: {
+                type: type, // 把类型带上（'thought' 或 'content'）
+                content: text, // 文本增量
+              },
+            } as MessageEvent);
           }
         },
-        () => isClientDisconnected, // 💡 5. 把状态检查函数传给 Service
+        () => isClientDisconnected, // 状态检查函数
       )
       .then(() => {
         if (!isClientDisconnected) {
