@@ -22,7 +22,7 @@ jobs:
             # 1. 进入服务器上的项目源码目录（根据你的实际路径调整）
             cd /root/dietai-backend/ai-agent-server
             
-            # 2. 拉取 GitHub 上的最新代码
+            # 2. 拉取 GitHub 上的最新代码.
             git pull origin main
             
             # 3. 重新构建镜像并启动容器（Docker Compose 会自动应用最新的代码和配置）
