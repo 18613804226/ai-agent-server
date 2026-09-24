@@ -11,7 +11,8 @@ async function bootstrap() {
     credentials: true,
   });
   const port = process.env.PORT || 3000;
-  await app.listen(port);
+  // 👉 核心修改：加上 '0.0.0.0'，允许外部网络和 Docker 映射正常访问！
+  await app.listen(port, '0.0.0.0');
   // 🚀 超级醒目的启动成功提示
   console.log('\n======================================================');
   console.log(`🚀 AI Agent 后端服务已成功启动！`);

@@ -1,0 +1,32 @@
+name: Deploy to Aliyun ECS
+
+on:
+  push:
+    branches: [ main ] # 当你往 main 分支 push 代码时自动触发
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🚀 Deploy to Aliyun via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            # 1. 进入服务器上的项目源码目录（根据你的实际路径调整）
+            cd /root/dietai-backend/ai-agent-server
+            
+            # 2. 拉取 GitHub 上的最新代码
+            git pull origin main
+            
+            # 3. 重新构建镜像并启动容器（Docker Compose 会自动应用最新的代码和配置）
+            docker compose up -d --build
+            
+            # 4. 清理未使用的旧镜像，防止服务器磁盘被撑满
+            docker image prune -f
