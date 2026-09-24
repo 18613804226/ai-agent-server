@@ -28,5 +28,5 @@ jobs:
             # 3. 重新构建镜像并启动容器（Docker Compose 会自动应用最新的代码和配置）
             docker compose up -d --build
             
-            # 4. 清理未使用的旧镜像，防止服务器磁盘被撑满
+            # 4. 清理未使用的旧镜像，防止服务器磁盘被撑满.
             docker image prune -f
