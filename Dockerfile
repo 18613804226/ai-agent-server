@@ -1,16 +1,16 @@
 # 1. 依赖安装阶段
 FROM node:18-alpine AS builder
 WORKDIR /app
-RUN npm install s-g pnpm
+RUN npm install -g pnpm
 
-# 配置国内镜像，并适当调大网络超时时间（单位毫秒，比如 1分钟）
+# 配置国内镜像源及网络重试/超时参数（通过 pnpm config 全局配置，避免命令行参数报错）
 RUN pnpm config set registry https://registry.npmmirror.com
 RUN pnpm config set fetch-timeout 60000
+RUN pnpm config set fetch-retries 5
 
 # 复制依赖相关文件
 COPY package.json pnpm-lock.yaml ./
-# 加上 --fetch-retries 参数防止偶然网络抖动导致的失败
-RUN pnpm install --fetch-retries 5
+RUN pnpm install 
 
 # 复制源码并编译
 COPY . .
@@ -24,10 +24,11 @@ RUN npm install -g pnpm
 
 RUN pnpm config set registry https://registry.npmmirror.com
 RUN pnpm config set fetch-timeout 60000
+RUN pnpm config set fetch-retries 5
 
 # 复制编译后的产物和必要文件
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --prod --fetch-retries 5
+RUN pnpm install --prod 
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
