@@ -1,37 +1,27 @@
-# 1. 依赖安装阶段
-FROM node:18-alpine AS builder
+FROM dockerproxy.net/library/node:20-alpine AS builder
 WORKDIR /app
-RUN npm install -g pnpm
 
-# 配置国内镜像源及网络重试/超时参数（通过 pnpm config 全局配置，避免命令行参数报错）
-RUN pnpm config set registry https://registry.npmmirror.com
-RUN pnpm config set fetch-timeout 60000
-RUN pnpm config set fetch-retries 5
+# 1. 设置国内镜像源与网络超时参数（npm & pnpm 双保险）
+RUN npm config set registry https://registry.npmmirror.com \
+    && npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 120000 \
+    && npm install -g pnpm
 
-# 复制依赖相关文件
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install 
+RUN pnpm config set registry https://registry.npmmirror.com \
+    && pnpm config set fetch-timeout 60000 \
+    && pnpm config set fetch-retries 5
 
-# 复制源码并编译
+# 2. 复制所有源码
 COPY . .
-RUN npx prisma generate
+
+# 3. 安装所有依赖（加入超时与重试容错）
+RUN pnpm install --frozen-lockfile=false --fetch-retries 5
+
+# 4. 执行编译（会自动处理 prisma generate 并在之后正确产出 dist）
 RUN pnpm run build
 
-# 2. 生产运行阶段
-FROM node:18-alpine
-WORKDIR /app
-RUN npm install -g pnpm
-
-RUN pnpm config set registry https://registry.npmmirror.com
-RUN pnpm config set fetch-timeout 60000
-RUN pnpm config set fetch-retries 5
-
-# 复制编译后的产物和必要文件
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --prod 
-
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/prisma ./prisma
-
+# 5. 生产运行阶段
 EXPOSE 3000
-CMD ["node", "dist/main.js"]
+
+# 直接用 node 运行编译后的产物
+CMD ["node", "dist/src/main.js"]
