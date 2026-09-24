@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # 1. 带有 pgvector 插件的 PostgreSQL 数据库
   postgres:

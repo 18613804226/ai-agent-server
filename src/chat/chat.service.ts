@@ -341,15 +341,12 @@ export class ChatService {
 
         // 分发给前端
         if (reasoningContent) {
-          onChunk('thought', reasoningContent);
+          rawThoughtReply += reasoningContent; // 累加思考过程
+          onChunk('thought', reasoningContent); // 只发送一次
         }
-        // 💡 核心修复：在这里把流式碎片累加起来！
-        if (reasoningContent) {
-          rawThoughtReply += reasoningContent;
-          onChunk('thought', reasoningContent);
-        }
+
         if (textContent) {
-          rawFullReply += textContent; // 👈 累加正文
+          rawFullReply += textContent; // 累加正文
           onChunk('content', textContent);
         }
       }
