@@ -21,7 +21,7 @@ services:
   backend:
     build: .
     image: my-backend-app:latest
-    container_name: nest-backend
+    container_name: ai-agent-backend
     restart: always
     ports:
       - "4001:3000"
