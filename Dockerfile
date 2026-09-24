@@ -1,7 +1,7 @@
-FROM dockerproxy.net/library/node:20-alpine AS builder
+FROM dockerproxy.net/library/node:20-alpine
 WORKDIR /app
 
-# 1. 设置国内镜像源与网络超时参数（npm & pnpm 双保险）
+# 1. 设置国内镜像源与网络超时参数
 RUN npm config set registry https://registry.npmmirror.com \
     && npm config set fetch-retry-mintimeout 20000 \
     && npm config set fetch-retry-maxtimeout 120000 \
@@ -14,14 +14,16 @@ RUN pnpm config set registry https://registry.npmmirror.com \
 # 2. 复制所有源码
 COPY . .
 
-# 3. 安装所有依赖（加入超时与重试容错）
+# 3. 安装所有依赖
 RUN pnpm install
 
-# 4. 执行编译（会自动处理 prisma generate 并在之后正确产出 dist）
+# 4. 【核心修复】在编译前生成 Prisma 客户端类型
+RUN npx prisma generate
+
+# 5. 执行编译
 RUN pnpm run build
 
-# 5. 生产运行阶段
+# 6. 生产运行阶段
 EXPOSE 3000
 
-# 直接用 node 运行编译后的产物
 CMD ["node", "dist/src/main.js"]
