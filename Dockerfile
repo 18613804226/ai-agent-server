@@ -15,7 +15,7 @@ RUN pnpm config set registry https://registry.npmmirror.com \
 COPY . .
 
 # 3. 安装所有依赖（加入超时与重试容错）
-RUN pnpm install --frozen-lockfile=false --fetch-retries 5
+RUN pnpm install
 
 # 4. 执行编译（会自动处理 prisma generate 并在之后正确产出 dist）
 RUN pnpm run build
