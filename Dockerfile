@@ -5,7 +5,7 @@ RUN npm install -g pnpm
 
 # 复制依赖相关文件
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN pnpm install 
 
 # 复制源码并编译
 COPY . .
@@ -19,7 +19,7 @@ RUN npm install -g pnpm
 
 # 复制编译后的产物和必要文件
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --prod --frozen-lockfile
+RUN pnpm install --prod 
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
