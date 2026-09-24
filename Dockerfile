@@ -17,8 +17,8 @@ COPY . .
 # 3. 安装所有依赖
 RUN pnpm install
 
-# 4. 【核心修复】在编译前生成 Prisma 客户端类型
-RUN npx prisma generate
+# 4. 注入临时 DATABASE_URL 并生成 Prisma 客户端
+RUN DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ai-agent" npx prisma generate
 
 # 5. 执行编译
 RUN pnpm run build
