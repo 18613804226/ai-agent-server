@@ -26,4 +26,4 @@ RUN pnpm run build
 # 6. 生产运行阶段
 EXPOSE 3000
 
-CMD ["node", "dist/src/main.js"]
+CMD ["node", "dist/main.js"]
