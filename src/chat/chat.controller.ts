@@ -1,4 +1,15 @@
-import { Controller, Post, Get, Body, Param, Sse, Req } from '@nestjs/common'; // 💡 1. 引入 Req
+import {
+  Controller,
+  Post,
+  Get,
+  Body,
+  Param,
+  Sse,
+  Req,
+  Put,
+  Delete,
+  HttpCode,
+} from '@nestjs/common'; // 💡 1. 引入 Req
 import type { Request } from 'express'; // 💡 2. 引入 Express 的 Request 类型
 import { ChatService } from './chat.service.js';
 import { Observable, Subject } from 'rxjs';
@@ -11,13 +22,29 @@ export class ChatController {
   async createSession(@Body('title') title?: string) {
     return this.chatService.createSession(title);
   }
-
   @Get('sessions')
   async getSessions() {
     return this.chatService.getSessions();
   }
+  @Get('sessions/:id')
+  async getSessionDetail(@Param('id') id: string) {
+    return this.chatService.getSessionDetail(id);
+  }
+  @Put('sessions/:id')
+  async updateSessionTitle(
+    @Param('id') id: string,
+    @Body('title') title: string,
+  ) {
+    return this.chatService.updateSessionTitle(id, title);
+  }
+  @Delete('sessions/:id')
+  async deleteSession(@Param('id') id: string) {
+    // 必须通过注入的 chatService 去调，不能直接用 this.prisma
+    return this.chatService.deleteSession(id);
+  }
 
   @Post(':id/stream')
+  @HttpCode(200) // 💡 1. 强制让 POST 请求返回 200 OK
   @Sse()
   async streamMessage(
     @Param('id') sessionId: string,
@@ -62,7 +89,6 @@ export class ChatController {
           subject$.error(err);
         }
       });
-
     return subject$.asObservable();
   }
 }

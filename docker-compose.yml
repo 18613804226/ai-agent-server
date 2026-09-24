@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  # 1. 带有 pgvector 插件的 PostgreSQL 数据库
+  postgres:
+    image: pgvector/pgvector:pg16  # 官方自带 vector 扩展的镜像
+    container_name: postgres-vector
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - app-network
+
+  # 2. 你的 NestJS 后端服务
+  backend:
+    build: .
+    image: my-backend-app:latest
+    container_name: nest-backend
+    restart: always
+    ports:
+      - "4001:3000"
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+    networks:
+      - app-network
+
+volumes:
+  pgdata:
+
+networks:
+  app-network:
+    driver: bridge
