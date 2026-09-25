@@ -9,6 +9,7 @@ async function bootstrap() {
     origin: '*', // 允许所有来源（开发环境可以直接这样写）
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     credentials: true,
+    maxAge: 86400, // 👈 关键：这行代码会告诉浏览器缓存预检请求 24 小时
   });
   const port = process.env.PORT || 3000;
   // 👉 核心修改：加上 '0.0.0.0'，允许外部网络和 Docker 映射正常访问！
