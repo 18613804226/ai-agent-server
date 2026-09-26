@@ -255,7 +255,6 @@ export class ChatService {
       const messagesToSend: any[] = [
         { role: 'system', content: systemPrompt },
         ...formattedMessages,
-        { role: 'user', content: userQuery },
       ];
 
       let weatherContext = '';
