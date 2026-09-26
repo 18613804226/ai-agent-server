@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { VectorService } from '../vector/vector.service.js';
 import OpenAI from 'openai';
@@ -399,5 +404,89 @@ export class ChatService {
 
       throw error;
     }
+  }
+  // -----------
+  async textToSpeech(text: string, voice = 'longanyang') {
+    if (!text?.trim()) {
+      throw new HttpException('文本不能为空', HttpStatus.BAD_REQUEST);
+    }
+
+    const apiKey = process.env.DASHSCOPE_API_KEY || process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new HttpException(
+        '未配置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+
+    console.log('🔊 开始调用通义 TTS, text长度:', text.length, 'voice:', voice);
+
+    // ✅ 正确地址（注意 SpeechSynthesizer 大小写）
+    const response = await fetch(
+      'https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'cosyvoice-v3-flash', // 可用: cosyvoice-v3-flash / cosyvoice-v3-plus / cosyvoice-v2
+          input: {
+            text: text.slice(0, 2000),
+            voice, // v3 常用: longanyang；v2 常用: longxiaochun_v2
+            format: 'mp3',
+            sample_rate: 22050,
+          },
+        }),
+      },
+    );
+
+    const contentType = response.headers.get('content-type') || '';
+    console.log(
+      '🔊 TTS 响应状态:',
+      response.status,
+      'Content-Type:',
+      contentType,
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('通义 TTS 错误:', response.status, errText);
+      throw new HttpException(
+        `语音合成失败: ${response.status} ${errText}`,
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+
+    // 返回 JSON（带音频 url）
+    if (contentType.includes('application/json')) {
+      const data = await response.json();
+      console.log('🔊 TTS JSON 返回:', JSON.stringify(data).slice(0, 400));
+
+      const audioUrl =
+        data.output?.audio?.url ||
+        data.output?.audio_url ||
+        data.output?.url ||
+        data.audio_url ||
+        data.url;
+
+      if (!audioUrl) {
+        throw new HttpException(
+          'TTS 未返回音频地址: ' + JSON.stringify(data),
+          HttpStatus.INTERNAL_SERVER_ERROR,
+        );
+      }
+      return { url: audioUrl };
+    }
+
+    // 直接返回音频二进制
+    const buffer = Buffer.from(await response.arrayBuffer());
+    console.log('🔊 TTS 返回音频二进制, 大小:', buffer.length, 'bytes');
+
+    return {
+      base64: buffer.toString('base64'),
+      contentType: contentType || 'audio/mpeg',
+    };
   }
 }

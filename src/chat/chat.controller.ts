@@ -43,6 +43,12 @@ export class ChatController {
     return this.chatService.deleteSession(id);
   }
 
+  @Post('tts')
+  async tts(@Body() body: { text: string; voice?: string }) {
+    const { text, voice } = body;
+    return this.chatService.textToSpeech(text, voice);
+  }
+
   @Post(':id/stream')
   @HttpCode(200) // 💡 1. 强制让 POST 请求返回 200 OK
   @Sse()
