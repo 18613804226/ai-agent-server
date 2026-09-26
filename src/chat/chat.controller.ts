@@ -9,11 +9,15 @@ import {
   Put,
   Delete,
   HttpCode,
+  UseInterceptors,
+  UploadedFile,
+  BadRequestException,
 } from '@nestjs/common'; // 💡 1. 引入 Req
 import type { Request } from 'express'; // 💡 2. 引入 Express 的 Request 类型
 import { ChatService } from './chat.service.js';
 import { Observable, Subject } from 'rxjs';
-
+import multer from 'multer';
+import { FileInterceptor } from '@nestjs/platform-express';
 @Controller('chat')
 export class ChatController {
   constructor(private readonly chatService: ChatService) {}
@@ -47,6 +51,18 @@ export class ChatController {
   async tts(@Body() body: { text: string; voice?: string }) {
     const { text, voice } = body;
     return this.chatService.textToSpeech(text, voice);
+  }
+
+  @Post('asr')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: multer.memoryStorage(),
+      limits: { fileSize: 15 * 1024 * 1024 },
+    }),
+  )
+  async speechToText(@UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('没有收到音频文件');
+    return this.chatService.speechToText(file.buffer, file.mimetype);
   }
 
   @Post(':id/stream')
