@@ -15,7 +15,7 @@ import ffmpegPath from 'ffmpeg-static';
 import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-
+import { evaluate } from 'mathjs';
 // ✅ 模块顶层：整个进程只建一次，所有 TTS 请求复用这套连接
 const dashscopeAgent = new https.Agent({
   keepAlive: true,
@@ -36,29 +36,69 @@ const ASR_WS_URL =
   process.env.DASHSCOPE_WS_URL ||
   'wss://dashscope.aliyuncs.com/api-ws/v1/inference';
 
+// ✅ 粗略 token 估算：CJK 每字 ~1 token，英文每 3.5 字符 ~1 token
+const estimateTokens = (text: string): number => {
+  if (!text) return 0;
+  const cjk = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || []).length;
+  return Math.ceil(cjk + (text.length - cjk) / 3.5);
+};
 @Injectable()
 export class ChatService {
   private openai: OpenAI;
-  private weatherTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+  private tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     {
       type: 'function',
       function: {
         name: 'fetchWeatherInfo',
         description:
-          '当用户明确询问某个城市或地区的实时天气、气温情况时调用此函数。如果用户说不想查天气或聊别的，切勿调用。',
+          '当用户明确询问某个城市或地区的实时天气、气温情况时调用。只在问天气时用。',
         parameters: {
           type: 'object',
           properties: {
             cityName: {
               type: 'string',
-              description: '城市名称，例如：北京、广州、Maluku等。',
+              description: '城市名称，如：北京、广州',
             },
           },
           required: ['cityName'],
         },
       },
     },
+    {
+      type: 'function',
+      function: {
+        name: 'calculator',
+        description:
+          '数学计算器。只要问题涉及任何数值计算（加减乘除、百分比、折扣、日期差、单位换算等）必须使用，禁止心算。',
+        parameters: {
+          type: 'object',
+          properties: {
+            expression: {
+              type: 'string',
+              description: '数学表达式，如 (100+20)*0.85、 365*24 ',
+            },
+          },
+          required: ['expression'],
+        },
+      },
+    },
   ];
+
+  // ✅ 工具执行器：名字 → 实现
+  private async execTool(name: string, args: any): Promise<string> {
+    if (name === 'fetchWeatherInfo') {
+      return this.fetchWeatherInfoByCity(args.cityName || '广州');
+    }
+    if (name === 'calculator') {
+      try {
+        const result = evaluate(String(args.expression || ''));
+        return `计算结果：${args.expression} = ${result}`;
+      } catch (e: any) {
+        return `表达式无法计算：${e.message}。请提醒用户检查算式。`;
+      }
+    }
+    return `未知工具：${name}`;
+  }
 
   constructor(
     private prisma: PrismaService,
@@ -148,7 +188,7 @@ export class ChatService {
         this.prisma.message.findMany({
           where: { sessionId },
           orderBy: { createdAt: 'asc' },
-          take: 10,
+          take: 30,
         }),
       ]);
       const parallelDuration = Date.now() - parallelStartTime;
@@ -168,14 +208,36 @@ export class ChatService {
       const isCasualChat = /你的名字|你是谁|你好|在干嘛|hi|hello/.test(
         userQuery,
       );
-      const context = isCasualChat
+
+      const MAX_CONTEXT_TOKENS = 1500; // RAG 资料上限，按需要调
+
+      let context = isCasualChat
         ? ''
         : (relevantDocs as any[])
             .map((doc: any) => doc.content)
             .join('\n---\n');
 
+      if (estimateTokens(context) > MAX_CONTEXT_TOKENS) {
+        // 超了就从后往前丢文档，保住预算
+        const docs = (relevantDocs as any[]).map((d: any) => d.content);
+        while (
+          docs.length > 1 &&
+          estimateTokens(docs.join('\n---\n')) > MAX_CONTEXT_TOKENS
+        ) {
+          docs.pop();
+        }
+        context = docs.join('\n---\n');
+      }
+
       const systemPrompt = `你是一个专属的 AI 智能助手。
     - 你的名字叫toto。
+    - 当前时间：${new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      dateStyle: 'full',
+      timeStyle: 'short',
+    }).format(
+      new Date(),
+    )}。涉及"今天/明天/现在/星期几"的问题必须以这个时间为准，禁止自己推测日期。
     - 你是由开发者独立打造的智能助手，能够协助处理各种问题。
 
     【工具调用规则】：
@@ -185,86 +247,82 @@ export class ChatService {
     【参考资料】：
     ${context}`;
 
+      const MAX_INPUT_TOKENS = 6000;
+      const systemTokens = estimateTokens(systemPrompt);
+      const queryTokens = estimateTokens(userQuery);
+      let budget = MAX_INPUT_TOKENS - systemTokens - queryTokens;
+
       const formattedMessages = historyMessages.map((msg) => {
         const role = ['user', 'assistant', 'system', 'tool'].includes(msg.role)
           ? (msg.role as 'user' | 'assistant' | 'system' | 'tool')
           : 'user';
         return { role, content: msg.content } as any;
       });
-
-      if (
-        formattedMessages.length === 0 ||
-        formattedMessages[formattedMessages.length - 1].role !== 'user'
-      ) {
-        formattedMessages.push({ role: 'user', content: userQuery } as any);
+      // 从最新一条往前装，装不下就停（旧消息直接丢）
+      const keptMessages: any[] = [];
+      for (let i = formattedMessages.length - 1; i >= 0; i--) {
+        const msg = formattedMessages[i];
+        const t = estimateTokens(
+          typeof msg.content === 'string' ? msg.content : '',
+        );
+        if (budget - t < 0) break;
+        budget -= t;
+        keptMessages.unshift(msg);
       }
+
+      // ✅ 保证 keptMessages 末尾一定是当前用户问题（历史查询可能还没包含它）
+      const lastKept = keptMessages[keptMessages.length - 1];
+      if (!(lastKept?.role === 'user' && lastKept.content === userQuery)) {
+        keptMessages.push({ role: 'user', content: userQuery } as any);
+      }
+
       if (checkAborted && checkAborted()) return;
 
-      const isAskingWeather = /天气|气温|温度|下雨|空气质量|几度/.test(
-        userQuery,
+      // ✅ 日志加在这里
+      console.log(
+        `🧮 [Token] system=${systemTokens}, query=${queryTokens}, 历史保留 ${keptMessages.length} 条, 剩余预算=${budget}`,
       );
 
-      const firstRoundMessages = [
+      // ✅ 通用工具循环：模型想调工具就执行，最多 4 轮，然后进入最终流式回答
+      const messages: any[] = [
         { role: 'system', content: systemPrompt },
-        ...formattedMessages.filter((m: any) => m.role !== 'system'),
+        ...keptMessages,
       ];
 
-      if (
-        firstRoundMessages.length === 0 ||
-        firstRoundMessages[firstRoundMessages.length - 1].role !== 'user'
-      ) {
-        firstRoundMessages.push({ role: 'user', content: userQuery } as any);
-      }
-
-      let initialResponse: any = null;
-
-      if (isAskingWeather) {
-        const toolStartTime = Date.now();
-        const openaiOptions: any = {
+      for (let round = 0; round < 4; round++) {
+        const tResp = Date.now();
+        const resp: any = await this.openai.chat.completions.create({
           model: 'qwen3.8-flash',
-          messages: firstRoundMessages,
-          tools: this.weatherTools,
+          messages,
+          tools: this.tools,
           tool_choice: 'auto',
-        };
-        initialResponse =
-          await this.openai.chat.completions.create(openaiOptions);
+          enable_search: true,
+        } as any);
+        const choiceMsg = resp.choices?.[0]?.message;
         console.log(
-          `⏱️ [性能监控] 第一轮工具决策耗时: ${Date.now() - toolStartTime}ms`,
-          { usage: initialResponse.usage },
+          `⏱️ [性能监控] 第 ${round + 1} 轮决策耗时: ${Date.now() - tResp}ms`,
+          { tool_calls: choiceMsg?.tool_calls?.length ?? 0 },
         );
-      }
 
-      const responseMessage = initialResponse?.choices?.[0]?.message || {};
-      const messagesToSend: any[] = [
-        { role: 'system', content: systemPrompt },
-        ...formattedMessages,
-      ];
+        if (!choiceMsg?.tool_calls?.length) break; // 没有工具要调 → 进入流式
 
-      let weatherContext = '';
-
-      if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
-        messagesToSend.push(responseMessage);
-
-        for (const rawToolCall of responseMessage.tool_calls) {
+        messages.push(choiceMsg);
+        for (const call of choiceMsg.tool_calls) {
           if (checkAborted && checkAborted()) return;
-          const toolCall = rawToolCall as any;
-          if (toolCall.function.name === 'fetchWeatherInfo') {
-            const args = JSON.parse(toolCall.function.arguments || '{}');
-            const cityName = args.cityName || '广州';
-
-            const apiStartTime = Date.now();
-            weatherContext = await this.fetchWeatherInfoByCity(cityName);
-            console.log(
-              `⏱️ [性能监控] 外部天气 API 接口请求耗时: ${Date.now() - apiStartTime}ms`,
-            );
-
-            messagesToSend.push({
-              tool_call_id: toolCall.id,
-              role: 'tool',
-              name: 'fetchWeatherInfo',
-              content: weatherContext,
-            });
+          const fn = call.function || {};
+          let result: string;
+          try {
+            const args = JSON.parse(fn.arguments || '{}');
+            result = await this.execTool(fn.name, args);
+          } catch (e: any) {
+            result = `工具执行出错：${e.message}`;
           }
+          messages.push({
+            tool_call_id: call.id,
+            role: 'tool',
+            name: fn.name,
+            content: result,
+          });
         }
       }
 
@@ -273,12 +331,13 @@ export class ChatService {
       const streamStartTime = Date.now();
       let firstTokenTime: number | null = null;
 
-      const stream = await this.openai.chat.completions.create({
+      const stream: any = await this.openai.chat.completions.create({
         model: 'qwen3.8-flash',
-        messages: messagesToSend,
+        messages,
         stream: true,
+        enable_search: true, // ✅
         stream_options: { include_usage: true },
-      });
+      } as any);
 
       let rawFullReply = '';
       let rawThoughtReply = '';
