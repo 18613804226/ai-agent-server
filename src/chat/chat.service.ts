@@ -431,7 +431,7 @@ export class ChatService {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'cosyvoice-v3-flash', // 可用: cosyvoice-v3-flash / cosyvoice-v3-plus / cosyvoice-v2
+          model: 'qwen3-tts-vd-2026-01-26', // 可用: cosyvoice-v3-flash / cosyvoice-v3-plus / cosyvoice-v2
           input: {
             text: text.slice(0, 2000),
             voice, // v3 常用: longanyang；v2 常用: longxiaochun_v2
