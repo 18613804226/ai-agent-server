@@ -1,6 +1,7 @@
 allowBuilds:
   '@prisma/engines': false
   esbuild: false
+  ffmpeg-static: set this to true or false
   msgpackr-extract: false
   prisma: true
   workerd: false

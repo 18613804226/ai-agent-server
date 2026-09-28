@@ -18,7 +18,7 @@ export class VectorService {
   // 1. 将文本转化为 1024 维向量
   async generateEmbedding(text: string): Promise<number[]> {
     const response = await this.openai.embeddings.create({
-      model: 'text-embedding-v3', // 或者是你选用的 embedding 模型
+      model: 'qwen3.7-text-embedding-flash', // 或者是你选用的 embedding 模型
       input: text,
       dimensions: 1024,
     });
