@@ -207,19 +207,36 @@ export class ChatService {
   private async toDataURL(imageRef: string): Promise<string> {
     if (imageRef.startsWith('data:')) return imageRef;
 
+    // 本地 uploads 文件（相对路径，或指向本机 /uploads 的绝对 URL）：直接读盘
+    let localPath: string | null = null;
     if (imageRef.startsWith('/uploads/')) {
-      const localPath = join(
+      localPath = join(
         process.cwd(),
         'uploads',
         imageRef.replace(/^\/uploads\//, ''),
       );
-      if (existsSync(localPath)) {
-        const buf = readFileSync(localPath);
-        const ext = localPath.split('.').pop() || '';
-        return `data:${this.mimeByExt(ext)};base64,${buf.toString('base64')}`;
+    } else if (imageRef.startsWith('http')) {
+      try {
+        const u = new URL(imageRef);
+        if (u.pathname.startsWith('/uploads/')) {
+          localPath = join(
+            process.cwd(),
+            'uploads',
+            u.pathname.replace(/^\/uploads\//, ''),
+          );
+        }
+      } catch {
+        /* 不是合法 URL，回落到 fetch */
       }
     }
 
+    if (localPath && existsSync(localPath)) {
+      const buf = readFileSync(localPath);
+      const ext = localPath.split('.').pop() || '';
+      return `data:${this.mimeByExt(ext)};base64,${buf.toString('base64')}`;
+    }
+
+    // 其它 HTTP URL：服务端拉取
     const res = await axios.get(imageRef, {
       responseType: 'arraybuffer',
       timeout: 15000,
