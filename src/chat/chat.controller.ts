@@ -53,6 +53,13 @@ export class ChatController {
     return this.chatService.textToSpeech(text, voice);
   }
 
+  @Post('upload-image')
+  async uploadImage(@Body() body: { image: string }, @Req() req: Request) {
+    if (!body?.image) throw new BadRequestException('没有收到图片数据');
+    const host = `${req.protocol}://${req.get('host')}`;
+    return this.chatService.uploadImage(body.image, host);
+  }
+
   @Post('asr')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -70,7 +77,7 @@ export class ChatController {
   @Sse()
   async streamMessage(
     @Param('id') sessionId: string,
-    @Body() body: { query: string },
+    @Body() body: { query: string; images?: string[] },
     @Req() req: Request, // 💡 3. 注入当前的 HTTP 请求对象
   ): Promise<Observable<MessageEvent>> {
     const subject$ = new Subject<MessageEvent>();
@@ -100,6 +107,7 @@ export class ChatController {
           }
         },
         () => isClientDisconnected, // 状态检查函数
+        body.images, // 图片 URL 列表，交给大模型识别
       )
       .then(() => {
         if (!isClientDisconnected) {

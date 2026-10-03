@@ -3,6 +3,7 @@ import {
   HttpStatus,
   Injectable,
   NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { VectorService } from '../vector/vector.service.js';
@@ -12,7 +13,13 @@ import * as https from 'https';
 import WebSocket from 'ws';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegPath from 'ffmpeg-static';
-import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
+import {
+  writeFileSync,
+  readFileSync,
+  unlinkSync,
+  existsSync,
+  mkdirSync,
+} from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { evaluate } from 'mathjs';
@@ -45,6 +52,7 @@ const estimateTokens = (text: string): number => {
 @Injectable()
 export class ChatService {
   private openai: OpenAI;
+  private readonly model: string;
   private tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     {
       type: 'function',
@@ -104,6 +112,8 @@ export class ChatService {
     private prisma: PrismaService,
     private vectorService: VectorService,
   ) {
+    this.model =
+      process.env.CHAT_MODEL || process.env.OPENAI_MODEL || 'qwen3.8-flash';
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY || '',
       baseURL: process.env.OPENAI_BASE_URL || '',
@@ -150,6 +160,75 @@ export class ChatService {
     });
   }
 
+  // ✅ 接收前端发送的图片（data URL / base64），落盘后返回可访问的 URL，供大模型识别
+  async uploadImage(image: string, host?: string): Promise<{ url: string }> {
+    if (!image || !image.startsWith('data:')) {
+      throw new BadRequestException('不是有效的 data URL 图片');
+    }
+    const match = image.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/);
+    if (!match) {
+      throw new BadRequestException('图片不是 base64 格式，无法解析');
+    }
+    const mime = match[1];
+    const base64 = match[2];
+    const ext = mime.replace('image/', '');
+
+    const uploadDir = join(process.cwd(), 'uploads');
+    if (!existsSync(uploadDir)) {
+      mkdirSync(uploadDir, { recursive: true });
+    }
+    const filename = `img-${Date.now()}-${crypto.randomUUID()}.${ext}`;
+    const filepath = join(uploadDir, filename);
+    writeFileSync(filepath, Buffer.from(base64, 'base64'));
+
+    const trimmedHost = host ? host.replace(/\/+$/, '') : '';
+    const url = trimmedHost
+      ? `${trimmedHost}/uploads/${filename}`
+      : `/uploads/${filename}`;
+    return { url };
+  }
+
+  // ✅ 本地 uploads 文件 → base64 data URL（直接读盘，无需 HTTP 自调）
+  private mimeByExt(ext: string): string {
+    const map: Record<string, string> = {
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      gif: 'image/gif',
+      webp: 'image/webp',
+      bmp: 'image/bmp',
+      avif: 'image/avif',
+    };
+    return map[ext.toLowerCase()] || 'application/octet-stream';
+  }
+
+  // ✅ 把图片 URL/路径统一转成 base64 data URL，保证大模型始终能读取到图片内容
+  // （解决部署在 localhost/内网时，LLM 服务器无法访问本地 /uploads 地址的问题）
+  private async toDataURL(imageRef: string): Promise<string> {
+    if (imageRef.startsWith('data:')) return imageRef;
+
+    if (imageRef.startsWith('/uploads/')) {
+      const localPath = join(
+        process.cwd(),
+        'uploads',
+        imageRef.replace(/^\/uploads\//, ''),
+      );
+      if (existsSync(localPath)) {
+        const buf = readFileSync(localPath);
+        const ext = localPath.split('.').pop() || '';
+        return `data:${this.mimeByExt(ext)};base64,${buf.toString('base64')}`;
+      }
+    }
+
+    const res = await axios.get(imageRef, {
+      responseType: 'arraybuffer',
+      timeout: 15000,
+    });
+    const buf = Buffer.from(res.data);
+    const mime = res.headers['content-type'] || 'application/octet-stream';
+    return `data:${mime};base64,${buf.toString('base64')}`;
+  }
+
   // 辅助函数：根据城市名获取天气
   private async fetchWeatherInfoByCity(cityName: string): Promise<string> {
     try {
@@ -174,6 +253,7 @@ export class ChatService {
     userQuery: string,
     onChunk: (type: 'thought' | 'content' | 'error', text: string) => void,
     checkAborted?: () => boolean,
+    images?: string[],
   ) {
     const overallStartTime = Date.now();
     try {
@@ -270,10 +350,31 @@ export class ChatService {
         keptMessages.unshift(msg);
       }
 
+      // ✅ 构造多模态用户消息：文本 + 图片（image_url），这样大模型可以识别图片内容
+      //   图片 URL 先统一转成 base64 data URL，保证本地/内网部署也能被大模型读取
+      const hasImages = Array.isArray(images) && images.length > 0;
+      const imageContents = hasImages
+        ? await Promise.all(images.map((img) => this.toDataURL(img)))
+        : [];
+      const userMessage: any = hasImages
+        ? {
+            role: 'user',
+            content: [
+              { type: 'text', text: userQuery },
+              ...imageContents.map((dataUrl) => ({
+                type: 'image_url',
+                image_url: { url: dataUrl },
+              })),
+            ],
+          }
+        : { role: 'user', content: userQuery };
+
       // ✅ 保证 keptMessages 末尾一定是当前用户问题（历史查询可能还没包含它）
       const lastKept = keptMessages[keptMessages.length - 1];
-      if (!(lastKept?.role === 'user' && lastKept.content === userQuery)) {
-        keptMessages.push({ role: 'user', content: userQuery } as any);
+      const alreadyHasUserQuery =
+        lastKept?.role === 'user' && !hasImages && lastKept.content === userQuery;
+      if (!alreadyHasUserQuery) {
+        keptMessages.push(userMessage);
       }
 
       if (checkAborted && checkAborted()) return;
@@ -292,7 +393,7 @@ export class ChatService {
       for (let round = 0; round < 4; round++) {
         const tResp = Date.now();
         const resp: any = await this.openai.chat.completions.create({
-          model: 'qwen3.8-flash',
+          model: this.model,
           messages,
           tools: this.tools,
           tool_choice: 'auto',
@@ -332,7 +433,7 @@ export class ChatService {
       let firstTokenTime: number | null = null;
 
       const stream: any = await this.openai.chat.completions.create({
-        model: 'qwen3.8-flash',
+        model: this.model,
         messages,
         stream: true,
         enable_search: true, // ✅
@@ -430,7 +531,7 @@ export class ChatService {
   }
 
   // -----------
-  async textToSpeech(text: string, voice = 'longanwen_v3') {
+  async textToSpeech(text: string, voice = 'Nini') {
     if (!text?.trim() || !/[\p{Script=Han}A-Za-z0-9]/u.test(text)) {
       throw new HttpException('文本内容无法朗读', HttpStatus.BAD_REQUEST);
     }
@@ -445,19 +546,20 @@ export class ChatService {
 
     const t0 = Date.now();
     const { data } = await ttsClient.post(
-      'https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer',
+      'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
       {
-        model: 'cosyvoice-v3-flash',
+        model: 'qwen3-tts-instruct-flash',
         input: {
-          text: text.slice(0, 2000),
-          voice,
-          format: 'mp3',
-          sample_rate: 22050,
-          speech_rate: 1.2,
+          text: text.slice(0, 300),
+          voice, // ⚠️ 音色名要换成 Qwen3 系列的（如 Cherry、Ethan），CosyVoice 的音色名不通用
+        },
+        parameters: {
+          instructions: '语速比正常稍快一点，约1.2倍速，语气自然', // Instruct 版用自然语言控制语速，代替原来的 speech_rate
         },
       },
       { headers: { Authorization: `Bearer ${apiKey}` } },
     );
+    // 返回结构也不同：音频在 data.output.audio.url（或 content），不再是原来的字段，取数据的地方要跟着改
     console.log('🔊 TTS 首字节延迟:', Date.now() - t0, 'ms');
 
     const audioUrl =
