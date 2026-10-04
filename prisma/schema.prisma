@@ -20,6 +20,7 @@ model Message {
     session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
     role      String      @default("user")
     content   String      @db.Text
+    images    Json?
     createdAt DateTime    @default(now())
 }
 

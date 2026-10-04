@@ -15,6 +15,9 @@ async function bootstrap() {
   });
   // ✅ 上传图片（data URL）大于默认 100kb 限制，所以放宽 JSON body 尺寸
   app.useBodyParser('json', { limit: '10mb' });
+  // ✅ 部署在 Nginx/网关后面时，不开这个 req.protocol 恒为 http、req.ip 也不对，
+  //    uploadImage 生成的图片 URL 会全部指向内网地址（前端 https 页面还会被当混合内容拦掉）
+  app.set('trust proxy', true);
   // ✅ 静态托管 uploads 目录，让图片可访问、供大模型识别
   app.useStaticAssets(join(process.cwd(), 'uploads'), {
     prefix: '/uploads/',

@@ -6,6 +6,7 @@ import {
   Param,
   Sse,
   Req,
+  Res,
   Put,
   Delete,
   HttpCode,
@@ -13,7 +14,7 @@ import {
   UploadedFile,
   BadRequestException,
 } from '@nestjs/common'; // 💡 1. 引入 Req
-import type { Request } from 'express'; // 💡 2. 引入 Express 的 Request 类型
+import type { Request, Response } from 'express'; // 💡 2. 引入 Express 的 Request 类型
 import { ChatService } from './chat.service.js';
 import { Observable, Subject } from 'rxjs';
 import multer from 'multer';
@@ -78,36 +79,37 @@ export class ChatController {
   async streamMessage(
     @Param('id') sessionId: string,
     @Body() body: { query: string; images?: string[] },
-    @Req() req: Request, // 💡 3. 注入当前的 HTTP 请求对象
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Observable<MessageEvent>> {
     const subject$ = new Subject<MessageEvent>();
     let isClientDisconnected = false;
+    // ✅ 客户端一断开就 abort 掉上游大模型请求，否则模型还会继续生成，白烧 token
+    const abortController = new AbortController();
 
-    // 💡 4. 监听前端是否断开连接（比如点击了停止按钮、关闭了页面或切换了会话）
-    req.on('close', () => {
-      isClientDisconnected = true;
+    // ⚠️ 不能用 req.on('close')：Node 16 起它是「请求体读完」就触发（实测 +4ms），
+    //    跟客户端断不断开毫无关系。必须监听 res，且用 writableFinished 区分正常结束。
+    res.on('close', () => {
+      if (!res.writableFinished) {
+        isClientDisconnected = true;
+        abortController.abort();
+      }
     });
 
-    // 异步执行流式对话，传入中断检查回调
+    // 异步执行流式对话
     this.chatService
       .sendMessageStream(
         sessionId,
         body.query,
         (type, text) => {
-          // 💡 1. 接收两个参数：type ('thought' | 'content') 和 文本内容
-          // 如果没断开，才推送数据
+          // 断开了就别再往已经关闭的响应里写
           if (!isClientDisconnected) {
-            // 💡 2. 将 type 和 content 一起打包进 data 中发送给前端
             subject$.next({
-              data: {
-                type: type, // 把类型带上（'thought' 或 'content'）
-                content: text, // 文本增量
-              },
+              data: { type, content: text },
             } as MessageEvent);
           }
         },
-        () => isClientDisconnected, // 状态检查函数
         body.images, // 图片 URL 列表，交给大模型识别
+        abortController.signal,
       )
       .then(() => {
         if (!isClientDisconnected) {

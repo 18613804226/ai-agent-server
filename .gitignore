@@ -59,3 +59,6 @@ pids
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 node_modules/
 dist/
+
+# 运行时上传目录（用户图片 + .model-cache 压缩缓存）
+/uploads/

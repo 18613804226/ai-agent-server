@@ -44,7 +44,7 @@ export class VectorService {
   }
 
   // 3. 核心：语义向量相似度检索 (KNN 检索)
-  async searchSimilar(queryText: string, limit = 5) {
+  async searchSimilar(queryText: string, limit = 5): Promise<any[]> {
     const queryEmbedding = await this.generateEmbedding(queryText);
     const vectorString = `[${queryEmbedding.join(',')}]`;
 
@@ -58,6 +58,6 @@ export class VectorService {
       LIMIT ${limit};
     `;
 
-    return results;
+    return results as any[];
   }
 }
