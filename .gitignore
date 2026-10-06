@@ -62,3 +62,5 @@ dist/
 
 # 运行时上传目录（用户图片 + .model-cache 压缩缓存）
 /uploads/
+/files/
+/files/

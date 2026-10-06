@@ -73,12 +73,45 @@ export class ChatController {
     return this.chatService.speechToText(file.buffer, file.mimetype);
   }
 
+  // ---------------- 知识库 ----------------
+  @Post('knowledge/upload')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: multer.memoryStorage(),
+      limits: { fileSize: 20 * 1024 * 1024 },
+      // ✅ busboy 默认按 latin1 解析 multipart 头里的 filename，浏览器发的是 UTF-8 字节，
+      //    中文文件名会变乱码。改为 utf8 从源头修正。
+      defParamCharset: 'utf8',
+    }),
+  )
+  async uploadKnowledgeFile(@UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('没有收到文件');
+    return this.chatService.uploadKnowledgeFile(file);
+  }
+
+  @Get('knowledge/files')
+  async getKnowledgeFiles() {
+    return this.chatService.listKnowledgeFiles();
+  }
+
+  // ✅ 向量化进度（前端轮询）：返回 status / processedChunks / totalChunks / progress%
+  @Get('knowledge/files/:id/progress')
+  async getKnowledgeProgress(@Param('id') id: string) {
+    return this.chatService.getKnowledgeFileProgress(id);
+  }
+
+  @Delete('knowledge/files/:id')
+  @HttpCode(204)
+  async deleteKnowledgeFile(@Param('id') id: string) {
+    await this.chatService.deleteKnowledgeFile(id);
+  }
+
   @Post(':id/stream')
   @HttpCode(200) // 💡 1. 强制让 POST 请求返回 200 OK
   @Sse()
   async streamMessage(
     @Param('id') sessionId: string,
-    @Body() body: { query: string; images?: string[] },
+    @Body() body: { query: string; images?: string[]; fileIds?: string[] },
     @Res({ passthrough: true }) res: Response,
   ): Promise<Observable<MessageEvent>> {
     const subject$ = new Subject<MessageEvent>();
@@ -110,6 +143,7 @@ export class ChatController {
         },
         body.images, // 图片 URL 列表，交给大模型识别
         abortController.signal,
+        body.fileIds, // 知识库文件 ID 列表，用于限定 RAG 检索范围
       )
       .then(() => {
         if (!isClientDisconnected) {

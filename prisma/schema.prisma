@@ -24,6 +24,19 @@ model Message {
     createdAt DateTime    @default(now())
 }
 
+// ✅ 知识库文件表：记录上传的文件及其在服务端的存储位置，供 RAG 检索筛选
+model KnowledgeFile {
+    id              String   @id @default(uuid())
+    fileName        String   // 原始文件名
+    mimeType        String
+    size            Int      // 字节数
+    path            String   // 服务端存储路径
+    status          String   @default("uploaded") // uploaded | processing | indexed | failed
+    totalChunks     Int      @default(0) // 总分片数
+    processedChunks Int      @default(0) // 已完成向量化的分片数
+    createdAt       DateTime @default(now())
+}
+
 model DocumentChunk {
     id        String                       @id @default(uuid())
     content   String                       @db.Text

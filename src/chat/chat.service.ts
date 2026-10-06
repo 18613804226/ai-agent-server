@@ -16,9 +16,12 @@ import ffmpegPath from 'ffmpeg-static';
 import { existsSync } from 'fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'fs/promises';
 import { createHash } from 'crypto';
-import { join, resolve, sep } from 'path';
+import { join, resolve, sep, extname } from 'path';
 import { tmpdir } from 'os';
 import { evaluate } from 'mathjs';
+import { PDFParse } from 'pdf-parse';
+import mammoth from 'mammoth';
+import WordExtractor from 'word-extractor';
 import {
   finalizeToolCalls,
   mergeToolCallDeltas,
@@ -122,7 +125,9 @@ export class ChatService {
     private vectorService: VectorService,
   ) {
     this.model =
-      process.env.CHAT_MODEL || process.env.OPENAI_MODEL || 'qwen3.8-flash';
+      process.env.CHAT_MODEL ||
+      process.env.OPENAI_MODEL ||
+      'qwen3.7-flash-2026-07-15';
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY || '',
       baseURL: process.env.OPENAI_BASE_URL || '',
@@ -261,7 +266,9 @@ export class ChatService {
       const localPath = this.resolveUploadsFilePath(u.pathname);
       return localPath ? { localPath } : null;
     }
-    return this.isImageFetchAllowed(u.hostname) ? { remoteUrl: imageRef } : null;
+    return this.isImageFetchAllowed(u.hostname)
+      ? { remoteUrl: imageRef }
+      : null;
   }
 
   // ✅ 把图片缩到长边 MODEL_IMAGE_MAX_EDGE 再交给模型，并按内容 hash 缓存到磁盘。
@@ -295,7 +302,10 @@ export class ChatService {
         ]);
         if (ext === 'png') cmd.outputOptions(['-c:v', 'png']);
         else cmd.outputOptions(['-q:v', '3']);
-        cmd.on('end', () => resolve()).on('error', reject).save(tmpPath);
+        cmd
+          .on('end', () => resolve())
+          .on('error', reject)
+          .save(tmpPath);
       });
       await rename(tmpPath, outPath);
       return { buf: await readFile(outPath), ext };
@@ -375,6 +385,7 @@ export class ChatService {
     onChunk: (type: 'thought' | 'content' | 'error', text: string) => void,
     images?: string[],
     signal?: AbortSignal,
+    fileIds?: string[],
   ) {
     const overallStartTime = Date.now();
     const aborted = () => signal?.aborted === true;
@@ -411,7 +422,33 @@ export class ChatService {
         }),
         isCasualChat
           ? Promise.resolve([] as any[])
-          : this.vectorService.searchSimilar(userQuery, 3),
+          : fileIds && fileIds.length
+            ? this.vectorService
+                .searchSimilarByFile(userQuery, fileIds, 3)
+                .then((results) => {
+                  console.log(
+                    '🔍 [RAG-byFile]',
+                    JSON.stringify(
+                      results.map((r: any) => ({
+                        similarity: r.similarity,
+                        content: (r.content || '').slice(0, 80),
+                      })),
+                    ),
+                  );
+                  return results;
+                })
+            : this.vectorService.searchSimilar(userQuery, 3).then((results) => {
+                console.log(
+                  '🔍 [RAG]',
+                  JSON.stringify(
+                    results.map((r: any) => ({
+                      similarity: r.similarity,
+                      content: (r.content || '').slice(0, 80),
+                    })),
+                  ),
+                );
+                return results;
+              }),
         this.prisma.message.findMany({
           where: { sessionId },
           // ✅ 取最近 30 条（原来 asc 取的是最旧 30 条，长会话下最近上下文全丢）
@@ -436,24 +473,37 @@ export class ChatService {
       // ✅ 反转回时间正序，再从最旧一条开始装上下文
       historyMessages.reverse();
 
-      const MAX_CONTEXT_TOKENS = 1500; // RAG 资料上限，按需要调
+      const MAX_CONTEXT_TOKENS = 1500;
+      const SIMILARITY_THRESHOLD = 0.45;
 
-      let context = isCasualChat
-        ? ''
-        : (relevantDocs as any[])
-            .map((doc: any) => doc.content)
-            .join('\n---\n');
+      const hasRelevantDocs =
+        !isCasualChat &&
+        (relevantDocs as any[]).some(
+          (doc: any) => doc.similarity >= SIMILARITY_THRESHOLD,
+        );
+
+      let context =
+        isCasualChat || !hasRelevantDocs
+          ? ''
+          : (relevantDocs as any[])
+              .map(
+                (doc: any) =>
+                  `【来源：${doc.metadata?.fileName || '知识库'}】\n${doc.content}`,
+              )
+              .join('\n---\n');
 
       if (estimateTokens(context) > MAX_CONTEXT_TOKENS) {
-        // 超了就从后往前丢文档，保住预算
-        const docs = (relevantDocs as any[]).map((d: any) => d.content);
-        while (
-          docs.length > 1 &&
-          estimateTokens(docs.join('\n---\n')) > MAX_CONTEXT_TOKENS
-        ) {
-          docs.pop();
+        let docs = (relevantDocs as any[])
+          .map(
+            (d: any) =>
+              `【来源：${d.metadata?.fileName || '知识库'}】\n${d.content}`,
+          )
+          .join('\n---\n');
+        while (estimateTokens(docs) > MAX_CONTEXT_TOKENS && docs.length > 0) {
+          const lastSep = docs.lastIndexOf('\n---\n');
+          docs = lastSep > 0 ? docs.slice(0, lastSep) : '';
         }
-        context = docs.join('\n---\n');
+        context = docs;
       }
 
       const systemPrompt = `你是一个专属的 AI 智能助手。
@@ -472,12 +522,16 @@ export class ChatService {
     2. 如果用户是在进行普通闲聊、询问你的身份、或者讨论技术问题，**严禁调用任何工具**，必须直接进行文字回复！
      
     【参考资料】：
-    ${context}`;
+     ${context || '知识库中未找到相关内容，请直接回答或告知用户知识库暂无答案。'}
+`;
 
       // ✅ 分配图片名额：当前轮优先，剩余名额从最新的历史消息往前补。
       //   这样「刚才那张红图再帮我看看」能接上，又不会让 token 随对话轮数无限膨胀。
       const currentRefs = (hasImages ? images! : []).slice(0, MAX_MODEL_IMAGES);
-      const slotsForHistory = Math.max(0, MAX_MODEL_IMAGES - currentRefs.length);
+      const slotsForHistory = Math.max(
+        0,
+        MAX_MODEL_IMAGES - currentRefs.length,
+      );
       const historyImageRefs: string[] = [];
       for (let i = historyMessages.length - 1; i >= 0; i--) {
         if (historyImageRefs.length >= slotsForHistory) break;
@@ -518,7 +572,7 @@ export class ChatService {
       const imageTokens = currentImageUrls.length * MODEL_IMAGE_TOKEN_COST;
       let budget = MAX_INPUT_TOKENS - systemTokens - queryTokens - imageTokens;
 
-      const formattedMessages = historyMessages.map((msg) => {
+      const formattedMessages = historyMessages.map((msg: any) => {
         const role = ['user', 'assistant', 'system', 'tool'].includes(msg.role)
           ? (msg.role as 'user' | 'assistant' | 'system' | 'tool')
           : 'user';
@@ -736,7 +790,11 @@ export class ChatService {
 
       // ✅ 客户端主动断开不是错误：上游请求被 abort 会抛 APIUserAbortError，
       //    这里安静收尾即可，别给前端推 error 事件（连接已经没了，推了也没人收）
-      if (aborted() || error?.name === 'AbortError' || error?.name === 'APIUserAbortError') {
+      if (
+        aborted() ||
+        error?.name === 'AbortError' ||
+        error?.name === 'APIUserAbortError'
+      ) {
         console.log(
           `⏹️ [性能监控] 客户端已断开，提前结束（累计 ${totalDuration}ms）`,
         );
@@ -947,5 +1005,303 @@ export class ChatService {
         [tmpIn, `${tmpIn}.wav`].map((f) => rm(f, { force: true })),
       );
     }
+  }
+
+  // ---------------- 知识库（Knowledge Base） ----------------
+  // ✅ 存到 uploads/ 之外，uploads/ 由 useStaticAssets 静态暴露，
+  //    放这里会被当成静态文件外链、且接受任意后缀名容易导到存储型 XSS / 敏感文件公开。
+  private readonly knowledgeDir = join(process.cwd(), 'files', 'knowledge');
+  private readonly kbTextExts = [
+    '.txt',
+    '.md',
+    '.json',
+    '.csv',
+    '.log',
+    '.xml',
+    '.html',
+    '.htm',
+  ];
+  private readonly chunkSize = 500; // 每段最大字数
+  private readonly chunkOverlap = 50; // 滑动窗口重叠字数
+  private readonly MAX_KB_FILE_SIZE = 10 * 1024 * 1024; // 10MB，超过就直接拒绝
+  private readonly MAX_KB_CHUNKS = 500; // 超上只向量化前 N 段，防 LLM 被疯狒
+
+  // ✅ 剥离服务器端存储路径，不对外暴露 filesystem 路径
+  private kbPublic(record: any): any {
+    const { path: _path, ...rest } = record;
+    return rest;
+  }
+
+  // ✅ 先把文本按空行拆成段落，保留原始结构；段落内再按句子边界切分，避免硬切
+  private splitText(text: string): string[] {
+    const chunks: string[] = [];
+    const trimmed = text.trim();
+    if (!trimmed) return [];
+
+    const paragraphs = trimmed.split(/\n\s*\n/).filter((p) => p.trim());
+
+    for (const para of paragraphs) {
+      const p = para.trim();
+      if (p.length <= this.chunkSize) {
+        chunks.push(p);
+        continue;
+      }
+
+      let start = 0;
+      while (start < p.length) {
+        let end = start + this.chunkSize;
+        if (end >= p.length) {
+          chunks.push(p.slice(start));
+          break;
+        }
+
+        let cut = end;
+        const lookAround = 80;
+        const segStart = Math.max(start, end - lookAround);
+        const segEnd = Math.min(p.length, end + lookAround);
+        let lastPunct = -1;
+        for (let i = segEnd - 1; i >= segStart; i--) {
+          const ch = p[i];
+          if (
+            ch === '。' ||
+            ch === '！' ||
+            ch === '？' ||
+            ch === '；' ||
+            ch === '\n'
+          ) {
+            lastPunct = i + 1;
+            break;
+          }
+        }
+        if (lastPunct > start) cut = lastPunct;
+        else {
+          const lastSpace = p.lastIndexOf(' ', end);
+          if (lastSpace > start) cut = lastSpace;
+        }
+
+        chunks.push(p.slice(start, cut));
+        const next = cut - this.chunkOverlap;
+        start = next > start ? next : cut;
+      }
+    }
+
+    return chunks;
+  }
+
+  // ✅ 文本抽取：文本类直接读；PDF 用 pdf-parse；DOCX 用 mammoth；老版 DOC 用 word-extractor；其他二进制仅存档不向量化
+  private async extractText(file: Express.Multer.File): Promise<string> {
+    const ext = extname(file.originalname).toLowerCase();
+    const isText =
+      file.mimetype.startsWith('text/') || this.kbTextExts.includes(ext);
+    if (isText) return file.buffer.toString('utf8');
+
+    if (ext === '.pdf') {
+      try {
+        const pdf = new PDFParse({ data: file.buffer });
+        const textResult = await pdf.getText();
+        await pdf.destroy();
+        return textResult.text || '';
+      } catch (e: any) {
+        console.error(
+          `extractText: 解析 PDF 失败 ${file.originalname}:`,
+          e?.message || e,
+        );
+        return '';
+      }
+    }
+
+    if (ext === '.docx') {
+      try {
+        const result = await mammoth.extractRawText({ buffer: file.buffer });
+        return result.value || '';
+      } catch (e: any) {
+        console.error(
+          `extractText: 解析 DOCX 失败 ${file.originalname}:`,
+          e?.message || e,
+        );
+        return '';
+      }
+    }
+
+    if (ext === '.doc') {
+      try {
+        const extractor = new WordExtractor();
+        const doc = await extractor.extract(file.buffer);
+        return doc.getBody() || '';
+      } catch (e: any) {
+        console.error(
+          `extractText: 解析 DOC 失败 ${file.originalname}:`,
+          e?.message || e,
+        );
+        return '';
+      }
+    }
+
+    console.warn(
+      `extractText: 不支持的文件类型 ${file.originalname}（${file.mimetype}），仅存档不向量化`,
+    );
+    return '';
+  }
+
+  // ✅ 修正 multipart 传输中的文件名乱码，覆盖两种常见客户端行为：
+  //   1) 把 UTF-8 字节百分号编码后填到 filename 里（如 %E6%B5%8B%E8%AF%95.docx）；
+  //   2) busboy 默认按 latin1 解析 filename，把浏览器发的 UTF-8 字节错解成乱码。
+  private decodeOriginalName(name: string): string {
+    if (!name) return name;
+
+    // 情况 1：百分号 URL 编码。仅在解码后真的出现非 ASCII 时才信任，
+    // 这样 "50%.pdf"（百分号后非法）这样的合法名字不会被损坏。
+    if (/%[0-9A-Fa-f]{2}/.test(name)) {
+      try {
+        const decoded = decodeURIComponent(name);
+        // 仅当译码后真的含非 ASCII 字符时才信任，避开 "50%.pdf" 这类合法百分号
+        let hasNonAscii = false;
+        for (let i = 0; i < decoded.length; i++) {
+          if (decoded.charCodeAt(i) > 0x7f) {
+            hasNonAscii = true;
+            break;
+          }
+        }
+        if (hasNonAscii) return decoded;
+      } catch {
+        // 译码失败，保留原值，走情况 2 继续判断
+      }
+    }
+
+    // 情况 2：全字符 ≤0xFF 且含高位字节 → 判定为 latin1 错解；
+    //          若含 >0xFF 字符，说明已是正确 Unicode，直接返回。
+    let hasHighByte = false;
+    for (let i = 0; i < name.length; i++) {
+      const c = name.charCodeAt(i);
+      if (c > 0xff) return name;
+      if (c >= 0x80) hasHighByte = true;
+    }
+    if (!hasHighByte) return name;
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(
+        Buffer.from(name, 'latin1'),
+      );
+    } catch {
+      return name;
+    }
+  }
+
+  // ✅ 上传知识库文件：落盘 + 建记录，随后【后台】逐片向量化并写进度
+  async uploadKnowledgeFile(file: Express.Multer.File): Promise<any> {
+    if (!file?.buffer) throw new BadRequestException('没有收到文件');
+    if (file.size > this.MAX_KB_FILE_SIZE) {
+      throw new BadRequestException(
+        `文件过大，最多 ${this.MAX_KB_FILE_SIZE / 1024 / 1024}MB`,
+      );
+    }
+    // ✅ 先修正乱码文件名，后面落库/日志都用修正后的名字
+    file.originalname = this.decodeOriginalName(file.originalname);
+    await mkdir(this.knowledgeDir, { recursive: true });
+
+    const ext = extname(file.originalname).toLowerCase();
+    const storedName = `kb-${Date.now()}-${crypto.randomUUID()}${ext}`;
+    const storedPath = join(this.knowledgeDir, storedName);
+    await writeFile(storedPath, file.buffer);
+
+    const text = await this.extractText(file);
+    const chunks = text.trim() ? this.splitText(text) : [];
+    const limitedChunks = chunks.slice(0, this.MAX_KB_CHUNKS);
+    if (chunks.length > limitedChunks.length) {
+      console.warn(
+        `splitText: 分片数 ${chunks.length} 超过上限 ${this.MAX_KB_CHUNKS}，仅向量化前 ${this.MAX_KB_CHUNKS} 段`,
+      );
+    }
+
+    const record = await this.prisma.knowledgeFile.create({
+      data: {
+        fileName: file.originalname,
+        mimeType: file.mimetype,
+        size: file.size,
+        path: storedPath,
+        // 有文本待向量化则 processing，否则仅存档
+        status: limitedChunks.length ? 'processing' : 'uploaded',
+        totalChunks: limitedChunks.length,
+        processedChunks: 0,
+      },
+    });
+
+    // 二进制/不可解析：仅存档不向量化，直接返回
+    if (!limitedChunks.length) return this.kbPublic(record);
+
+    // ✅ 后台异步向量化，不阻塞上传响应；前端轮询 progress 接口看进度
+    void this.indexKnowledgeFile(record.id, limitedChunks, file.originalname);
+
+    return this.kbPublic(record);
+  }
+
+  // ✅ 后台逐片生成向量并写库，按比例更新 processedChunks 进度
+  private async indexKnowledgeFile(
+    fileId: string,
+    chunks: string[],
+    fileName: string,
+  ): Promise<void> {
+    // 最多约 100 次进度写库，避免每片都 UPDATE
+    const step = Math.max(1, Math.floor(chunks.length / 100));
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        await this.vectorService.addDocument(chunks[i], {
+          fileId,
+          fileName,
+          chunkIndex: i,
+        });
+        const processed = i + 1;
+        if (processed % step === 0 || processed === chunks.length) {
+          await this.prisma.knowledgeFile.update({
+            where: { id: fileId },
+            data: { processedChunks: processed },
+          });
+        }
+      }
+      await this.prisma.knowledgeFile.update({
+        where: { id: fileId },
+        data: { status: 'indexed', processedChunks: chunks.length },
+      });
+    } catch (e: any) {
+      console.error('知识库向量化失败:', e?.message || e);
+      await this.prisma.knowledgeFile.update({
+        where: { id: fileId },
+        data: { status: 'failed' },
+      });
+    }
+  }
+
+  // ✅ 查询单个文件的向量化进度（前端轮询用）
+  async getKnowledgeFileProgress(id: string): Promise<any> {
+    const file: any = await this.prisma.knowledgeFile.findUnique({
+      where: { id },
+    });
+    if (!file) throw new NotFoundException(`KnowledgeFile not found: ${id}`);
+    const total = file.totalChunks || 0;
+    const processed = file.processedChunks || 0;
+    return {
+      id: file.id,
+      fileName: file.fileName,
+      status: file.status,
+      totalChunks: total,
+      processedChunks: processed,
+      progress: total ? Math.round((processed / total) * 100) : 0,
+    };
+  }
+
+  // ✅ 列出知识库文件（不返回服务端存储路径）
+  async listKnowledgeFiles(): Promise<any[]> {
+    const files = await this.prisma.knowledgeFile.findMany({
+      orderBy: { createdAt: 'desc' },
+    });
+    return files.map((f) => this.kbPublic(f));
+  }
+
+  // ✅ 删除知识库文件：删 DB 记录 + 向量切片 + 服务端文件
+  async deleteKnowledgeFile(id: string): Promise<void> {
+    const file = await this.prisma.knowledgeFile.findUnique({ where: { id } });
+    if (!file) throw new NotFoundException(`KnowledgeFile not found: ${id}`);
+    await this.prisma.knowledgeFile.delete({ where: { id } });
+    await this.vectorService.deleteChunksByFile(id);
+    await rm(file.path, { force: true });
   }
 }
