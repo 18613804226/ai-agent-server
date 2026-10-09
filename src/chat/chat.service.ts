@@ -27,6 +27,33 @@ import {
   mergeToolCallDeltas,
   type ToolCallAccumulator,
 } from './tool-call-accumulator.js';
+// ✅ 简易串行锁：同一进程内 TTS 请求排队，避免并发打爆 DashScope QPS
+class SimpleLock {
+  private queue: (() => void)[] = [];
+  private locked = false;
+
+  acquire(): Promise<() => void> {
+    return new Promise((resolve) => {
+      const tryAcquire = () => {
+        if (this.locked) {
+          this.queue.push(tryAcquire);
+          return;
+        }
+        this.locked = true;
+        let released = false;
+        resolve(() => {
+          if (released) return;
+          released = true;
+          this.locked = false;
+          const next = this.queue.shift();
+          if (next) next();
+        });
+      };
+      tryAcquire();
+    });
+  }
+}
+
 // ✅ 模块顶层：整个进程只建一次，所有 TTS 请求复用这套连接
 const dashscopeAgent = new https.Agent({
   keepAlive: true,
@@ -40,6 +67,26 @@ const ttsClient = axios.create({
 });
 
 ffmpeg.setFfmpegPath(ffmpegPath as string);
+
+// ✅ 服务启动时预热 DashScope TTS 连接：提前发一个极短请求建立 TCP+TLS 会话，
+//    后续复用 keepAlive，首请求延迟从 2.2s 降到 ~700ms。
+function warmTtsConnection() {
+  const apiKey = process.env.DASHSCOPE_API_KEY || process.env.OPENAI_API_KEY;
+  if (!apiKey) return;
+  ttsClient
+    .post(
+      'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+      {
+        model: 'qwen3-tts-instruct-flash',
+        input: { text: 'a', voice: 'Cherry' },
+        parameters: { instructions: '语速正常' },
+      },
+      { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 30000 },
+    )
+    .then(() => console.log('🔌 TTS 连接预热完成'))
+    .catch((err) => console.warn('🔌 TTS 连接预热失败:', err?.message || err));
+}
+warmTtsConnection();
 
 // ASR WebSocket 地址：默认全局域名；401/403 时换成业务空间专属：
 // wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference
@@ -65,6 +112,7 @@ const estimateTokens = (text: string): number => {
 export class ChatService {
   private openai: OpenAI;
   private readonly model: string;
+  private ttsLock: SimpleLock;
   private tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     {
       type: 'function',
@@ -132,6 +180,7 @@ export class ChatService {
       apiKey: process.env.OPENAI_API_KEY || '',
       baseURL: process.env.OPENAI_BASE_URL || '',
     });
+    this.ttsLock = new SimpleLock();
   }
 
   // 创建新对话会话
@@ -827,38 +876,62 @@ export class ChatService {
       );
     }
 
-    const t0 = Date.now();
-    const { data } = await ttsClient.post(
-      'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
-      {
-        model: 'qwen3-tts-instruct-flash',
-        input: {
-          text: text.slice(0, 300),
-          voice, // ⚠️ 音色名要换成 Qwen3 系列的（如 Cherry、Ethan），CosyVoice 的音色名不通用
-        },
-        parameters: {
-          instructions: '语速比正常稍快一点，约1.2倍速，语气自然', // Instruct 版用自然语言控制语速，代替原来的 speech_rate
-        },
-      },
-      { headers: { Authorization: `Bearer ${apiKey}` } },
-    );
-    // 返回结构也不同：音频在 data.output.audio.url（或 content），不再是原来的字段，取数据的地方要跟着改
-    console.log('🔊 TTS 首字节延迟:', Date.now() - t0, 'ms');
+    // ✅ 串行锁：同一进程内 TTS 请求排队，避免并发打爆 DashScope QPS
+    const release = await this.ttsLock.acquire();
+    try {
+      const t0 = Date.now();
+      let lastError: any = null;
+      const maxRetries = 3;
 
-    const audioUrl =
-      data?.output?.audio?.url ||
-      data?.output?.audio_url ||
-      data?.output?.url ||
-      data?.audio_url ||
-      data?.url;
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          const { data } = await ttsClient.post(
+            'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+            {
+              model: 'qwen3-tts-instruct-flash',
+              input: {
+                text: text.slice(0, 300),
+                voice,
+              },
+              parameters: {
+                instructions: '语速比正常稍快一点，约1.2倍速，语气自然',
+              },
+            },
+            { headers: { Authorization: `Bearer ${apiKey}` } },
+          );
+          console.log('🔊 TTS 首字节延迟:', Date.now() - t0, 'ms');
 
-    if (!audioUrl) {
-      throw new HttpException(
-        'TTS 未返回音频地址: ' + JSON.stringify(data).slice(0, 200),
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+          const audioUrl =
+            data?.output?.audio?.url ||
+            data?.output?.audio_url ||
+            data?.output?.url ||
+            data?.audio_url ||
+            data?.url;
+
+          if (!audioUrl) {
+            throw new HttpException(
+              'TTS 未返回音频地址: ' + JSON.stringify(data).slice(0, 200),
+              HttpStatus.INTERNAL_SERVER_ERROR,
+            );
+          }
+          return { url: audioUrl };
+        } catch (err: any) {
+          lastError = err;
+          const isRateLimit =
+            err?.response?.data?.code === 'Throttling.RateQuota' ||
+            err?.response?.status === 429;
+          if (!isRateLimit || attempt === maxRetries) throw err;
+          const delay = 1200 * Math.pow(2, attempt - 1); // 1.2s, 2.4s, 4.8s
+          console.warn(
+            `🔊 TTS 限流，${delay}ms 后重试 (第 ${attempt}/${maxRetries} 次)`,
+          );
+          await new Promise((r) => setTimeout(r, delay));
+        }
+      }
+      throw lastError;
+    } finally {
+      release();
     }
-    return { url: audioUrl };
   }
 
   // ✅ 非 wav 音频统一转码成 16k 单声道 pcm wav（ASR 的要求）
