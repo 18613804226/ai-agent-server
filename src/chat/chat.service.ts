@@ -473,37 +473,33 @@ export class ChatService {
       // ✅ 反转回时间正序，再从最旧一条开始装上下文
       historyMessages.reverse();
 
-      const MAX_CONTEXT_TOKENS = 1500;
+      const MAX_CONTEXT_TOKENS = 800;
       const SIMILARITY_THRESHOLD = 0.45;
 
-      const hasRelevantDocs =
-        !isCasualChat &&
-        (relevantDocs as any[]).some(
-          (doc: any) => doc.similarity >= SIMILARITY_THRESHOLD,
-        );
+      const relevantAndPassingDocs = (relevantDocs as any[]).filter(
+        (doc: any) => doc.similarity >= SIMILARITY_THRESHOLD,
+      );
+      const hasRelevantDocs = !isCasualChat && relevantAndPassingDocs.length > 0;
 
-      let context =
-        isCasualChat || !hasRelevantDocs
-          ? ''
-          : (relevantDocs as any[])
-              .map(
-                (doc: any) =>
-                  `【来源：${doc.metadata?.fileName || '知识库'}】\n${doc.content}`,
-              )
-              .join('\n---\n');
+      let context = isCasualChat || !hasRelevantDocs
+        ? ''
+        : relevantAndPassingDocs
+            .map(
+              (doc: any) =>
+                `【来源：${doc.metadata?.fileName || '知识库'}】\n${doc.content}`,
+            )
+            .join('\n---\n');
 
-      if (estimateTokens(context) > MAX_CONTEXT_TOKENS) {
-        let docs = (relevantDocs as any[])
-          .map(
-            (d: any) =>
-              `【来源：${d.metadata?.fileName || '知识库'}】\n${d.content}`,
-          )
-          .join('\n---\n');
-        while (estimateTokens(docs) > MAX_CONTEXT_TOKENS && docs.length > 0) {
-          const lastSep = docs.lastIndexOf('\n---\n');
-          docs = lastSep > 0 ? docs.slice(0, lastSep) : '';
+      const contextTokens = estimateTokens(context);
+      console.log(`📚 [RAG] context 长度: ${contextTokens} tokens (limit: ${MAX_CONTEXT_TOKENS})，docs: ${relevantAndPassingDocs.length}/${relevantDocs.length}`);
+
+      if (contextTokens > MAX_CONTEXT_TOKENS) {
+        const sep = '\n---\n';
+        while (estimateTokens(context) > MAX_CONTEXT_TOKENS && context.length > 0) {
+          const lastSep = context.lastIndexOf(sep);
+          context = lastSep > 0 ? context.slice(0, lastSep) : '';
         }
-        context = docs;
+        console.log(`📚 [RAG] 截断后: ${estimateTokens(context)} tokens`);
       }
 
       const systemPrompt = `你是一个专属的 AI 智能助手。
@@ -521,9 +517,12 @@ export class ChatService {
     1. 只有当用户**明确询问某个城市的天气、气温或空气质量**时，才允许调用 \`fetchWeatherInfo\` 工具。
     2. 如果用户是在进行普通闲聊、询问你的身份、或者讨论技术问题，**严禁调用任何工具**，必须直接进行文字回复！
      
-    【参考资料】：
-     ${context || '知识库中未找到相关内容，请直接回答或告知用户知识库暂无答案。'}
-`;
+     【参考资料】：
+      ${context || '知识库中未找到相关内容，请直接回答或告知用户知识库暂无答案。'}
+      
+      【引用规则】：
+      - 如果你引用了上面的参考资料，请在回答末尾注明来源文件名，格式：【来源：xxx】
+      - 如果没有参考资料或无法回答，请直接说"知识库暂无答案"，不要编造；`;
 
       // ✅ 分配图片名额：当前轮优先，剩余名额从最新的历史消息往前补。
       //   这样「刚才那张红图再帮我看看」能接上，又不会让 token 随对话轮数无限膨胀。
@@ -784,7 +783,7 @@ export class ChatService {
           `，首字 ${firstTurnTtft ?? '-'}ms\n-----------------------------------------`,
       );
 
-      return { fullReply: finalCleanReply, sources: relevantDocs };
+      return { fullReply: finalCleanReply, sources: relevantAndPassingDocs };
     } catch (error: any) {
       const totalDuration = Date.now() - overallStartTime;
 
@@ -1012,14 +1011,15 @@ export class ChatService {
   //    放这里会被当成静态文件外链、且接受任意后缀名容易导到存储型 XSS / 敏感文件公开。
   private readonly knowledgeDir = join(process.cwd(), 'files', 'knowledge');
   private readonly kbTextExts = [
-    '.txt',
-    '.md',
-    '.json',
-    '.csv',
-    '.log',
-    '.xml',
-    '.html',
-    '.htm',
+    '.txt', '.md', '.json', '.csv', '.log', '.xml', '.html', '.htm',
+    // 代码文件
+    '.js', '.jsx', '.ts', '.tsx', '.css', '.scss', '.sass', '.vue', '.svelte',
+    '.py', '.java', '.go', '.rs', '.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.cs',
+    '.php', '.rb', '.swift', '.kt', '.scala', '.lua', '.perl', '.r',
+    '.yml', '.yaml', '.toml', '.ini', '.env', '.conf', '.gitignore',
+    '.sh', '.bash', '.zsh', '.fish',
+    '.sql', '.graphql', '.proto',
+    '.bat', '.ps1',
   ];
   private readonly chunkSize = 500; // 每段最大字数
   private readonly chunkOverlap = 50; // 滑动窗口重叠字数
