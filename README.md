@@ -1,75 +1,79 @@
-# 🤖 AI Agent Server (Toto Backend)
+# AI Agent Server (Toto Backend)
 
-一个基于 **NestJS**、**Prisma** 和 **OpenAI / 通义千问大模型 API** 构建的高性能、全栈 AI 智能助手后端服务。支持 RAG（检索增强生成）、天气工具智能调度、多轮对话历史上下文管理以及极速流式（Stream）响应。
+一个基于 **NestJS**、**Prisma** 和 OpenAI 兼容大模型 API 构建的 AI 助手后端。支持 RAG 知识库、Tavily 实时网页搜索、天气查询、计算器、语音和图片处理、多轮对话及 SSE 流式响应。
 
----
+## 核心技术
 
-## 🚀 核心技术栈
+- NestJS + TypeScript
+- PostgreSQL + Prisma ORM
+- OpenAI SDK（兼容通义千问等 OpenAI 兼容 API）
+- pgvector 语义检索与 RAG
+- Tavily Search 实时网页搜索
+- Server-Sent Events（SSE）流式响应
 
-* **核心框架**: NestJS (TypeScript)
-* **数据库 & ORM**: PostgreSQL + Prisma ORM
-* **大模型集成**: OpenAI SDK (兼容通义千问 `qwen` 系列大模型)
-* **向量检索**: 自研 VectorService（支持语义检索与 RAG 补充资料挂载）
-* **通信协议**: Server-Sent Events / Stream 实时流式传输
+## 功能说明
 
----
+### 实时搜索
 
-## ✨ 核心亮点与优化
+用户查询微博热搜、新闻、股价、汇率等实时信息时，后端识别实时查询并主动调用 Tavily Search，再把本轮搜索摘要和来源链接交给大模型整理。此流程由后端触发，不依赖模型自行决定是否联网，也不是大模型的 Function Calling。
 
-1. **极致响应速度（并发提速）**：
-* 采用 `Promise.all` 将用户消息入库、向量检索（RAG）以及历史消息查询进行**并发执行**，彻底摆脱串行等待，大幅压低首字响应时间（TTFT）。
+实时查询不会使用知识库文档或之前的对话回答作为事实来源。模型应根据本轮搜索结果回答并引用来源链接；若搜索未返回可用结果，会提示“没有获取到实时结果”，不让模型根据旧知识猜测。搜索服务未配置或不可用时会返回明确错误。
 
+当前通过关键词识别实时查询，包括“实时、现在、今天、最新、热搜、热榜、新闻、微博、股价、汇率、TOP N”等。
 
-2. **意图识别与智能工具调度（Tool Calling）**：
-* 内置轻量正则意图拦截与大模型两阶段决策机制。普通闲聊或身份问答直接跳过工具判断走极速流；当用户明确查询天气时，按需动态挂载 `fetchWeatherInfo` 工具，防止幻觉调用。
+> Tavily 搜索的是可检索的公开网页，不保证微博等平台的官方榜单完整性或实时排名。若需要准确的官方 TOP 榜单，应接入对应平台的官方或授权数据接口。
 
+### Function Calling
 
-3. **安全严谨的网关协议对齐**：
-* 自动过滤并加固大模型对话历史，强制校验并确保发送给大模型的 `messages` 列表末尾永远以 `user` 角色收尾，完美规避各大模型网关常见的 `400 InvalidParameter` 报错。
+聊天接口还支持模型按需调用 `fetchWeatherInfo` 天气查询和 `calculator` 计算器。这些函数工具与上面的 Tavily 后端搜索相互独立。
 
+### 知识库与流式对话
 
-4. **稳定可靠的中断与错误处理**：
-* 支持前端一键“停止生成”（通过 `AbortController` 联动拦截），并在生成流中实时侦测客户端断开状态，避免无用计算与数据库脏数据写入。
+- 支持上传知识库文件、生成向量并进行语义检索；匹配的资料作为 RAG 上下文提供给模型。
+- 聊天支持多轮历史消息、图片输入和 SSE 流式输出。
+- 支持客户端中断时取消上游模型请求。
+- 提供语音识别和语音合成接口。
 
-
-
----
-
-## 📦 项目结构
+## 项目结构
 
 ```text
 src/
-├── chat/               # 聊天核心业务模块（包含 Stream 流式、工具调度）
-├── vector/             # 向量检索与 RAG 知识库挂载服务
-├── prisma/             # 数据库连接与 Prisma Client 管理
+├── chat/               # 聊天、实时搜索、函数工具、知识库和语音处理
+├── vector/             # 向量生成、存储与语义检索
+├── prisma/             # Prisma 数据库服务
 ├── app.module.ts       # 根模块
 └── main.ts             # 应用入口
-
 ```
 
----
+## 快速上手
 
-## 🛠️ 快速上手
+确保本地已安装 Node.js 和 PostgreSQL。
 
-确保本地已安装 Node.js、PostgreSQL 数据库。
-可使用pnpm
 ```bash
-# 1. 安装项目依赖
+# 安装依赖
 npm install
 
-# 2. 配置环境变量
-# 在项目根目录下创建 .env 文件，配置数据库连接 DATABASE_URL 及大模型 API Key
-# 实时联网搜索需额外配置 Tavily API Key：TAVILY_API_KEY="你的_Tavily_API_Key"
+# 在项目根目录创建 .env，并填写实际配置
+DATABASE_URL="你的 PostgreSQL 连接字符串"
+OPENAI_API_KEY="你的大模型 API Key"
+OPENAI_BASE_URL="你的 OpenAI 兼容 API 地址"
+TAVILY_API_KEY="你的 Tavily API Key"
 
-# 3. 执行数据库迁移与 Prisma 客户端生成
+# 执行数据库迁移并生成 Prisma Client
 npx prisma migrate dev
 npx prisma generate
 
-# 4. 启动后端开发服务器
+# 启动开发服务器
 npm run start:dev
-
 ```
 
-当用户查询微博热搜、新闻、股价等实时信息时，后端会先调用 Tavily Search，
-再将本轮搜索摘要和来源链接交给大模型整理；实时查询不会使用知识库或历史回答。
-如果 Tavily 没有返回结果，会直接提示“没有获取到实时结果”，不会让模型猜测。
+`TAVILY_API_KEY` 可在 [Tavily](https://tavily.com/) 注册并创建。实时联网搜索必须配置该密钥；不要将真实密钥提交到版本库或公开分享。
+
+## 常用命令
+
+```bash
+npm run build
+npm run start:dev
+npm test
+npm run lint
+```
