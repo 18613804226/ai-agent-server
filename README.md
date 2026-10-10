@@ -59,6 +59,7 @@ npm install
 
 # 2. 配置环境变量
 # 在项目根目录下创建 .env 文件，配置数据库连接 DATABASE_URL 及大模型 API Key
+# 实时联网搜索需额外配置 Tavily API Key：TAVILY_API_KEY="你的_Tavily_API_Key"
 
 # 3. 执行数据库迁移与 Prisma 客户端生成
 npx prisma migrate dev
@@ -68,3 +69,7 @@ npx prisma generate
 npm run start:dev
 
 ```
+
+当用户查询微博热搜、新闻、股价等实时信息时，后端会先调用 Tavily Search，
+再将本轮搜索摘要和来源链接交给大模型整理；实时查询不会使用知识库或历史回答。
+如果 Tavily 没有返回结果，会直接提示“没有获取到实时结果”，不会让模型猜测。
