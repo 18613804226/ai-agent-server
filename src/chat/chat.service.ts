@@ -73,21 +73,16 @@ const ttsClient = axios.create({
 
 ffmpeg.setFfmpegPath(ffmpegPath as string);
 
-// ✅ 服务启动时预热 DashScope TTS 连接：提前发一个极短请求建立 TCP+TLS 会话，
-//    后续复用 keepAlive，首请求延迟从 2.2s 降到 ~700ms。
+// ✅ 服务启动时预热 DashScope TTS 连接：发 HEAD 请求建立 TCP+TLS 会话，
+//    避免预热时调用生成接口或产生 TTS 费用。
 function warmTtsConnection() {
   const apiKey = process.env.DASHSCOPE_API_KEY || process.env.OPENAI_API_KEY;
   if (!apiKey) return;
   ttsClient
-    .post(
-      'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
-      {
-        model: 'qwen3-tts-instruct-flash',
-        input: { text: 'a', voice: 'Cherry' },
-        parameters: { instructions: '语速正常' },
-      },
-      { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 30000 },
-    )
+    .head('https://dashscope.aliyuncs.com/', {
+      timeout: 30000,
+      validateStatus: () => true,
+    })
     .then(() => console.log('🔌 TTS 连接预热完成'))
     .catch((err) => console.warn('🔌 TTS 连接预热失败:', err?.message || err));
 }
@@ -220,12 +215,52 @@ export class ChatService {
   }
 
   async getSessionDetail(id: string) {
-    return this.prisma.chatSession.findUnique({
+    const session = await this.prisma.chatSession.findUnique({
       where: { id },
       include: {
         messages: { orderBy: { createdAt: 'asc' } },
       },
     });
+    if (!session) return null;
+
+    const sourceIds = [
+      ...new Set(
+        session.messages.flatMap((message: any) =>
+          Array.isArray(message.sources)
+            ? message.sources
+                .map((source: any) => source?.fileId)
+                .filter(
+                  (fileId: unknown): fileId is string =>
+                    typeof fileId === 'string',
+                )
+            : [],
+        ),
+      ),
+    ];
+    const sourceFiles = sourceIds.length
+      ? await this.prisma.knowledgeFile.findMany({
+          where: { id: { in: sourceIds } },
+          select: { id: true, enabled: true, status: true },
+        })
+      : [];
+    const sourceFilesById = new Map(sourceFiles.map((file) => [file.id, file]));
+
+    return {
+      ...session,
+      messages: session.messages.map((message: any) => ({
+        ...message,
+        sources: Array.isArray(message.sources)
+          ? message.sources.map((source: any) => {
+              const currentFile = sourceFilesById.get(source?.fileId);
+              return {
+                ...source,
+                currentlyEnabled: currentFile?.enabled ?? false,
+                currentStatus: currentFile?.status ?? 'deleted',
+              };
+            })
+          : message.sources,
+      })),
+    };
   }
 
   // ✅ 接收前端发送的图片（data URL / base64），落盘后返回可访问的 URL，供大模型识别
@@ -436,7 +471,10 @@ export class ChatService {
   async sendMessageStream(
     sessionId: string,
     userQuery: string,
-    onChunk: (type: 'thought' | 'content' | 'error', text: string) => void,
+    onChunk: (
+      type: 'thought' | 'content' | 'error' | 'sources',
+      text: string | any[],
+    ) => void,
     images?: string[],
     signal?: AbortSignal,
     fileIds?: string[],
@@ -532,7 +570,7 @@ export class ChatService {
       if (liveInfoQuery && webSearchResults.length === 0) {
         const reply = '没有获取到实时结果，暂时无法可靠回答这个问题。';
         await this.prisma.message.create({
-          data: { sessionId, role: 'assistant', content: reply },
+          data: { sessionId, role: 'assistant', content: reply, sources: [] },
         });
         await this.prisma.chatSession.update({
           where: { id: sessionId },
@@ -551,6 +589,19 @@ export class ChatService {
       const relevantAndPassingDocs = (relevantDocs as any[]).filter(
         (doc: any) => doc.similarity >= SIMILARITY_THRESHOLD,
       );
+      const replySources = [
+        ...new Map(
+          relevantAndPassingDocs
+            .filter((doc: any) => typeof doc.metadata?.fileId === 'string')
+            .map((doc: any) => [
+              doc.metadata.fileId,
+              {
+                fileId: doc.metadata.fileId,
+                fileName: doc.metadata.fileName || '知识库',
+              },
+            ]),
+        ).values(),
+      ];
       const hasRelevantDocs =
         !isCasualChat && relevantAndPassingDocs.length > 0;
 
@@ -584,6 +635,29 @@ export class ChatService {
       const webSearchContext = liveInfoQuery
         ? formatWebSearchContext(webSearchResults)
         : '';
+      const historySourceIds = [
+        ...new Set(
+          historyMessages.flatMap((message: any) =>
+            Array.isArray(message.sources)
+              ? message.sources
+                  .map((source: any) => source?.fileId)
+                  .filter(
+                    (fileId: unknown): fileId is string =>
+                      typeof fileId === 'string',
+                  )
+              : [],
+          ),
+        ),
+      ];
+      const historySourceFiles = historySourceIds.length
+        ? await this.prisma.knowledgeFile.findMany({
+            where: { id: { in: historySourceIds } },
+            select: { id: true, enabled: true },
+          })
+        : [];
+      const historySourceEnabled = new Map(
+        historySourceFiles.map((file) => [file.id, file.enabled]),
+      );
       const systemPrompt = `你是一个专属的 AI 智能助手。
     - 你的名字叫toto。
     - 当前时间：${new Intl.DateTimeFormat('zh-CN', {
@@ -601,6 +675,9 @@ export class ChatService {
     3. 回答实时信息时，对事实逐条用 Markdown 链接引用对应结果的原始 URL；不得编造来源或链接。
     4. 天气问题仍可按需调用 \`fetchWeatherInfo\`；其他工具规则不变。
     5. 普通闲聊、身份问题和不依赖实时信息的问题直接回答，不要为了搜索而搜索。
+    6. 本轮【参考资料】仅代表本轮实际检索到的当前启用文档；历史对话中的旧回答不等于本轮参考资料。
+    7. 历史回答后附有来源状态标注：当前已停用或已删除的来源不能作为当前知识库依据；来源未记录的旧回答不能推断其来自哪个文档。
+    8. 若用户追问的内容只存在于旧回答而本轮没有检索到相关资料，应说明它来自此前对话且本轮未能从当前启用资料重新核实。仅在相关时说明，不要每轮重复提醒。
      
      【参考资料】：
       ${context || '本轮没有提供知识库参考资料。'}
@@ -682,7 +759,31 @@ export class ChatService {
               } as any;
             }
           }
-          return { role, content: msg.content } as any;
+          const sourceNote =
+            role === 'assistant'
+              ? Array.isArray(msg.sources)
+                ? msg.sources.length
+                  ? `\n\n【历史回答来源（非本轮检索）】${msg.sources
+                      .map((source: any) => {
+                        const enabled = historySourceEnabled.get(
+                          source?.fileId,
+                        );
+                        const status =
+                          enabled === undefined
+                            ? '文档已删除'
+                            : enabled
+                              ? '当前启用，但本轮未重新检索'
+                              : '当前已停用';
+                        return `${source?.fileName || '知识库'}（${status}）`;
+                      })
+                      .join('、')}`
+                  : '\n\n【历史回答来源：当时未使用知识库资料】'
+                : '\n\n【历史回答来源未记录，无法确认是否引用过知识库资料】'
+              : '';
+          return {
+            role,
+            content: `${msg.content ?? ''}${sourceNote}`,
+          } as any;
         },
       );
       // 从最新一条往前装，装不下就停（旧消息直接丢）
@@ -859,8 +960,20 @@ export class ChatService {
 
       if (finalCleanReply) {
         await this.prisma.message.create({
-          data: { sessionId, role: 'assistant', content: finalCleanReply },
+          data: {
+            sessionId,
+            role: 'assistant',
+            content: finalCleanReply,
+            sources: replySources,
+          },
         });
+        onChunk(
+          'sources',
+          replySources.map((source) => ({
+            ...source,
+            usedInThisReply: true,
+          })),
+        );
       }
 
       await this.prisma.chatSession.update({
@@ -1453,6 +1566,21 @@ export class ChatService {
       orderBy: { createdAt: 'desc' },
     });
     return files.map((f) => this.kbPublic(f));
+  }
+
+  async setKnowledgeFileEnabled(id: string, enabled: unknown): Promise<any> {
+    if (typeof enabled !== 'boolean') {
+      throw new BadRequestException('"enabled" 必须是布尔值');
+    }
+
+    const file = await this.prisma.knowledgeFile.findUnique({ where: { id } });
+    if (!file) throw new NotFoundException(`KnowledgeFile not found: ${id}`);
+
+    const updated = await this.prisma.knowledgeFile.update({
+      where: { id },
+      data: { enabled },
+    });
+    return this.kbPublic(updated);
   }
 
   // ✅ 删除知识库文件：删 DB 记录 + 向量切片 + 服务端文件

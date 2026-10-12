@@ -37,14 +37,19 @@ describe('知识库上传：中文文件名 + 进度', () => {
       create: async ({ data }: any) => {
         const rec = {
           id: 'kb-test-' + Math.random().toString(16).slice(2, 8),
+          enabled: true,
           ...data,
         };
         lastCreated = rec;
         createdPaths.push(data.path);
         return rec;
       },
-      update: async () => lastCreated,
-      findUnique: async () => lastCreated,
+      update: async ({ data }: any) => {
+        lastCreated = { ...lastCreated, ...data };
+        return lastCreated;
+      },
+      findUnique: async ({ where }: any) =>
+        where.id === lastCreated?.id ? lastCreated : null,
       findMany: async () => [lastCreated],
       delete: async () => ({}),
     },
@@ -94,6 +99,7 @@ describe('知识库上传：中文文件名 + 进度', () => {
     expect(res.status).toBe(201);
     expect(res.body.fileName).toBe(CN);
     expect(res.body.status).toBe('processing');
+    expect(res.body.enabled).toBe(true);
     expect(res.body.totalChunks).toBeGreaterThanOrEqual(1);
     expect(res.body.processedChunks).toBe(0);
   });
@@ -114,5 +120,33 @@ describe('知识库上传：中文文件名 + 进度', () => {
     const res = await upload(percent);
     expect(res.status).toBe(201);
     expect(res.body.fileName).toBe(CN);
+  });
+
+  it('可以启用或禁用单个知识库文件', async () => {
+    const res = await request(app.getHttpServer())
+      .put(`/chat/knowledge/files/${lastCreated.id}/enabled`)
+      .send({ enabled: false });
+
+    expect(res.status).toBe(200);
+    expect(res.body.enabled).toBe(false);
+
+    const listed = await request(app.getHttpServer()).get(
+      '/chat/knowledge/files',
+    );
+    expect(listed.body[0].enabled).toBe(false);
+
+    const reenabled = await request(app.getHttpServer())
+      .put(`/chat/knowledge/files/${lastCreated.id}/enabled`)
+      .send({ enabled: true });
+    expect(reenabled.status).toBe(200);
+    expect(reenabled.body.enabled).toBe(true);
+  });
+
+  it('拒绝非布尔值的启用状态', async () => {
+    const res = await request(app.getHttpServer())
+      .put(`/chat/knowledge/files/${lastCreated.id}/enabled`)
+      .send({ enabled: 'false' });
+
+    expect(res.status).toBe(400);
   });
 });

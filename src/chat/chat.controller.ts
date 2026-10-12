@@ -100,6 +100,14 @@ export class ChatController {
     return this.chatService.getKnowledgeFileProgress(id);
   }
 
+  @Put('knowledge/files/:id/enabled')
+  async setKnowledgeFileEnabled(
+    @Param('id') id: string,
+    @Body('enabled') enabled: unknown,
+  ) {
+    return this.chatService.setKnowledgeFileEnabled(id, enabled);
+  }
+
   @Delete('knowledge/files/:id')
   @HttpCode(204)
   async deleteKnowledgeFile(@Param('id') id: string) {
@@ -133,11 +141,14 @@ export class ChatController {
       .sendMessageStream(
         sessionId,
         body.query,
-        (type, text) => {
+        (type, content) => {
           // 断开了就别再往已经关闭的响应里写
           if (!isClientDisconnected) {
             subject$.next({
-              data: { type, content: text },
+              data:
+                type === 'sources'
+                  ? { type, sources: content }
+                  : { type, content },
             } as MessageEvent);
           }
         },

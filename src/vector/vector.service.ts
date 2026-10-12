@@ -76,11 +76,14 @@ export class VectorService {
 
     // 使用 pgvector 的余弦距离操作符 (<=>) 进行高性能相似度计算
     const results = await this.prisma.$queryRaw`
-      SELECT id, content, metadata, 
-             1 - (embedding <=> ${vectorString}::vector) as similarity
-      FROM "DocumentChunk"
-      WHERE embedding IS NOT NULL
-      ORDER BY embedding <=> ${vectorString}::vector ASC
+      SELECT dc.id, dc.content, dc.metadata,
+             1 - (dc.embedding <=> ${vectorString}::vector) as similarity
+      FROM "DocumentChunk" dc
+      JOIN "KnowledgeFile" k
+        ON k.id = dc.metadata->>'fileId'
+       AND k.enabled = true
+      WHERE dc.embedding IS NOT NULL
+      ORDER BY dc.embedding <=> ${vectorString}::vector ASC
       LIMIT ${limit};
     `;
 
@@ -97,12 +100,15 @@ export class VectorService {
     const vectorString = `[${queryEmbedding.join(',')}]`;
 
     const results = await this.prisma.$queryRaw`
-      SELECT id, content, metadata,
-             1 - (embedding <=> ${vectorString}::vector) as similarity
-      FROM "DocumentChunk"
-      WHERE embedding IS NOT NULL
-        AND (metadata->>'fileId') IN (${Prisma.join(fileIds, ',')})
-      ORDER BY embedding <=> ${vectorString}::vector ASC
+      SELECT dc.id, dc.content, dc.metadata,
+             1 - (dc.embedding <=> ${vectorString}::vector) as similarity
+      FROM "DocumentChunk" dc
+      JOIN "KnowledgeFile" k
+        ON k.id = dc.metadata->>'fileId'
+       AND k.enabled = true
+      WHERE dc.embedding IS NOT NULL
+        AND (dc.metadata->>'fileId') IN (${Prisma.join(fileIds, ',')})
+      ORDER BY dc.embedding <=> ${vectorString}::vector ASC
       LIMIT ${limit};
     `;
     return results as any[];

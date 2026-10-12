@@ -30,6 +30,7 @@
 ### 知识库与流式对话
 
 - 支持上传知识库文件、生成向量并进行语义检索；匹配的资料作为 RAG 上下文提供给模型。
+- 知识库文件可单独启用或禁用；禁用后文件和向量切片保留，但不会参与任何向量检索。
 - 聊天支持多轮历史消息、图片输入和 SSE 流式输出。
 - 支持客户端中断时取消上游模型请求。
 - 提供语音识别和语音合成接口。
@@ -68,6 +69,23 @@ npm run start:dev
 ```
 
 `TAVILY_API_KEY` 可在 [Tavily](https://tavily.com/) 注册并创建。实时联网搜索必须配置该密钥；不要将真实密钥提交到版本库或公开分享。
+
+### 知识库文档检索开关
+
+查看知识库文件时，`GET /chat/knowledge/files` 会返回每个文件的 `enabled` 状态。使用下面的接口单独切换文件是否参与检索：
+
+```http
+PUT /chat/knowledge/files/{id}/enabled
+Content-Type: application/json
+
+{"enabled": false}
+```
+
+`enabled` 必须是布尔值；新上传的文件默认启用。修改 Prisma schema 后，若数据库尚未包含所需字段，请运行 `npx prisma db push` 同步数据库结构。
+
+聊天回答会记录本轮实际引用的知识库文件。`GET /chat/sessions/{id}` 返回的消息包含 `sources`：每个来源保留文件 ID 和回答时的文件名，并提供当前 `currentlyEnabled` 与 `currentStatus`。删除或停用文档不会改写旧回答；后续追问时，模型会区分历史回答与本轮检索资料，并提示来源当前已停用、已删除或未能重新核实。流式聊天完成时还会发送 `type: "sources"` 事件，`sources` 数组包含本轮引用来源。
+
+在此功能上线前生成的旧消息没有来源快照，`sources` 仍为 `null`；其原始来源无法从历史文本中可靠恢复，因此会标注为来源未记录，而不会猜测。
 
 ## 常用命令
 
