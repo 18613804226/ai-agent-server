@@ -174,9 +174,7 @@ export class ChatService {
     private vectorService: VectorService,
   ) {
     this.model =
-      process.env.CHAT_MODEL ||
-      process.env.OPENAI_MODEL ||
-      'qwen3.7-flash-2026-07-15';
+      process.env.CHAT_MODEL || process.env.OPENAI_MODEL || 'qwen3.7-flash';
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY || '',
       baseURL: process.env.OPENAI_BASE_URL || '',
@@ -1085,7 +1083,9 @@ export class ChatService {
           const { data } = await ttsClient.post(
             'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
             {
-              model: 'qwen3-tts-instruct-flash',
+              // ⚠️ qwen3-tts-instruct-flash 在部分账号/区域不存在（404 Model not exist），
+              //    实测可用的是 qwen3-tts-flash；可用 TTS_MODEL 显式覆盖
+              model: process.env.TTS_MODEL || 'qwen3-tts-flash',
               input: {
                 text: text.slice(0, 300),
                 voice,
@@ -1114,10 +1114,26 @@ export class ChatService {
           return { url: audioUrl };
         } catch (err: any) {
           lastError = err;
-          const isRateLimit =
-            err?.response?.data?.code === 'Throttling.RateQuota' ||
-            err?.response?.status === 429;
-          if (!isRateLimit || attempt === maxRetries) throw err;
+          // ⚠️ 绝不能直接把 AxiosError 交给 console.error：它会展开 config.headers，
+          //    把 Authorization 里的 API Key 完整打进日志（已因此泄露过一次）。
+          //    只保留状态码 + 服务端错误码 + 文案。
+          const status = err?.response?.status;
+          const code = err?.response?.data?.code;
+          const message = err?.response?.data?.message || err?.message;
+          console.error(
+            `🔊 TTS 请求失败: status=${status ?? '-'} code=${code ?? '-'} ${message}`,
+          );
+          const isRateLimit = code === 'Throttling.RateQuota' || status === 429;
+          if (!isRateLimit || attempt === maxRetries) {
+            // 重试耗尽/非限流错误：把原始 AxiosError 换成可读的 HTTP 异常，
+            // 否则前端只拿到 500 Internal Server Error，无从判断原因
+            throw new HttpException(
+              `TTS 合成失败：${message || '上游服务异常'}`,
+              status && status >= 400 && status < 600
+                ? (status as HttpStatus)
+                : HttpStatus.BAD_GATEWAY,
+            );
+          }
           const delay = 1200 * Math.pow(2, attempt - 1); // 1.2s, 2.4s, 4.8s
           console.warn(
             `🔊 TTS 限流，${delay}ms 后重试 (第 ${attempt}/${maxRetries} 次)`,
