@@ -6,6 +6,7 @@ import { ChatController } from './chat.controller';
 import { ChatService } from './chat.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { VectorService } from '../vector/vector.service';
+import { AuthService } from '../auth/auth.service';
 
 const CN = '测试文档-年度报告.txt';
 
@@ -71,6 +72,11 @@ describe('知识库上传：中文文件名 + 进度', () => {
         ChatService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: VectorService, useValue: mockVector },
+        // ✅ 本测试只验证上传/进度逻辑，鉴权放行
+        {
+          provide: AuthService,
+          useValue: { assertQuota: async () => {}, recordUsage: async () => {} },
+        },
       ],
     }).compile();
     app = moduleRef.createNestApplication();

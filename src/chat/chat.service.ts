@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { VectorService } from '../vector/vector.service.js';
@@ -183,38 +184,64 @@ export class ChatService {
     this.ttsLock = new SimpleLock();
   }
 
-  // 创建新对话会话
-  async createSession(title?: string) {
+  // 创建新对话会话（deviceId 为空时保留旧行为，方便内部/测试调用）
+  async createSession(deviceId?: string, title?: string) {
     const MAX_SESSIONS = 20;
     const existingSessions = await this.prisma.chatSession.findMany({
+      // ✅ 每设备独立限额，不再全局共享 20 条
+      ...(deviceId ? { where: { deviceId } } : {}),
       orderBy: { createdAt: 'asc' },
     });
     if (existingSessions.length >= MAX_SESSIONS) {
-      const oldestSession = existingSessions[0];
-      await this.prisma.chatSession.delete({
-        where: { id: oldestSession.id },
+      // ✅ 一次删够差额：并发创建/历史数据可能已超上限，只删一条会「删一加一」永远回不到 20 以内
+      const overflow = existingSessions.length - MAX_SESSIONS + 1;
+      const oldestIds = existingSessions
+        .slice(0, overflow)
+        .map((session) => session.id);
+      // 用 deleteMany：并发下同一会话被抢先删掉也不会抛 P2025 把整个请求带崩
+      await this.prisma.chatSession.deleteMany({
+        where: { id: { in: oldestIds } },
       });
     }
     return this.prisma.chatSession.create({
-      data: { title: title || '' },
+      data: { title: title || '', deviceId: deviceId || null },
     });
   }
 
-  async updateSessionTitle(id: string, title: string) {
+  // ✅ 校验会话归属：传了 deviceId 就要求会话属于该设备，否则 403
+  private async assertSessionOwner(id: string, deviceId?: string) {
+    const session = await this.prisma.chatSession.findUnique({
+      where: { id },
+      select: { id: true, deviceId: true },
+    });
+    if (!session) {
+      throw new NotFoundException(`ChatSession not found: ${id}`);
+    }
+    if (deviceId && session.deviceId && session.deviceId !== deviceId) {
+      throw new ForbiddenException('无权访问该会话');
+    }
+    return session;
+  }
+
+  async updateSessionTitle(id: string, title: string, deviceId?: string) {
+    await this.assertSessionOwner(id, deviceId);
     return this.prisma.chatSession.update({ where: { id }, data: { title } });
   }
 
-  async deleteSession(id: string) {
+  async deleteSession(id: string, deviceId?: string) {
+    await this.assertSessionOwner(id, deviceId);
     return this.prisma.chatSession.delete({ where: { id } });
   }
 
-  async getSessions() {
+  async getSessions(deviceId?: string) {
     return this.prisma.chatSession.findMany({
+      // ✅ 只看本设备的会话（老数据 deviceId 为空：普通用户看不到，管理员可见）
+      ...(deviceId ? { where: { deviceId } } : {}),
       orderBy: { updatedAt: 'desc' },
     });
   }
 
-  async getSessionDetail(id: string) {
+  async getSessionDetail(id: string, deviceId?: string) {
     const session = await this.prisma.chatSession.findUnique({
       where: { id },
       include: {
@@ -222,6 +249,10 @@ export class ChatService {
       },
     });
     if (!session) return null;
+    // ✅ 传了 deviceId 才校验归属（老会话 deviceId 为空视为公共，兼容历史数据）
+    if (deviceId && session.deviceId && session.deviceId !== deviceId) {
+      throw new ForbiddenException('无权访问该会话');
+    }
 
     const sourceIds = [
       ...new Set(
@@ -848,6 +879,7 @@ export class ChatService {
       const MAX_TOOL_ROUNDS = 4;
       let rawFullReply = '';
       let firstTurnTtft: number | null = null;
+      let usedTokens = 0; // 累加各轮（含工具轮）的 token 消耗，用于计费统计
 
       for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
         if (aborted()) return;
@@ -878,6 +910,12 @@ export class ChatService {
 
           if (roundTtft === null) roundTtft = Date.now() - streamStartTime;
           if (firstTurnTtft === null) firstTurnTtft = roundTtft;
+
+          // ✅ stream_options.include_usage 的用量只在最后一个 chunk 下发，累加起来
+          const chunkUsage = (chunk as any).usage;
+          if (chunkUsage?.total_tokens) {
+            usedTokens += chunkUsage.total_tokens;
+          }
 
           const delta =
             (chunk as any).choices?.[0]?.delta || (chunk as any).message || {};
@@ -987,7 +1025,11 @@ export class ChatService {
           `，首字 ${firstTurnTtft ?? '-'}ms\n-----------------------------------------`,
       );
 
-      return { fullReply: finalCleanReply, sources: relevantAndPassingDocs };
+      return {
+        fullReply: finalCleanReply,
+        sources: relevantAndPassingDocs,
+        tokens: usedTokens,
+      };
     } catch (error: any) {
       const totalDuration = Date.now() - overallStartTime;
 
@@ -1001,7 +1043,7 @@ export class ChatService {
         console.log(
           `⏹️ [性能监控] 客户端已断开，提前结束（累计 ${totalDuration}ms）`,
         );
-        return { fullReply: '', sources: [] };
+        return { fullReply: '', sources: [], tokens: 0 };
       }
 
       console.error('sendMessageStream 执行出错:', error);

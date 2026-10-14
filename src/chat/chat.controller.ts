@@ -16,36 +16,50 @@ import {
 } from '@nestjs/common'; // 💡 1. 引入 Req
 import type { Request, Response } from 'express'; // 💡 2. 引入 Express 的 Request 类型
 import { ChatService } from './chat.service.js';
+import { AuthService } from '../auth/auth.service.js';
+import { CurrentDevice } from '../auth/current-device.decorator.js';
 import { Observable, Subject } from 'rxjs';
 import multer from 'multer';
 import { FileInterceptor } from '@nestjs/platform-express';
 @Controller('chat')
 export class ChatController {
-  constructor(private readonly chatService: ChatService) {}
+  constructor(
+    private readonly chatService: ChatService,
+    private readonly authService: AuthService,
+  ) {}
 
   @Post('session')
-  async createSession(@Body('title') title?: string) {
-    return this.chatService.createSession(title);
+  async createSession(
+    @CurrentDevice() device: any,
+    @Body('title') title?: string,
+  ) {
+    // ✅ 会话绑定当前登录设备
+    return this.chatService.createSession(device?.id, title);
   }
   @Get('sessions')
-  async getSessions() {
-    return this.chatService.getSessions();
+  async getSessions(@CurrentDevice() device: any) {
+    // ✅ 只返回本设备的会话
+    return this.chatService.getSessions(device?.id);
   }
   @Get('sessions/:id')
-  async getSessionDetail(@Param('id') id: string) {
-    return this.chatService.getSessionDetail(id);
+  async getSessionDetail(
+    @CurrentDevice() device: any,
+    @Param('id') id: string,
+  ) {
+    return this.chatService.getSessionDetail(id, device?.id);
   }
   @Put('sessions/:id')
   async updateSessionTitle(
+    @CurrentDevice() device: any,
     @Param('id') id: string,
     @Body('title') title: string,
   ) {
-    return this.chatService.updateSessionTitle(id, title);
+    return this.chatService.updateSessionTitle(id, title, device?.id);
   }
   @Delete('sessions/:id')
-  async deleteSession(@Param('id') id: string) {
+  async deleteSession(@CurrentDevice() device: any, @Param('id') id: string) {
     // 必须通过注入的 chatService 去调，不能直接用 this.prisma
-    return this.chatService.deleteSession(id);
+    return this.chatService.deleteSession(id, device?.id);
   }
 
   @Post('tts')
@@ -73,7 +87,7 @@ export class ChatController {
     return this.chatService.speechToText(file.buffer, file.mimetype);
   }
 
-  // ---------------- 知识库 ----------------
+  // ---------------- 知识库（全局共享，登录即可用） ----------------
   @Post('knowledge/upload')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -118,10 +132,14 @@ export class ChatController {
   @HttpCode(200) // 💡 1. 强制让 POST 请求返回 200 OK
   @Sse()
   async streamMessage(
+    @CurrentDevice() device: any,
     @Param('id') sessionId: string,
     @Body() body: { query: string; images?: string[]; fileIds?: string[] },
     @Res({ passthrough: true }) res: Response,
   ): Promise<Observable<MessageEvent>> {
+    // ✅ 发言前校验每日配额（超限抛 429，不计费）
+    await this.authService.assertQuota(device);
+
     const subject$ = new Subject<MessageEvent>();
     let isClientDisconnected = false;
     // ✅ 客户端一断开就 abort 掉上游大模型请求，否则模型还会继续生成，白烧 token
@@ -156,8 +174,10 @@ export class ChatController {
         abortController.signal,
         body.fileIds, // 知识库文件 ID 列表，用于限定 RAG 检索范围
       )
-      .then(() => {
+      .then((result) => {
         if (!isClientDisconnected) {
+          // ✅ 完成后记账：次数 +1、token 累加（客户端断开不重复计）
+          void this.authService.recordUsage(device.id, result?.tokens ?? 0);
           subject$.complete();
         }
       })

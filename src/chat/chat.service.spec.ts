@@ -62,3 +62,48 @@ describe('ChatService session source metadata', () => {
     expect(prisma.knowledgeFile.findMany).not.toHaveBeenCalled();
   });
 });
+
+describe('ChatService createSession 超额清理', () => {
+  it('已超上限时一次删够差额（23 → 删 4 → 建 1 = 20）', async () => {
+    const existing = Array.from({ length: 23 }, (_, i) => ({
+      id: `s-${i}`,
+      createdAt: new Date(2026, 0, i + 1),
+    }));
+    const prisma = {
+      chatSession: {
+        findMany: vi.fn().mockResolvedValue(existing),
+        deleteMany: vi.fn().mockResolvedValue({ count: 4 }),
+        create: vi.fn().mockResolvedValue({ id: 's-new' }),
+      },
+    };
+    const service = new ChatService(prisma as never, {} as never);
+
+    await service.createSession('device-1');
+
+    expect(prisma.chatSession.findMany).toHaveBeenCalledWith({
+      where: { deviceId: 'device-1' },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(prisma.chatSession.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: ['s-0', 's-1', 's-2', 's-3'] } },
+    });
+    expect(prisma.chatSession.create).toHaveBeenCalledWith({
+      data: { title: '', deviceId: 'device-1' },
+    });
+  });
+
+  it('未到上限时不删任何会话', async () => {
+    const prisma = {
+      chatSession: {
+        findMany: vi.fn().mockResolvedValue([{ id: 's-1' }]),
+        deleteMany: vi.fn(),
+        create: vi.fn().mockResolvedValue({ id: 's-new' }),
+      },
+    };
+    const service = new ChatService(prisma as never, {} as never);
+
+    await service.createSession('device-1');
+
+    expect(prisma.chatSession.deleteMany).not.toHaveBeenCalled();
+  });
+});

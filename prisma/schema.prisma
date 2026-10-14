@@ -9,9 +9,46 @@ generator client {
 model ChatSession {
     id        String    @id @default(uuid())
     title     String    @default("新对话")
+    deviceId  String?
+    device    Device?   @relation(fields: [deviceId], references: [id], onDelete: SetNull)
     createdAt DateTime  @default(now())
     updatedAt DateTime  @updatedAt
     messages  Message[]
+}
+
+// ✅ 设备表：前端生成的 deviceId 对应一条记录，登录后下发并记录 token
+//    role=user 为普通用户（按日配额），role=admin 为管理员（无限额）
+model Device {
+    id          String   @id @default(uuid())
+    deviceId    String   @unique // 客户端设备唯一标识
+    role        String   @default("user") // user | admin —— 仅历史兼容回退，新逻辑一律按 DeviceToken.role 判定权限
+    platform    String?  // 终端形态：ios | android | web | ...（前端登录时上报）
+    model       String?  // 机型，如 iPhone 15 Pro / Pixel 8
+    osVersion   String?  // 系统版本，如 17.5 / 14
+    token       String?  @unique // 旧版单 token（仅历史兼容：迁移前签发的 token 仍可校验），新登录一律写 DeviceToken
+    dailyQuota  Int      @default(50) // 每日对话次数上限
+    usedToday   Int      @default(0) // 当日已用次数
+    usedTokensToday BigInt @default(0) // 当日已用 token（与 usedToday 同口径：随 usedDate 跨天重置）
+    usedDate    DateTime @default(now()) // usedToday/usedTokensToday 所属日期，跨天自动重置
+    totalCount   Int      @default(0) // 累计请求次数
+    totalTokens  BigInt   @default(0) // 累计大模型 token 消耗
+    createdAt   DateTime @default(now())
+    lastSeenAt  DateTime @updatedAt
+    sessions    ChatSession[]
+    tokens      DeviceToken[]
+}
+
+// ✅ 登录令牌表：每次登录只新增一条、不覆盖不作废 —— user/admin 多 token 并存，
+//    前端缓存的两份 token 同时有效，来回切换免重登；每设备最多保留 10 个（超出删最旧）
+model DeviceToken {
+    id        String   @id @default(uuid())
+    token     String   @unique // 64 位随机十六进制
+    role      String   @default("user") // 本次登录的身份：user | admin（权限按它判定，不按 Device.role）
+    deviceId  String // 指向 Device.id（与 ChatSession.deviceId 同口径）
+    device    Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+    createdAt DateTime @default(now())
+
+    @@index([deviceId])
 }
 
 model Message {
