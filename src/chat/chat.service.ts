@@ -1212,6 +1212,7 @@ export class ChatService {
       const complexity = classifyComplexity({
         userQuery,
         hasImages,
+        hasAttachment: usedAttachments.length > 0,
         liveInfo: liveInfoQuery,
         threshold: this.modelConfig.threshold,
         expertThreshold: this.modelConfig.expertThreshold,

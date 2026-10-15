@@ -203,6 +203,12 @@ const LONG_OUTPUT = [
 export function classifyComplexity(input: {
   userQuery: string;
   hasImages: boolean;
+  /**
+   * 本轮是否带文档/视频附件。
+   * ⚠️ 免费层 glm-4-flash 实测**不遵循**「附件内容放在 system prompt」的格式，
+   *    会直接拒答（「我无法访问您上传的附件」）。因此含附件时必须抬到复杂档。
+   */
+  hasAttachment?: boolean;
   liveInfo?: boolean;
   threshold?: number;
   expertThreshold?: number;
@@ -217,6 +223,9 @@ export function classifyComplexity(input: {
 
   if (input.hasImages) {
     push(1, '含图片输入走视觉模型');
+  }
+  if (input.hasAttachment) {
+    reasons.push('含文档/视频附件（免费层不遵循该格式，强制升级档位）');
   }
   if (q.length > 200) push(2, '长输入>200字');
   else if (q.length > 80) push(1, '中等长度输入>80字');
@@ -243,12 +252,16 @@ export function classifyComplexity(input: {
     threshold,
     input.expertThreshold ?? threshold + 2,
   );
-  const level =
+  let level: Complexity['complexity'] =
     score >= expertThreshold
       ? 'expert'
       : score >= threshold
         ? 'complex'
         : 'simple';
+  // ✅ 含附件时档位下限拉到 complex：避免落到 glm-4-flash 导致附件被无视
+  if (input.hasAttachment && level === 'simple') {
+    level = 'complex';
+  }
   return {
     tier: input.hasImages ? 'vision' : 'text',
     complexity: level,

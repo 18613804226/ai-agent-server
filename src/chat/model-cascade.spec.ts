@@ -130,6 +130,36 @@ describe('模型分层：复杂度判定', () => {
     expect(r.score).toBeLessThan(99);
     expect(r.complexity).toBe('complex');
   });
+
+  it('含文档/视频附件 → 档位下限抬到 complex（免费层 glm-4-flash 会无视附件）', () => {
+    // 极简提问 + 无任何复杂特征，纯靠附件把档位拉起来
+    const r = classifyComplexity({
+      userQuery: '请总结一下',
+      hasImages: false,
+      hasAttachment: true,
+    });
+    expect(r.complexity).toBe('complex');
+    expect(r.reasons.join()).toContain('含文档/视频附件');
+  });
+
+  it('含附件不会误升到 expert 档', () => {
+    const r = classifyComplexity({
+      userQuery: '请总结一下',
+      hasImages: false,
+      hasAttachment: true,
+      expertThreshold: 5,
+    });
+    expect(r.complexity).toBe('complex');
+  });
+
+  it('无附件的极简提问仍是 simple', () => {
+    const r = classifyComplexity({
+      userQuery: '请总结一下',
+      hasImages: false,
+      hasAttachment: false,
+    });
+    expect(r.complexity).toBe('simple');
+  });
 });
 
 describe('模型分层：档位与平台匹配', () => {
