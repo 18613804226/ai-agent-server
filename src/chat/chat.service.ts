@@ -1025,6 +1025,31 @@ export class ChatService {
       const historySourceEnabled = new Map(
         historySourceFiles.map((file) => [file.id, file.enabled]),
       );
+      // ✅ 历史来源状态改为「系统提示里统一说明」：不再逐条拼进历史回答正文。
+      //    原实现把 `【历史回答来源：…】` 追加到每条历史 assistant 消息后，
+      //    模型会模仿这个格式，把它原样吐进本轮回答（线上已复现），污染聊天记录。
+      const historySourceLabels = historyForModel
+        .filter(
+          (m: any) =>
+            m.role === 'assistant' &&
+            Array.isArray(m.sources) &&
+            m.sources.length,
+        )
+        .flatMap((m: any) =>
+          (m.sources as any[]).map((source: any) => {
+            const enabled = historySourceEnabled.get(source?.fileId);
+            const status =
+              enabled === undefined
+                ? '文档已删除'
+                : enabled
+                  ? '当前启用，但本轮未重新检索'
+                  : '当前已停用';
+            return `${source?.fileName || '知识库'}（${status}）`;
+          }),
+        );
+      const historySourceSummary = historySourceLabels.length
+        ? [...new Set(historySourceLabels)].join('、')
+        : '此前对话未引用知识库资料。';
       const systemPrompt = `你是一个专属的 AI 智能助手。
     - 你的名字叫toto。
     - 当前时间：${new Intl.DateTimeFormat('zh-CN', {
@@ -1043,8 +1068,9 @@ export class ChatService {
     4. 天气问题仍可按需调用 \`fetchWeatherInfo\`；其他工具规则不变。
     5. 普通闲聊、身份问题和不依赖实时信息的问题直接回答，不要为了搜索而搜索。
     6. 本轮【参考资料】仅代表本轮实际检索到的当前启用文档；历史对话中的旧回答不等于本轮参考资料。
-    7. 历史回答后附有来源状态标注：当前已停用或已删除的来源不能作为当前知识库依据；来源未记录的旧回答不能推断其来自哪个文档。
+    7. 历史回答用过的来源状态见下方【历史对话来源状态】。已停用或已删除的来源不能作为当前知识库依据；来源未记录的旧回答不能推断其来自哪个文档。
     8. 若用户追问的内容只存在于旧回答而本轮没有检索到相关资料，应说明它来自此前对话且本轮未能从当前启用资料重新核实。仅在相关时说明，不要每轮重复提醒。
+    9. 【历史对话来源状态】只是给你判断来源是否可用的内部信息，属于系统注记，严禁在回答里复述或模仿这类内部标注。
      
       【本轮用户提供的附件】：
        ${attachmentContext ||
@@ -1052,6 +1078,9 @@ export class ChatService {
 
      【参考资料】：
       ${context || '本轮没有提供知识库参考资料。'}
+
+     【历史对话来源状态】：
+      ${historySourceSummary}
 
      【本轮联网搜索结果】：
       ${webSearchContext || '本轮未执行联网搜索。'}
@@ -1130,30 +1159,11 @@ export class ChatService {
               } as any;
             }
           }
-          const sourceNote =
-            role === 'assistant'
-              ? Array.isArray(msg.sources)
-                ? msg.sources.length
-                  ? `\n\n【历史回答来源（非本轮检索）】${msg.sources
-                      .map((source: any) => {
-                        const enabled = historySourceEnabled.get(
-                          source?.fileId,
-                        );
-                        const status =
-                          enabled === undefined
-                            ? '文档已删除'
-                            : enabled
-                              ? '当前启用，但本轮未重新检索'
-                              : '当前已停用';
-                        return `${source?.fileName || '知识库'}（${status}）`;
-                      })
-                      .join('、')}`
-                  : '\n\n【历史回答来源：当时未使用知识库资料】'
-                : '\n\n【历史回答来源未记录，无法确认是否引用过知识库资料】'
-              : '';
+          // ⚠️ 不要往历史消息正文里拼「历史回答来源」标注：模型会模仿该格式并原样输出，
+          //    污染聊天记录（线上已复现）。来源状态改由 system prompt 统一说明。
           return {
             role,
-            content: `${msg.content ?? ''}${sourceNote}`,
+            content: msg.content ?? '',
           } as any;
         },
       );
