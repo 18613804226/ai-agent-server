@@ -107,3 +107,24 @@ describe('ChatService createSession 超额清理', () => {
     expect(prisma.chatSession.deleteMany).not.toHaveBeenCalled();
   });
 });
+
+describe('ChatService deleteChatAttachment', () => {
+  const mkService = (prisma: any) => new ChatService(prisma as never, {} as never);
+
+  it('拒绝非法文件名（400）', async () => {
+    const prisma = { $queryRaw: vi.fn().mockResolvedValue([]) };
+    const service = mkService(prisma);
+    await expect(service.deleteChatAttachment('not-a-valid-ref.txt')).rejects.toThrow(
+      '非法文件名',
+    );
+    expect(prisma.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('已被消息引用时返回 409', async () => {
+    const prisma = { $queryRaw: vi.fn().mockResolvedValue([{ n: 1 }]) };
+    const service = mkService(prisma);
+    await expect(
+      service.deleteChatAttachment('62cd2715-8d34-4c2b-9d7a-1f5a9c8b0000.pdf'),
+    ).rejects.toThrow('该附件已被消息引用，不能删除');
+  });
+});

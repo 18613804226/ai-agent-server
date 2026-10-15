@@ -14,9 +14,22 @@ import * as https from 'https';
 import WebSocket from 'ws';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegPath from 'ffmpeg-static';
-import { existsSync } from 'fs';
-import { mkdir, readFile, rename, rm, writeFile } from 'fs/promises';
-import { createHash } from 'crypto';
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from 'fs';
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'fs/promises';
+import { createHash, randomUUID } from 'crypto';
 import { join, resolve, sep, extname } from 'path';
 import { tmpdir } from 'os';
 import { evaluate } from 'mathjs';
@@ -28,37 +41,47 @@ import {
   mergeToolCallDeltas,
   type ToolCallAccumulator,
 } from './tool-call-accumulator.js';
+import { SimpleLock } from './simple-lock.js';
+import {
+  extractDocumentText,
+  isDocumentExt,
+  isVideoExt,
+} from './document-text.js';
+import {
+  AttachmentStore,
+  ATTACHMENT_TTL_MS,
+  type AttachmentKind,
+  type ChatAttachment,
+} from './attachment-store.js';
+import {
+  transcribeVideoAudio,
+  VideoNoAudioError,
+  VideoTooLongError,
+} from './video-transcript.js';
+import {
+  checkExcelBuffer,
+  ExcelTooLargeError,
+  type ExcelCheckOptions,
+  type ExcelCheckResult,
+} from './excel-check.js';
+import {
+  classifyComplexity,
+  errorMessage,
+  errorStatus,
+  isDegradableError,
+  isRateLimitError,
+  loadModelCascadeConfig,
+  resolveModelCandidates,
+  resolveZhipuCredentials,
+  zhipuThinkingParam,
+  type ModelCandidate,
+  type ModelCascadeConfig,
+} from './model-cascade.js';
 import {
   formatWebSearchContext,
   isLiveInfoQuery,
   searchTavily,
 } from './web-search.js';
-// ✅ 简易串行锁：同一进程内 TTS 请求排队，避免并发打爆 DashScope QPS
-class SimpleLock {
-  private queue: (() => void)[] = [];
-  private locked = false;
-
-  acquire(): Promise<() => void> {
-    return new Promise((resolve) => {
-      const tryAcquire = () => {
-        if (this.locked) {
-          this.queue.push(tryAcquire);
-          return;
-        }
-        this.locked = true;
-        let released = false;
-        resolve(() => {
-          if (released) return;
-          released = true;
-          this.locked = false;
-          const next = this.queue.shift();
-          if (next) next();
-        });
-      };
-      tryAcquire();
-    });
-  }
-}
 
 // ✅ 模块顶层：整个进程只建一次，所有 TTS 请求复用这套连接
 const dashscopeAgent = new https.Agent({
@@ -113,6 +136,36 @@ const estimateTokens = (text: string): number => {
 export class ChatService {
   private openai: OpenAI;
   private readonly model: string;
+  /** 智谱 GLM 客户端；未配置 key 为 null，级联自动退化为单一 qwen */
+  private zhipu: OpenAI | null = null;
+  private readonly modelConfig: ModelCascadeConfig = loadModelCascadeConfig();
+  /** 是否把「模型路由决策」作为 thought 推给前端（默认开，配 CHAT_SHOW_ROUTING_THOUGHT=false 关闭） */
+  private readonly showRoutingThought =
+    process.env.CHAT_SHOW_ROUTING_THOUGHT !== 'false';
+  /** 免费层 429 限流时的原地重试次数（默认 2，配 CHAT_RATE_LIMIT_RETRIES 调整） */
+  private readonly rateLimitRetries = Math.max(
+    0,
+    Number(process.env.CHAT_RATE_LIMIT_RETRIES ?? '2'),
+  );
+  /** 智谱免费层限 1 并发：全局串行，从源头避开 429（qwen 付费层不受限） */
+  private readonly zhipuLock = new SimpleLock();
+  /** 聊天附件原始文件 + 30 天 TTL 清扫目录（与知识库 files/knowledge 平级但完全隔离，不向量化） */
+  private readonly attachmentDir = join(
+    process.cwd(),
+    'files',
+    'chat-attachments',
+  );
+  /** 附件原始文件保留天数（默认 30 天，仅删「未被任何消息引用」的） */
+  private readonly attachmentRetainMs =
+    Number(process.env.ATTACHMENT_RETAIN_DAYS ?? 30) * 24 * 60 * 60 * 1000;
+  /** 聊天附件临时存储：只进内存、不走向量库，到期即弃 */
+  private readonly attachmentStore = new AttachmentStore();
+  /** 聊天附件大小上限（视频音轨要过 ffmpeg + ASR，比知识库宽松些） */
+  private readonly MAX_ATTACHMENT_SIZE = 50 * 1024 * 1024;
+  /** 视频时长上限：超过直接拒绝，避免一次请求烧穿 token 预算 */
+  private readonly MAX_VIDEO_DURATION_SEC = 600;
+  /** 附件文本注入上限（token）：防一份年报把整个 prompt 撑爆 */
+  private readonly MAX_ATTACHMENT_TOKENS = 4000;
   private ttsLock: SimpleLock;
   private tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     {
@@ -179,7 +232,117 @@ export class ChatService {
       apiKey: process.env.OPENAI_API_KEY || '',
       baseURL: process.env.OPENAI_BASE_URL || '',
     });
+    // ✅ 智谱（GLM 免费层）客户端：没配 key 就不建，级联自动退化为单一 qwen 模型
+    const zhipu = resolveZhipuCredentials();
+    if (zhipu) {
+      this.zhipu = new OpenAI({
+        apiKey: zhipu.apiKey,
+        baseURL: zhipu.baseURL,
+      });
+      console.log(
+        `🧠 [模型分层] GLM 免费层已启用，首选 ${this.modelConfig.textSimple} / ${this.modelConfig.visionPrimary}`,
+      );
+    } else {
+      console.log(
+        '🧠 [模型分层] 未配置 GLM_API_KEY，全部请求走 qwen（未开启级联）',
+      );
+    }
     this.ttsLock = new SimpleLock();
+    this.attachmentStore.startSweeper();
+    this.startUploadsSweeper();
+    this.startAttachmentSweeper();
+  }
+
+  /** 取对应 provider 的 OpenAI 兼容客户端；未配置返回 null，候选会被跳过 */
+  private clientFor(provider: ModelCandidate['provider']): OpenAI | null {
+    return provider === 'zhipu' ? this.zhipu : this.openai;
+  }
+
+  /**
+   * 建流式请求，按候选链降级。
+   * 只在「建连阶段」降级：一旦开始吐字就不再换模型，否则会把重复内容推给客户端。
+   */
+  /**
+   * 建流式请求，按候选链降级。
+   *  - 429 限流：免费层限流是暂时的，先原地退避重试（默认 2 次），
+   *    仍失败才降级 —— 避免一遇限流就切付费模型白花钱。
+   *  - 智谱免费层限 1 并发：zhipu 候选加全局锁串行，锁一直持有到流读完，
+   *    调用方拿到 release 后必须在 finally 里释放。
+   *  - 只在「建连阶段」降级：一旦开始吐字就不再换模型，否则会把重复内容推给客户端。
+   */
+  private async createChatStream(
+    candidates: ModelCandidate[],
+    payload: Record<string, unknown>,
+    signal?: AbortSignal,
+    onThought?: (text: string) => void,
+  ): Promise<{
+    stream: any;
+    candidate: ModelCandidate;
+    release?: () => void;
+  }> {
+    let lastError: any = null;
+    for (const candidate of candidates) {
+      const client = this.clientFor(candidate.provider);
+      if (!client) continue;
+
+      // 智谱：排队等前一个流跑完（免费层 1 并发）；qwen 不排队
+      const release =
+        candidate.provider === 'zhipu'
+          ? await this.zhipuLock.acquire()
+          : undefined;
+
+      const maxTries = this.rateLimitRetries + 1;
+      for (let attempt = 1; attempt <= maxTries; attempt++) {
+        try {
+          // 智谱：默认关思考链（首字从 50s+ 降到秒级）；qwen 不适用该参数
+          const body =
+            candidate.provider === 'zhipu'
+              ? { ...payload, model: candidate.model, ...zhipuThinkingParam() }
+              : { ...payload, model: candidate.model };
+          const stream = await client.chat.completions.create(body as any, {
+            signal,
+          });
+          // 锁交给调用方：流读完再释放，保证全程只有 1 个智谱请求在飞
+          return { stream, candidate, release };
+        } catch (err: any) {
+          if (signal?.aborted) {
+            release?.();
+            throw err;
+          }
+          lastError = err;
+          const status = errorStatus(err);
+          const serverMsg = errorMessage(err);
+          const rateLimited = isRateLimitError(err);
+          const canRetry = rateLimited && attempt < maxTries;
+
+          console.warn(
+            `🧠 [模型分层] ${candidate.provider}:${candidate.model} 建流失败，` +
+              `状态=${status ?? '-'}${serverMsg ? ` ${serverMsg}` : ''}，` +
+              `${canRetry ? `限流，${800 * attempt}ms 后原地重试(${attempt}/${maxTries - 1})` : '切换到下一个候选'}`,
+          );
+
+          if (canRetry) {
+            onThought?.(
+              `免费层请求繁忙，稍后重试（第 ${attempt}/${maxTries - 1} 次）…`,
+            );
+            await new Promise((r) => setTimeout(r, 800 * attempt));
+            continue;
+          }
+
+          onThought?.(
+            `首选模型 ${candidate.model} 暂时不可用，正在切换备用模型…`,
+          );
+          // isDegradableError 目前恒真（除客户端断开），保留判断便于日后收紧紧急策略
+          if (!isDegradableError(err)) {
+            release?.();
+            throw err;
+          }
+          release?.(); // 放弃这个候选，放锁再试下一个
+          break;
+        }
+      }
+    }
+    throw lastError;
   }
 
   // 创建新对话会话（deviceId 为空时保留旧行为，方便内部/测试调用）
@@ -351,6 +514,126 @@ export class ChatService {
     return target;
   }
 
+  /**
+   * uploads 里我们自己生成的图片文件名规则。
+   * 删除接口与孤儿清扫都只认这个格式：能挡住 `../` 穿越、子目录、
+   * 以及任何我们没生成过的文件（比如别人放进来的配置或密钥）。
+   */
+  private static readonly UPLOAD_IMG_RE =
+    /^img-\d{10,}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(png|jpe?g|gif|webp|bmp|avif)$/i;
+
+  /** 文件名是否已被某条消息的 images 引用（引用过的不能删，否则历史回显坏掉） */
+  private async isImageReferenced(filename: string): Promise<boolean> {
+    const rows = await this.prisma.$queryRaw<{ n: number }[]>`
+      SELECT 1 AS n FROM "Message"
+      WHERE "images" IS NOT NULL
+        AND ("images"::text) LIKE ${'%' + filename + '%'}
+      LIMIT 1`;
+    return rows.length > 0;
+  }
+
+  /**
+   * 删除一张「预上传但最终没发出去」的图片。
+   *
+   * 安全设计：
+   * 1. 文件名必须匹配 uploadImage 的生成规则，否则直接 400（挡穿越）
+   * 2. 再走一次 resolveUploadsFilePath 兜底确认仍在 uploads 内
+   * 3. 被消息引用过的文件返回 409 拒绝删 —— 宁可留孤儿也别把历史记录弄坏
+   */
+  async deleteUploadedImage(filename: string): Promise<void> {
+    if (!ChatService.UPLOAD_IMG_RE.test(filename)) {
+      throw new BadRequestException('非法文件名');
+    }
+    if (await this.isImageReferenced(filename)) {
+      throw new HttpException(
+        '该图片已被消息引用，不能删除',
+        HttpStatus.CONFLICT,
+      );
+    }
+    const filepath = this.resolveUploadsFilePath(filename);
+    if (!filepath) {
+      throw new BadRequestException('非法文件名');
+    }
+    try {
+      await rm(filepath, { force: false });
+    } catch (e: any) {
+      if (e?.code === 'ENOENT') {
+        throw new NotFoundException('文件不存在或已删除');
+      }
+      throw e;
+    }
+  }
+
+  /** 所有被消息引用过的图片 basename（孤儿清扫要跳过它们） */
+  private async referencedImageBasenames(): Promise<Set<string>> {
+    const rows = await this.prisma.$queryRaw<{ name: string }[]>`
+      SELECT DISTINCT regexp_replace(elem, '^.*/', '') AS "name"
+      FROM "Message", jsonb_array_elements_text("images"::jsonb) AS "elem"
+      WHERE "images" IS NOT NULL`;
+    return new Set(rows.map((r) => r.name));
+  }
+
+  /**
+   * 定期清理 uploads 里的孤儿图片 —— 覆盖「选了没发、也没点 X」的场景。
+   * 双保险条件：**没被任何消息引用** + **存留超过阈值**（默认 60 分钟，避免删到刚上传还在编辑的）。
+   * 扫描本身很轻（只读文件名和 mtime），30 分钟一次，unref 不拖住进程退出。
+   */
+  private startUploadsSweeper(): void {
+    if (process.env.UPLOADS_SWEEP_ENABLED === 'false') {
+      console.log('🧹 uploads 孤儿清扫已禁用（UPLOADS_SWEEP_ENABLED=false）');
+      return;
+    }
+    const intervalMs = Number(
+      process.env.UPLOADS_SWEEP_INTERVAL_MS ?? 30 * 60 * 1000,
+    );
+    const timer = setInterval(() => {
+      void this.sweepOrphanUploads().catch((e: any) =>
+        console.warn('🧹 uploads 清扫失败:', e?.message || e),
+      );
+    }, intervalMs);
+    // 别让定时器拖着进程不退出
+    timer.unref();
+    console.log(
+      `🧹 uploads 孤儿清扫已启动：每 ${Math.round(intervalMs / 60000)} 分钟一次`,
+    );
+  }
+
+  /** 执行一次清扫，返回删除的文件数（也供手动触发/测试） */
+  async sweepOrphanUploads(): Promise<number> {
+    const dir = resolve(process.cwd(), 'uploads');
+    let entries: string[];
+    try {
+      entries = await readdir(dir);
+    } catch {
+      return 0; // 目录不存在
+    }
+    if (!entries.length) return 0;
+
+    const referenced = await this.referencedImageBasenames();
+    const minAgeMs =
+      Number(process.env.UPLOADS_ORPHAN_MIN_AGE_MIN ?? 60) * 60 * 1000;
+    const now = Date.now();
+    let removed = 0;
+
+    for (const name of entries) {
+      // 只碰我们自己生成的文件，且没被消息引用
+      if (!ChatService.UPLOAD_IMG_RE.test(name)) continue;
+      if (referenced.has(name)) continue;
+      try {
+        const st = await stat(join(dir, name));
+        if (!st.isFile() || now - st.mtimeMs < minAgeMs) continue;
+        await rm(join(dir, name), { force: true });
+        removed++;
+      } catch {
+        /* 单个文件失败不影响整体清扫 */
+      }
+    }
+    if (removed) {
+      console.log(`🧹 uploads 清扫：删除 ${removed} 个孤儿图片`);
+    }
+    return removed;
+  }
+
   // ✅ 站外图片域名白名单：默认空 = 一律不放行，避免服务端被当跳板打内网（SSRF）
   //   需要拉取站外图片时配置 IMAGE_FETCH_ALLOWLIST=oss-cn-beijing.aliyuncs.com,example.com
   private isImageFetchAllowed(hostname: string): boolean {
@@ -507,9 +790,19 @@ export class ChatService {
     images?: string[],
     signal?: AbortSignal,
     fileIds?: string[],
+    attachmentIds?: string[],
+    /** 随本条消息直传、已当场解析好的附件（单步流：文件和消息同一个请求） */
+    inlineAttachments?: Array<{
+      name: string;
+      kind: AttachmentKind;
+      text: string;
+      durationSec?: number;
+    }>,
   ) {
     const overallStartTime = Date.now();
     const aborted = () => signal?.aborted === true;
+    let usedModel = ''; // 实际所用模型（函数级作用域，catch 兜底返回也要用）
+
     try {
       if (aborted()) return;
 
@@ -531,6 +824,34 @@ export class ChatService {
       );
       const liveInfoQuery = isLiveInfoQuery(userQuery);
 
+      // 附件先取出来：既要在落库时记元数据，也要拼进 prompt
+      // （内联附件 = 随本条消息直传的；attachmentIds = 先上传后引用的）
+      const {
+        context: attachmentContext,
+        used: usedAttachments,
+        missing: missingAttachments,
+      } = this.buildAttachmentContext(attachmentIds, inlineAttachments);
+      const attachmentMeta = usedAttachments.map((a) => ({
+        id: a.id,
+        name: a.name,
+        kind: a.kind,
+        charCount: a.charCount,
+        durationSec: a.durationSec,
+        // 原始文件已落盘，历史消息靠这两个字段回看/重新提问
+        fileRef: a.fileRef,
+        url: a.fileRef
+          ? `/chat/attachments/${a.fileRef}`
+          : undefined,
+      }));
+      if (missingAttachments.length) {
+        console.warn(
+          `📎 附件已过期或不存在: ${missingAttachments.join(',')}（附件仅保留 ${ATTACHMENT_TTL_MS / 60000} 分钟）`,
+        );
+      }
+      if (attachmentContext) {
+        console.log(`📎 附件已注入本轮上下文: ${attachmentContext.length} 字`);
+      }
+
       const parallelStartTime = Date.now();
       const [, relevantDocs, historyMessages, webSearchResults] =
         await Promise.all([
@@ -541,6 +862,10 @@ export class ChatService {
               content: userQuery,
               // ✅ 图片 URL 一起落库，历史会话才能还原出图
               images: hasImages ? images : undefined,
+              // ✅ 附件只落元数据（名称/类型/字数），原文仍在临时存储里、到期即弃
+              attachments: attachmentMeta.length
+                ? attachmentMeta
+                : undefined,
             },
           }),
           isCasualChat || liveInfoQuery
@@ -708,6 +1033,10 @@ export class ChatService {
     7. 历史回答后附有来源状态标注：当前已停用或已删除的来源不能作为当前知识库依据；来源未记录的旧回答不能推断其来自哪个文档。
     8. 若用户追问的内容只存在于旧回答而本轮没有检索到相关资料，应说明它来自此前对话且本轮未能从当前启用资料重新核实。仅在相关时说明，不要每轮重复提醒。
      
+      【本轮用户提供的附件】：
+       ${attachmentContext ||
+         '（本次对话没有附带文档或视频；如用户声称传了文件，提醒重新上传）'}
+
      【参考资料】：
       ${context || '本轮没有提供知识库参考资料。'}
 
@@ -879,6 +1208,52 @@ export class ChatService {
       let firstTurnTtft: number | null = null;
       let usedTokens = 0; // 累加各轮（含工具轮）的 token 消耗，用于计费统计
 
+      // ✅ 选择本轮候选链：含图片走视觉，否则按规则判复杂度决定免费/付费起点
+      const complexity = classifyComplexity({
+        userQuery,
+        hasImages,
+        liveInfo: liveInfoQuery,
+        threshold: this.modelConfig.threshold,
+        expertThreshold: this.modelConfig.expertThreshold,
+      });
+      const candidates = resolveModelCandidates(complexity, this.modelConfig, {
+        zhipuAvailable: !!this.zhipu,
+      });
+      const chainText = candidates
+        .map((c) => `${c.provider}:${c.model}`)
+        .join(' → ');
+      console.log(
+        `🧠 [模型分层] tier=${complexity.tier} 复杂度=${complexity.complexity}` +
+          ` 得分=${complexity.score}（complex>=${this.modelConfig.threshold}，` +
+          `expert>=${this.modelConfig.expertThreshold}）` +
+          `链路=${chainText || '无'}` +
+          (complexity.reasons.length ? ` | ${complexity.reasons.join(' ')}` : ''),
+      );
+      // ✅ 把路由决策推给前端思考流：用户能直接看到"为什么选了这个模型"
+      if (this.showRoutingThought && candidates.length) {
+        const tierText =
+          complexity.tier === 'vision'
+            ? '多模态输入'
+            : complexity.complexity === 'expert'
+              ? '高难度任务'
+              : complexity.complexity === 'complex'
+                ? '复杂任务'
+                : '常规任务';
+        const backups = candidates
+          .slice(1)
+          .map((c) => c.model)
+          .filter(Boolean);
+        onChunk(
+          'thought',
+          `模型选择：${candidates[0].model}（${tierText}，复杂度评分 ` +
+            `${complexity.score}/${this.modelConfig.threshold}）` +
+            (backups.length ? `，备用 ${backups.join('、')}` : '，无备用') +
+            (complexity.reasons.length
+              ? `。判定依据：${complexity.reasons.join('、')}`
+              : ''),
+        );
+      }
+
       for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
         if (aborted()) return;
 
@@ -887,24 +1262,28 @@ export class ChatService {
         let roundReply = '';
         let roundTtft: number | null = null;
 
-        const stream: any = await this.openai.chat.completions.create(
-          {
-            model: this.model,
-            messages,
-            stream: true,
-            tools: liveInfoQuery ? undefined : this.tools,
-            tool_choice: liveInfoQuery ? undefined : 'auto',
-            stream_options: { include_usage: true },
-          } as any,
-          // ✅ 客户端断开时立刻销毁到模型端的连接，不用等这一轮生成完
-          { signal },
+        const payload = {
+          messages,
+          stream: true,
+          tools: liveInfoQuery ? undefined : this.tools,
+          tool_choice: liveInfoQuery ? undefined : 'auto',
+          stream_options: { include_usage: true },
+        };
+        // ✅ 级联建流：主模型失败自动切下一个候选（仅建连阶段）
+        const { stream, candidate, release } = await this.createChatStream(
+          candidates,
+          payload,
+          signal,
+          this.showRoutingThought ? (t) => onChunk('thought', t) : undefined,
         );
+        usedModel = `${candidate.provider}:${candidate.model}`;
 
-        for await (const chunk of stream) {
-          if (aborted()) {
-            console.log('检测到用户中断，强行跳出大模型流生成。');
-            break;
-          }
+        try {
+          for await (const chunk of stream) {
+            if (aborted()) {
+              console.log('检测到用户中断，强行跳出大模型流生成。');
+              break;
+            }
 
           if (roundTtft === null) roundTtft = Date.now() - streamStartTime;
           if (firstTurnTtft === null) firstTurnTtft = roundTtft;
@@ -949,12 +1328,16 @@ export class ChatService {
             onChunk('content', textContent);
           }
         }
+        } finally {
+          // 智谱锁：必须等整条流读完才放，避免并发打爆免费层的 1 并发限制
+          release?.();
+        }
 
         const toolCalls = finalizeToolCalls(toolAcc);
         console.log(
           `⏱️ [性能监控] 第 ${round + 1} 轮流式耗时: ${Date.now() - streamStartTime}ms` +
             `，本轮首字 ${roundTtft ?? '-'}ms` +
-            `，工具调用 ${toolCalls.length} 个`,
+            `，工具调用 ${toolCalls.length} 个，模型 ${usedModel}`,
         );
 
         // ✅ 没有工具要调 → 这一轮就是最终回答
@@ -1027,6 +1410,7 @@ export class ChatService {
         fullReply: finalCleanReply,
         sources: relevantAndPassingDocs,
         tokens: usedTokens,
+        model: usedModel,
       };
     } catch (error: any) {
       const totalDuration = Date.now() - overallStartTime;
@@ -1041,7 +1425,7 @@ export class ChatService {
         console.log(
           `⏹️ [性能监控] 客户端已断开，提前结束（累计 ${totalDuration}ms）`,
         );
-        return { fullReply: '', sources: [], tokens: 0 };
+        return { fullReply: '', sources: [], tokens: 0, model: usedModel };
       }
 
       console.error('sendMessageStream 执行出错:', error);
@@ -1296,65 +1680,592 @@ export class ChatService {
   // ✅ 存到 uploads/ 之外，uploads/ 由 useStaticAssets 静态暴露，
   //    放这里会被当成静态文件外链、且接受任意后缀名容易导到存储型 XSS / 敏感文件公开。
   private readonly knowledgeDir = join(process.cwd(), 'files', 'knowledge');
-  private readonly kbTextExts = [
-    '.txt',
-    '.md',
-    '.json',
-    '.csv',
-    '.log',
-    '.xml',
-    '.html',
-    '.htm',
-    // 代码文件
-    '.js',
-    '.jsx',
-    '.ts',
-    '.tsx',
-    '.css',
-    '.scss',
-    '.sass',
-    '.vue',
-    '.svelte',
-    '.py',
-    '.java',
-    '.go',
-    '.rs',
-    '.c',
-    '.h',
-    '.cpp',
-    '.cc',
-    '.cxx',
-    '.hpp',
-    '.cs',
-    '.php',
-    '.rb',
-    '.swift',
-    '.kt',
-    '.scala',
-    '.lua',
-    '.perl',
-    '.r',
-    '.yml',
-    '.yaml',
-    '.toml',
-    '.ini',
-    '.env',
-    '.conf',
-    '.gitignore',
-    '.sh',
-    '.bash',
-    '.zsh',
-    '.fish',
-    '.sql',
-    '.graphql',
-    '.proto',
-    '.bat',
-    '.ps1',
-  ];
-  private readonly chunkSize = 500; // 每段最大字数
-  private readonly chunkOverlap = 50; // 滑动窗口重叠字数
   private readonly MAX_KB_FILE_SIZE = 10 * 1024 * 1024; // 10MB，超过就直接拒绝
   private readonly MAX_KB_CHUNKS = 500; // 超上只向量化前 N 段，防 LLM 被疯狒
+  private readonly chunkSize = 500; // 每个切片目标字数
+  private readonly chunkOverlap = 50; // 相邻切片重叠字数，减少边界信息丢失
+
+  // ---------------- Excel 错误识别 ----------------
+  /**
+   * 检查上传的 Excel，返回结构化问题清单。
+   * 与知识库/聊天附件完全独立：不落盘、不向量化、不写入任何表。
+   */
+  async checkExcelFile(
+    file: Express.Multer.File,
+    rules?: string,
+  ): Promise<ExcelCheckResult> {
+    if (!file?.buffer) throw new BadRequestException('没有收到文件');
+
+    const name = this.decodeOriginalName(file.originalname || '');
+    const ext = extname(name).toLowerCase();
+    const mime = file.mimetype || '';
+    const isExcel =
+      ext === '.xlsx' || ext === '.xls' ||
+      mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+      mime === 'application/vnd.ms-excel';
+    if (!isExcel) {
+      throw new BadRequestException(
+        `只支持 .xlsx / .xls 文件（收到 ${ext || mime || '未知类型'}）`,
+      );
+    }
+
+    const t0 = Date.now();
+    let parsedRules: ExcelCheckOptions['rules'];
+    if (rules?.trim()) {
+      try {
+        parsedRules = JSON.parse(rules);
+      } catch {
+        throw new BadRequestException('rules 不是合法 JSON，可省略该字段');
+      }
+    }
+
+    try {
+      const result = await checkExcelBuffer(name, file.buffer, {
+        rules: parsedRules,
+      });
+      console.log(
+        `📊 Excel 检查完成 ${name}: ${result.summary.total} 个问题` +
+          `（公式错误 ${result.summary.formulaErrors}，数据质量 ${result.summary.dataIssues}），` +
+          `耗时 ${Date.now() - t0}ms`,
+      );
+      return result;
+    } catch (e: any) {
+      if (e instanceof ExcelTooLargeError) {
+        throw new BadRequestException(e.message);
+      }
+      // exceljs 读不了（加密/损坏/格式不符）时给明确提示，别把内部错误抛给前端
+      throw new BadRequestException(
+        `Excel 解析失败：${e?.message || '文件可能已加密或损坏'}`,
+      );
+    }
+  }
+
+  // ---------------- 聊天附件（一次性，不入知识库） ----------------
+  /**
+   * 附件「类型 + 大小」的快速校验（不解析内容，纯同步判断）。
+   * 单独暴露是为了在建立 SSE 流之前就把这类错误以 HTTP 400 返回，
+   * 而不是等连接建好后再用 SSE error 事件告诉前端。
+   */
+  validateChatAttachment(file: Express.Multer.File): void {
+    if (!file?.buffer) throw new BadRequestException('没有收到文件');
+    if (file.size > this.MAX_ATTACHMENT_SIZE) {
+      throw new BadRequestException(
+        `文件过大，最多 ${this.MAX_ATTACHMENT_SIZE / 1024 / 1024}MB`,
+      );
+    }
+    const name = this.decodeOriginalName(file.originalname || '未命名文件');
+    const ext = extname(name).toLowerCase();
+    const mime = file.mimetype || '';
+    // mimetype 优先：`.ts` 既是 TypeScript 也是 MPEG-TS 视频，靠 mimetype 才能分清
+    const isVideo =
+      mime.startsWith('video/') ||
+      (isVideoExt(ext) && !mime.startsWith('text/'));
+    const isDocument =
+      !isVideo && (isDocumentExt(ext) || mime.startsWith('text/'));
+    if (!isVideo && !isDocument) {
+      throw new BadRequestException(
+        `不支持的文件类型 ${ext || file.mimetype}，目前支持文档（pdf/doc/docx/txt/md/代码等）与视频（mp4/mov/mkv 等）`,
+      );
+    }
+  }
+
+  /**
+   * 解析聊天附件：**先把原始文件落盘**（供历史回看/重新提问），再抽文本。
+   *
+   * 落盘目录与知识库完全隔离：files/chat-attachments/ 不做向量化、不进 RAG，
+   * 只是普通文件存储，靠 TTL 清扫回收。
+   */
+  async parseChatAttachment(
+    file: Express.Multer.File,
+  ): Promise<{
+    id: string;
+    fileRef: string;
+    url: string;
+    name: string;
+    kind: AttachmentKind;
+    text: string;
+    charCount: number;
+    durationSec?: number;
+  }> {
+    this.validateChatAttachment(file);
+
+    const name = this.decodeOriginalName(file.originalname || '未命名文件');
+    const ext = extname(name).toLowerCase();
+    const mime = file.mimetype || '';
+    const isVideo =
+      mime.startsWith('video/') ||
+      (isVideoExt(ext) && !mime.startsWith('text/'));
+
+    // 落盘：文件名用 uuid + 归一化后的扩展名（白名单外一律 bin，
+    // 保证任何文件都可被服务、也可被 30 天清扫回收，不会变成永久垃圾）
+    const id = randomUUID();
+    const fileRef = `${id}.${this.attachmentExt(name)}`;
+    await mkdir(this.attachmentDir, { recursive: true });
+    await writeFile(join(this.attachmentDir, fileRef), file.buffer);
+
+    const t0 = Date.now();
+    const base = { id, fileRef, url: `/chat/attachments/${fileRef}`, name };
+
+    if (isVideo) {
+      let result;
+      try {
+        result = await transcribeVideoAudio(file.buffer, name, {
+          maxDurationSec: this.MAX_VIDEO_DURATION_SEC,
+          asr: (wavPath) => this.asrByWs(wavPath),
+        });
+      } catch (e: any) {
+        // 解析失败就把刚落的盘撤掉，别留看不懂的垃圾文件
+        await this.removeAttachmentFile(fileRef);
+        if (e instanceof VideoTooLongError || e instanceof VideoNoAudioError) {
+          throw new BadRequestException(e.message);
+        }
+        throw new BadRequestException(`视频解析失败：${e?.message || e}`);
+      }
+      console.log(
+        `🎬 视频转写完成 ${name}: ${Math.round(result.durationSec)}s → ` +
+          `${result.text.length} 字，耗时 ${Date.now() - t0}ms`,
+      );
+      return {
+        ...base,
+        kind: 'video',
+        text: result.text,
+        charCount: result.text.length,
+        durationSec: Math.round(result.durationSec),
+      };
+    }
+
+    const text = (await extractDocumentText(file)).trim();
+    if (!text) {
+      await this.removeAttachmentFile(fileRef);
+      throw new BadRequestException(
+        `没能从 ${name} 解析出文字（可能是扫描版图片型文档，暂无 OCR）`,
+      );
+    }
+    console.log(
+      `📎 文档解析完成 ${name}: ${text.length} 字，耗时 ${Date.now() - t0}ms`,
+    );
+    return { ...base, kind: 'document', text, charCount: text.length };
+  }
+
+  /**
+   * 把「随消息直传」解析出的附件也缓存进内存，
+   * 这样同一会话内紧接着追问时不用重新解析（30 分钟后则靠磁盘复活兜底）。
+   */
+  rememberChatAttachment(parsed: {
+    id: string;
+    fileRef: string;
+    name: string;
+    kind: AttachmentKind;
+    text: string;
+    charCount: number;
+    durationSec?: number;
+  }): void {
+    this.attachmentStore.set({
+      id: parsed.id,
+      name: parsed.name,
+      kind: parsed.kind,
+      text: parsed.text,
+      charCount: parsed.charCount,
+      durationSec: parsed.durationSec,
+      fileRef: parsed.fileRef,
+      createdAt: Date.now(),
+    });
+  }
+
+  /**
+   * 上传聊天附件（两步流）：解析后存进临时存储，返回 id 供后续 stream 引用。
+   * 适合先预览确认再发送的交互。原始文件已落盘，30 天后才回收。
+   */
+  async uploadChatAttachment(file: Express.Multer.File) {
+    const parsed = await this.parseChatAttachment(file);
+    this.rememberChatAttachment(parsed);
+    return {
+      id: parsed.id,
+      name: parsed.name,
+      kind: parsed.kind,
+      charCount: parsed.charCount,
+      durationSec: parsed.durationSec,
+      url: parsed.url,
+    };
+  }
+
+  /**
+   * 删除一份「预上传附件」（POST /chat/attachment 后、消息还没发送时的清理）。
+   *
+   * 安全设计（与删除上传图片同一口径）：
+   * 1. 文件名必须匹配 ATTACHMENT_FILE_RE，否则 400（挡 `../` 穿越 / 非法后缀）
+   * 2. 再走一次 resolve 兜底确认仍在 attachmentDir 内
+   * 3. 被消息引用过的附件（Message.attachments 里有 fileRef）返回 409 拒绝删，
+   *    宁可留孤儿也别把历史回显搞坏
+   */
+  async deleteChatAttachment(fileRef: string): Promise<void> {
+    if (!ChatService.ATTACHMENT_FILE_RE.test(fileRef)) {
+      throw new BadRequestException('非法文件名');
+    }
+    if (await this.isAttachmentReferenced(fileRef)) {
+      throw new HttpException(
+        '该附件已被消息引用，不能删除',
+        HttpStatus.CONFLICT,
+      );
+    }
+    const dir = resolve(this.attachmentDir);
+    const filepath = resolve(this.attachmentDir, fileRef);
+    if (!filepath.startsWith(dir + sep)) {
+      throw new BadRequestException('非法文件名');
+    }
+    if (!existsSync(filepath)) {
+      throw new NotFoundException('附件不存在或已过期删除');
+    }
+    try {
+      await rm(filepath, { force: false });
+    } catch (e: any) {
+      if (e?.code === 'ENOENT') {
+        throw new NotFoundException('附件不存在或已过期删除');
+      }
+      throw e;
+    }
+  }
+
+  /** 附件 fileRef 是否已被某个 Message 引用（引用过的不能删） */
+  private async isAttachmentReferenced(fileRef: string): Promise<boolean> {
+    const rows = await this.prisma.$queryRaw<{ n: number }[]>`
+      SELECT 1 AS n FROM "Message"
+      WHERE "attachments" IS NOT NULL
+        AND jsonb_typeof("attachments"::jsonb) = 'array'
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements("attachments"::jsonb) AS "elem"
+          WHERE "elem"->>'fileRef' = ${fileRef}
+        )
+      LIMIT 1`;
+    return rows.length > 0;
+  }
+
+  /**
+   * 把本轮附件拼成注入 prompt 的文本块。
+   * 超预算时按 token 估算截断（保留开头，通常标题和结论都在前面）。
+   * 过期/不存在的 id 会带回来让调用方提示用户重新上传。
+   *
+   * @param inlineItems 随消息直传、已当场解析好的附件（单步流），优先于 id 引用的
+   */
+  buildAttachmentContext(
+    attachmentIds?: string[],
+    inlineItems?: Array<{
+      id?: string;
+      fileRef?: string;
+      url?: string;
+      name: string;
+      kind: AttachmentKind;
+      text: string;
+      durationSec?: number;
+    }>,
+  ): {
+    context: string;
+    used: ChatAttachment[];
+    missing: string[];
+  } {
+    // 内联附件（本轮直传）排在前面，再是按 id 引用的
+    const found: ChatAttachment[] = (inlineItems ?? []).map((it) => ({
+      id: it.id ?? it.fileRef ?? 'inline',
+      name: it.name,
+      kind: it.kind,
+      text: it.text,
+      charCount: it.text.length,
+      durationSec: it.durationSec,
+      fileRef: it.fileRef,
+      createdAt: Date.now(),
+    }));
+
+    let missing: string[] = [];
+    if (attachmentIds?.length) {
+      const r = this.attachmentStore.getMany(attachmentIds);
+      found.push(...r.found);
+      missing = r.missing;
+    }
+    if (!found.length && !missing.length) {
+      return { context: '', used: [], missing };
+    }
+
+    // 内存条目过期但文件还在盘上 → 重新解析「复活」，
+    // 这样 30 天后回看历史消息仍能就同一份附件继续追问
+    if (missing.length) {
+      const revived = this.reviveAttachmentsFromDisk(missing);
+      found.push(...revived);
+      missing = missing.filter((id) => !revived.some((r) => r.id === id));
+    }
+    if (!found.length) {
+      return { context: '', used: [], missing };
+    }
+
+    const blocks: string[] = [];
+    let used: ChatAttachment[] = [];
+    let consumed = 0;
+
+    for (const item of found) {
+      const kindLabel = item.kind === 'video' ? '视频转写' : '文档';
+      const duration =
+        item.durationSec != null ? `（时长 ${item.durationSec} 秒）` : '';
+      const header = `【${kindLabel}：${item.name}${duration}】\n`;
+
+      let body = item.text;
+      // 逐份截断：这份超了就先砍这份，砍完还超才丢整份
+      const budget = this.MAX_ATTACHMENT_TOKENS - consumed;
+      if (estimateTokens(header + body) > budget) {
+        body = body.slice(0, Math.max(0, budget * 4 - header.length));
+      }
+      consumed += estimateTokens(header + body);
+
+      blocks.push(header + body);
+      used.push(item);
+      if (consumed >= this.MAX_ATTACHMENT_TOKENS) break;
+    }
+
+    return {
+      context: blocks.join('\n\n'),
+      used,
+      missing,
+    };
+  }
+
+  // ---------------- 附件文件：读取、复活、清扫 ----------------
+
+  /** 删除一个附件文件（不存在也视为成功，配合创建/清空逻辑） */
+  private async removeAttachmentFile(fileRef: string): Promise<void> {
+    try {
+      await rm(join(this.attachmentDir, fileRef), { force: true });
+    } catch {
+      /* 删不掉不阻塞主流程，交给 30 天清扫兜底 */
+    }
+  }
+
+  /** 附件文件名规则：`<uuid>.<白名单扩展名>`，与落盘时一致 */
+  private static readonly ATTACHMENT_EXTS = [
+    // 文档
+    'pdf', 'doc', 'docx', 'txt', 'md', 'csv', 'json', 'log', 'xml',
+    // 图片
+    'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif',
+    // 视频
+    'mp4', 'mov', 'mkv', 'avi', 'webm', 'flv', 'm4v', 'wmv',
+    // 代码（按纯文本内联展示）
+    'js', 'ts', 'py', 'go', 'java', 'css',
+    // 兜底：白名单外的一律存成 bin，只能下载不能渲染
+    'bin',
+  ];
+  private static readonly ATTACHMENT_FILE_RE = new RegExp(
+    `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.(${ChatService.ATTACHMENT_EXTS.join('|')})$`,
+    'i',
+  );
+
+  /**
+   * 附件 mime 白名单。
+   * ⚠️ 故意不含 text/html / image/svg+xml：这两类能以我们自己的 origin 渲染，
+   *    等于存储型 XSS 通道；这类扩展名落盘时会被归一成 bin，只能下载。
+   */
+  private static readonly ATTACHMENT_MIME: Record<string, string> = {
+    pdf: 'application/pdf',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    txt: 'text/plain; charset=utf-8',
+    md: 'text/plain; charset=utf-8',
+    csv: 'text/csv; charset=utf-8',
+    json: 'application/json',
+    log: 'text/plain; charset=utf-8',
+    xml: 'text/xml',
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    bmp: 'image/bmp',
+    avif: 'image/avif',
+    mp4: 'video/mp4',
+    mov: 'video/quicktime',
+    mkv: 'video/x-matroska',
+    avi: 'video/x-msvideo',
+    webm: 'video/webm',
+    flv: 'video/x-flv',
+    m4v: 'video/x-m4v',
+    wmv: 'video/x-ms-wmv',
+    js: 'text/plain; charset=utf-8',
+    ts: 'text/plain; charset=utf-8',
+    py: 'text/plain; charset=utf-8',
+    go: 'text/plain; charset=utf-8',
+    java: 'text/plain; charset=utf-8',
+    css: 'text/css; charset=utf-8',
+  };
+
+  /** 落盘用的扩展名：白名单内保留原样，白名单外一律 bin（保证文件可服务、可清扫） */
+  private attachmentExt(fileName: string): string {
+    const ext = extname(fileName || '').toLowerCase().replace(/^\./, '');
+    return ChatService.ATTACHMENT_EXTS.includes(ext) ? ext : 'bin';
+  }
+
+  /**
+   * 取一个附件文件用于返回给前端：校验文件名、限定在附件目录内、
+   * 按扩展名白名单推 content-type（**不信任磁盘内容**，防存储型 XSS）。
+   */
+  async getAttachmentFile(
+    fileRef: string,
+  ): Promise<{ path: string; contentType: string; fileName: string }> {
+    if (!ChatService.ATTACHMENT_FILE_RE.test(fileRef)) {
+      throw new BadRequestException('非法文件名');
+    }
+    const path = resolve(this.attachmentDir, fileRef);
+    if (!path.startsWith(resolve(this.attachmentDir) + sep)) {
+      throw new BadRequestException('非法文件名');
+    }
+    if (!existsSync(path)) {
+      throw new NotFoundException('附件不存在或已过期删除');
+    }
+    const ext = extname(fileRef).slice(1).toLowerCase();
+    return {
+      path,
+      contentType:
+        ChatService.ATTACHMENT_MIME[ext] || 'application/octet-stream',
+      // 对外文件名统一用 uuid，不泄露原始文件名（附件名已在消息元数据里）
+      fileName: fileRef,
+    };
+  }
+
+  /**
+   * 内存条目过期后，尝试从磁盘重新解析附件（「复活」）。
+   * 让用户 30 天内都能就历史消息里的同一份文件继续追问，不用重新上传。
+   */
+  private reviveAttachmentsFromDisk(ids: string[]): ChatAttachment[] {
+    const out: ChatAttachment[] = [];
+    const uuidIds = ids.filter((id) => /^[0-9a-f-]{36}$/i.test(id));
+    if (!uuidIds.length) return out;
+
+    // 目录只列一次，多个 id 共用；列失败（目录不存在）就当作没有可复活的
+    let dirEntries: string[] = [];
+    try {
+      dirEntries = readdirSync(this.attachmentDir);
+    } catch {
+      return out;
+    }
+
+    for (const id of uuidIds) {
+      try {
+        const fileRef = dirEntries.find(
+          (n) => n.startsWith(`${id}.`) && ChatService.ATTACHMENT_FILE_RE.test(n),
+        );
+        if (!fileRef) continue;
+
+        const buffer = readFileSync(join(this.attachmentDir, fileRef));
+        const parsed = this.parseAttachmentSync(buffer, fileRef);
+        if (!parsed) continue;
+
+        const item: ChatAttachment = {
+          id,
+          name: parsed.name,
+          kind: parsed.kind,
+          text: parsed.text,
+          charCount: parsed.text.length,
+          durationSec: parsed.durationSec,
+          fileRef,
+          createdAt: Date.now(),
+        };
+        // 顺手回填内存，短时间内的再次追问不用再解析
+        this.attachmentStore.set(item);
+        out.push(item);
+        console.log(`📎 附件从磁盘复活: ${fileRef}（${parsed.kind}）`);
+      } catch {
+        /* 单个失败不影响其它 */
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 同步解析（仅「复活」路径用）：视频转写需要异步 ASR，这里不支持，
+   * 遇到视频只返回元信息 + 提示文本，不阻塞历史追问的降级体验。
+   */
+  private parseAttachmentSync(
+    buffer: Buffer,
+    fileRef: string,
+  ): { name: string; kind: AttachmentKind; text: string; durationSec?: number } | null {
+    const ext = extname(fileRef).toLowerCase();
+    const isVideo = isVideoExt(ext);
+    if (isVideo) {
+      // 视频转写要调 ASR，且可能几十秒；历史追问场景下降级为提示，不自动烧钱
+      return {
+        name: fileRef,
+        kind: 'video',
+        text: '（该视频的转写文本已不在内存中。请重新发送该视频以再次转写。）',
+      };
+    }
+    const text = buffer.toString('utf8').replace(/\u0000/g, '');
+    // PDF/DOCX 等二进制格式同步解析不了，只能提示
+    if (!text.trim() || /[\u0000-\u0008\u000e-\u001f]/.test(text.slice(0, 1000))) {
+      return { name: fileRef, kind: 'document', text: '（该文档内容已从内存回收，请重新发送以解析。）' };
+    }
+    return { name: fileRef, kind: 'document', text: text.trim() };
+  }
+
+  /**
+   * 清理超过保留期且**未被任何消息引用**的附件文件。
+   * 双条件 AND：既不会删到正在用的，也不会让磁盘无限增长。
+   */
+  async sweepExpiredAttachments(): Promise<number> {
+    if (!existsSync(this.attachmentDir)) return 0;
+    const entries = readdirSync(this.attachmentDir).filter((n) =>
+      ChatService.ATTACHMENT_FILE_RE.test(n),
+    );
+    if (!entries.length) return 0;
+
+    const referenced = await this.referencedAttachmentFileRefs();
+    const now = Date.now();
+    let removed = 0;
+
+    for (const name of entries) {
+      if (referenced.has(name)) continue;
+      try {
+        const st = statSync(join(this.attachmentDir, name));
+        if (!st.isFile() || now - st.mtimeMs < this.attachmentRetainMs) continue;
+        await rm(join(this.attachmentDir, name), { force: true });
+        removed++;
+      } catch {
+        /* 单个失败不影响整体 */
+      }
+    }
+    if (removed) {
+      console.log(
+        `🧹 附件清扫：删除 ${removed} 个超过 ${Math.round(
+          this.attachmentRetainMs / 86400000,
+        )} 天且未被引用的附件`,
+      );
+    }
+    return removed;
+  }
+
+  /** 所有被消息引用过的附件 fileRef（清扫要跳过它们） */
+  private async referencedAttachmentFileRefs(): Promise<Set<string>> {
+    const rows = await this.prisma.$queryRaw<{ ref: string | null }[]>`
+      SELECT DISTINCT elem->>'fileRef' AS "ref"
+      FROM "Message", jsonb_array_elements("attachments"::jsonb) AS "elem"
+      WHERE "attachments" IS NOT NULL
+        AND jsonb_typeof("attachments"::jsonb) = 'array'`;
+    return new Set(
+      rows.map((r) => r.ref).filter((v): v is string => !!v),
+    );
+  }
+
+  /** 启动附件清扫定时器（unref，不拖住进程退出） */
+  private startAttachmentSweeper(): void {
+    const intervalMs = Number(
+      process.env.ATTACHMENT_SWEEP_INTERVAL_MS ?? 24 * 60 * 60 * 1000,
+    );
+    const timer = setInterval(() => {
+      void this.sweepExpiredAttachments().catch((e: any) =>
+        console.warn('🧹 附件清扫失败:', e?.message || e),
+      );
+    }, intervalMs);
+    timer.unref();
+    console.log(
+      `🧹 附件清扫已启动：每 ${Math.round(intervalMs / 3600000)} 小时一次，` +
+        `保留 ${Math.round(this.attachmentRetainMs / 86400000)} 天`,
+    );
+  }
+
 
   // ✅ 剥离服务器端存储路径，不对外暴露 filesystem 路径
   private kbPublic(record: any): any {
@@ -1419,58 +2330,9 @@ export class ChatService {
   }
 
   // ✅ 文本抽取：文本类直接读；PDF 用 pdf-parse；DOCX 用 mammoth；老版 DOC 用 word-extractor；其他二进制仅存档不向量化
+  // ✅ 解析逻辑与聊天附件共用（见 document-text.ts），这里只做一层委托
   private async extractText(file: Express.Multer.File): Promise<string> {
-    const ext = extname(file.originalname).toLowerCase();
-    const isText =
-      file.mimetype.startsWith('text/') || this.kbTextExts.includes(ext);
-    if (isText) return file.buffer.toString('utf8');
-
-    if (ext === '.pdf') {
-      try {
-        const pdf = new PDFParse({ data: file.buffer });
-        const textResult = await pdf.getText();
-        await pdf.destroy();
-        return textResult.text || '';
-      } catch (e: any) {
-        console.error(
-          `extractText: 解析 PDF 失败 ${file.originalname}:`,
-          e?.message || e,
-        );
-        return '';
-      }
-    }
-
-    if (ext === '.docx') {
-      try {
-        const result = await mammoth.extractRawText({ buffer: file.buffer });
-        return result.value || '';
-      } catch (e: any) {
-        console.error(
-          `extractText: 解析 DOCX 失败 ${file.originalname}:`,
-          e?.message || e,
-        );
-        return '';
-      }
-    }
-
-    if (ext === '.doc') {
-      try {
-        const extractor = new WordExtractor();
-        const doc = await extractor.extract(file.buffer);
-        return doc.getBody() || '';
-      } catch (e: any) {
-        console.error(
-          `extractText: 解析 DOC 失败 ${file.originalname}:`,
-          e?.message || e,
-        );
-        return '';
-      }
-    }
-
-    console.warn(
-      `extractText: 不支持的文件类型 ${file.originalname}（${file.mimetype}），仅存档不向量化`,
-    );
-    return '';
+    return extractDocumentText(file);
   }
 
   // ✅ 修正 multipart 传输中的文件名乱码，覆盖两种常见客户端行为：

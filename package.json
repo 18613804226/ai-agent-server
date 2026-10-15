@@ -21,7 +21,9 @@
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
     "postinstall": "prisma skills sync || exit 0",
-    "contract:emit": "prisma contract emit"
+    "contract:emit": "prisma contract emit",
+    "test:integration": "vitest run --config ./vitest.config.integration.ts",
+    "test:all": "vitest run && vitest run --config ./vitest.config.integration.ts"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",
@@ -32,6 +34,7 @@
     "@prisma/client": "^7.10.0",
     "axios": "^1.20.0",
     "dotenv": "^18.0.1",
+    "exceljs": "^4.4.0",
     "ffmpeg-static": "^5.3.0",
     "fluent-ffmpeg": "^2.1.3",
     "mammoth": "^1.13.0",

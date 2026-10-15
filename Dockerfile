@@ -11,10 +11,10 @@ RUN pnpm config set registry https://registry.npmmirror.com \
     && pnpm config set fetch-timeout 60000 \
     && pnpm config set fetch-retries 5
 
-# 2. 复制所有源码
+# 2. 复制所有源码（.dockerignore 已排除 spec / test / vitest 配置）
 COPY . .
 
-# 3. 安装所有依赖
+# 3. 安装依赖（含 devDependencies：prisma CLI、typescript 等编译期需要）
 RUN pnpm install
 
 # 4. 注入临时 DATABASE_URL 并生成 Prisma 客户端
@@ -23,7 +23,21 @@ RUN DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ai-agent" npx pr
 # 5. 执行编译
 RUN pnpm run build
 
-# 6. 生产运行阶段
+# 6. 裁剪开发依赖，砍掉镜像里约 165MB 的无用包
+#    （typescript / prisma CLI / @prisma studio / vitest / oxlint ...）
+#    ⚠️ 必须先备份 Prisma 生成的运行时客户端：万一 prune 影响到
+#       node_modules/.prisma，症状是上线后才报 "did not initialize yet"，
+#       这里备份 + 恢复把它兜住；--ignore-scripts 保证 prune 只做删除、
+#       不会重跑 ffmpeg-static 的下载或 @prisma/client 的生成脚本。
+RUN cp -r node_modules/.prisma /tmp/prisma-generated
+RUN pnpm prune --prod --ignore-scripts
+RUN rm -rf node_modules/.prisma && cp -r /tmp/prisma-generated node_modules/.prisma
+
+# 7. 构建期自检：运行时依赖与 Prisma client 必须真的可用。
+#    宁可在这里构建失败，也不要带病上线（详见 scripts/selfcheck.cjs）
+RUN node scripts/selfcheck.cjs
+
+# 8. 生产运行阶段
 EXPOSE 3000
 
 CMD ["node", "dist/main.js"]

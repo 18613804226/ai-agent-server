@@ -59,6 +59,9 @@ model Message {
     content   String      @db.Text
     images    Json?
     sources   Json?
+    // ✅ 本轮附件元数据（name/kind/charCount/durationSec）：原文只在临时存储里、到期即弃，
+    //    不落库也不走向量库，避免聊天附件污染知识库
+    attachments Json?
     createdAt DateTime    @default(now())
 }
 

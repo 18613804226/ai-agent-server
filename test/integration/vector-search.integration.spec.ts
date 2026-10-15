@@ -1,13 +1,34 @@
-import { PrismaService } from '../prisma/prisma.service';
-import { VectorService } from './vector.service';
+/**
+ * 集成测试：真实 PostgreSQL + pgvector 的「按 fileId 检索」验证。
+ *
+ * 这个文件**故意不放进默认单元测试**：
+ * - 它会真实写入 DocumentChunk / KnowledgeFile
+ * - 需要 DATABASE_URL 指向可用的本地库
+ *
+ * 单独跑： npm run test:integration
+ * 没有配置 DB / key 时整组自动 skip（显示 skipped 而不是 failed）。
+ */
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
+import { PrismaService } from '../../src/prisma/prisma.service';
+import { VectorService } from '../../src/vector/vector.service';
 
-describe('REAL retrieval-by-file verification', () => {
-  const prisma = new PrismaService();
-  const vector = new VectorService(prisma);
-  vector.generateEmbedding = vi
-    .fn()
-    .mockResolvedValue(new Array(1024).fill(0.5));
-  const fileId = 'verify-' + Math.random().toString(16).slice(2, 10);
+const canRun = !!process.env.DATABASE_URL;
+
+describe.skipIf(!canRun)('REAL retrieval-by-file verification', () => {
+  let prisma: PrismaService;
+  let vector: VectorService;
+  let fileId: string;
+
+  beforeAll(() => {
+    // ✅ 懒构造：放在 import 期会因缺 key 直接抛错，导致整个文件都失败
+    prisma = new PrismaService();
+    vector = new VectorService(prisma);
+    // 该用例只验证 pgvector 的距离计算与 enabled 过滤，不需要真调 embedding 接口
+    vector.generateEmbedding = vi
+      .fn()
+      .mockResolvedValue(new Array(1024).fill(0.5));
+    fileId = 'verify-' + Math.random().toString(16).slice(2, 10);
+  });
 
   afterAll(async () => {
     await prisma.$executeRaw`

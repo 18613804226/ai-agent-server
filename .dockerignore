@@ -4,3 +4,8 @@ dist
 .env
 .DS_Store
 README.md
+
+# 测试与构建配置不进生产镜像：spec 可能有 fixture/占位密钥，且对运行无用
+**/*.spec.ts
+test
+vitest.config*.ts
