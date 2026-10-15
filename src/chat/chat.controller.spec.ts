@@ -63,7 +63,7 @@ describe('ChatController.streamMessage：只有文件没有 query', () => {
     const [sessionId, query, , , , , , inline] =
       chatService.sendMessageStream.mock.calls[0];
     expect(sessionId).toBe('sess-1');
-    expect(query).toBe('请阅读我上传的附件内容，并给出简明总结。');
+    expect(query).toBe('请概括上面的内容。');
     expect(inline).toHaveLength(1);
     expect(inline[0].text).toBe('test');
   });
@@ -81,7 +81,7 @@ describe('ChatController.streamMessage：只有文件没有 query', () => {
 
     const [, query, , , , , attachmentIds] =
       chatService.sendMessageStream.mock.calls[0];
-    expect(query).toBe('请阅读我上传的附件内容，并给出简明总结。');
+    expect(query).toBe('请概括上面的内容。');
     expect(attachmentIds).toEqual(['att-1']);
   });
 

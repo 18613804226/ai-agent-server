@@ -264,9 +264,10 @@ export class ChatController {
     }
     // ✅ 只传了文件/附件时补一条默认指令，直接把文件喂给大模型阅读总结；
     //    否则空 query 会变成一条空的 user 消息，部分模型会拒答或返回空。
-    const query = rawQuery.trim()
-      ? rawQuery
-      : '请阅读我上传的附件内容，并给出简明总结。';
+    // ⚠️ 措辞必须中性：实测 glm-4-flash 只要问句里出现「我上传的附件/文件」
+    //    就条件反射式拒答（「我无法访问您上传的附件」），哪怕正文就在 system prompt 里。
+    //    用「上面的内容」这种中性说法可规避该反射。
+    const query = rawQuery.trim() ? rawQuery : '请概括上面的内容。';
     // ✅ 类型/大小这类「一眼能看出」的错误，在建立 SSE 之前就以 400 返回，
     //    不必等连接建好再用 SSE error 事件告诉前端
     if (file) this.chatService.validateChatAttachment(file);
