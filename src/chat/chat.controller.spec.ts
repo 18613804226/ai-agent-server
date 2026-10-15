@@ -60,10 +60,11 @@ describe('ChatController.streamMessage：只有文件没有 query', () => {
     await drain(obs);
 
     expect(chatService.sendMessageStream).toHaveBeenCalledTimes(1);
-    const [sessionId, query, , , , , , inline] =
+    const [sessionId, query, , , , , , inline, persistContent] =
       chatService.sendMessageStream.mock.calls[0];
     expect(sessionId).toBe('sess-1');
     expect(query).toBe('请概括上面的内容。');
+    expect(persistContent).toBe(''); // 落库用用户原文，不写系统补的默认指令
     expect(inline).toHaveLength(1);
     expect(inline[0].text).toBe('test');
   });

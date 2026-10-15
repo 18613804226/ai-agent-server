@@ -798,6 +798,12 @@ export class ChatService {
       text: string;
       durationSec?: number;
     }>,
+    /**
+     * 落库到 Message.content 的原文（默认 = userQuery）。
+     * 「只传文件、没输问题」时，控制器会补一句默认指令喂给模型，
+     * 但**不该把这句系统补的话写进聊天记录** —— 传这个字段存用户原始输入（可能为空）。
+     */
+    persistContent?: string,
   ) {
     const overallStartTime = Date.now();
     const aborted = () => signal?.aborted === true;
@@ -859,7 +865,8 @@ export class ChatService {
             data: {
               sessionId,
               role: 'user',
-              content: userQuery,
+              // ✅ 落库用用户原文：只传文件时控制器补的默认指令不能进聊天记录
+              content: persistContent ?? userQuery,
               // ✅ 图片 URL 一起落库，历史会话才能还原出图
               images: hasImages ? images : undefined,
               // ✅ 附件只落元数据（名称/类型/字数），原文仍在临时存储里、到期即弃
@@ -936,6 +943,11 @@ export class ChatService {
 
       // ✅ 反转回时间正序，再从最旧一条开始装上下文
       historyMessages.reverse();
+      // ⚠️ 只传文件的用户消息 content 为空，glm 收到空 content 会直接 400。
+      //    历史里这类空消息直接丢弃（它对应的助手回复仍有内容，上下文不受影响）。
+      const historyForModel = historyMessages.filter((m: any) =>
+        typeof m.content === 'string' ? m.content.trim() !== '' : true,
+      );
 
       const MAX_CONTEXT_TOKENS = 800;
       const SIMILARITY_THRESHOLD = 0.45;
@@ -991,7 +1003,7 @@ export class ChatService {
         : '';
       const historySourceIds = [
         ...new Set(
-          historyMessages.flatMap((message: any) =>
+          historyForModel.flatMap((message: any) =>
             Array.isArray(message.sources)
               ? message.sources
                   .map((source: any) => source?.fileId)
@@ -1056,9 +1068,9 @@ export class ChatService {
         MAX_MODEL_IMAGES - currentRefs.length,
       );
       const historyImageRefs: string[] = [];
-      for (let i = historyMessages.length - 1; i >= 0; i--) {
+      for (let i = historyForModel.length - 1; i >= 0; i--) {
         if (historyImageRefs.length >= slotsForHistory) break;
-        const prev = historyMessages[i].images;
+        const prev = historyForModel[i].images;
         if (!Array.isArray(prev)) continue;
         for (const ref of prev) {
           if (historyImageRefs.length >= slotsForHistory) break;
@@ -1095,7 +1107,7 @@ export class ChatService {
       const imageTokens = currentImageUrls.length * MODEL_IMAGE_TOKEN_COST;
       let budget = MAX_INPUT_TOKENS - systemTokens - queryTokens - imageTokens;
 
-      const formattedMessages = (liveInfoQuery ? [] : historyMessages).map(
+      const formattedMessages = (liveInfoQuery ? [] : historyForModel).map(
         (msg: any) => {
           const role = ['user', 'assistant', 'system', 'tool'].includes(
             msg.role,

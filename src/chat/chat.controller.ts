@@ -337,6 +337,7 @@ export class ChatController {
             fileIds, // 知识库文件 ID 列表，用于限定 RAG 检索范围
             attachmentIds, // 先上传后引用的附件 ID
             inlineAttachments, // 随本条消息直传的附件（已当场解析）
+            rawQuery, // ✅ 落库用用户原文：只传文件时补的默认指令不进聊天记录
           );
 
           if (!isClientDisconnected) {
