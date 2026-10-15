@@ -251,10 +251,22 @@ export class ChatController {
       return undefined;
     };
 
-    const query = typeof body?.query === 'string' ? body.query : '';
-    if (!query.trim() && !file) {
+    const rawQuery = typeof body?.query === 'string' ? body.query : '';
+    const images = asList(body?.images);
+    const fileIds = asList(body?.fileIds);
+    const attachmentIds = asList(body?.attachmentIds);
+
+    // ✅ 「只传文件、没输问题」也要放行：有 file 或已上传附件即可。
+    //    两者都没有才报错，避免空请求白白建一条 SSE。
+    const hasAttachments = !!file || (attachmentIds?.length ?? 0) > 0;
+    if (!rawQuery.trim() && !hasAttachments) {
       throw new BadRequestException('query 和文件至少要提供一样');
     }
+    // ✅ 只传了文件/附件时补一条默认指令，直接把文件喂给大模型阅读总结；
+    //    否则空 query 会变成一条空的 user 消息，部分模型会拒答或返回空。
+    const query = rawQuery.trim()
+      ? rawQuery
+      : '请阅读我上传的附件内容，并给出简明总结。';
     // ✅ 类型/大小这类「一眼能看出」的错误，在建立 SSE 之前就以 400 返回，
     //    不必等连接建好再用 SSE error 事件告诉前端
     if (file) this.chatService.validateChatAttachment(file);
@@ -319,10 +331,10 @@ export class ChatController {
                 } as MessageEvent);
               }
             },
-            asList(body?.images), // 图片 URL 列表，交给大模型识别
+            images, // 图片 URL 列表，交给大模型识别
             abortController.signal,
-            asList(body?.fileIds), // 知识库文件 ID 列表，用于限定 RAG 检索范围
-            asList(body?.attachmentIds), // 先上传后引用的附件 ID
+            fileIds, // 知识库文件 ID 列表，用于限定 RAG 检索范围
+            attachmentIds, // 先上传后引用的附件 ID
             inlineAttachments, // 随本条消息直传的附件（已当场解析）
           );
 

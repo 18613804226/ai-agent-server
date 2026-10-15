@@ -74,7 +74,10 @@ export async function extractDocumentText(
   if (ext === '.pdf') {
     try {
       const pdf = new PDFParse({ data: file.buffer });
-      const textResult = await pdf.getText();
+      // ⚠️ pdf-parse 默认会在每页正文后插入 `-- N of M --` 页码分隔符，
+      //    纯噪声会被当正文喂给大模型（实测 4 字文档变成 20 字瞎内容）。
+      //    pageJoiner: '' → 只按空行拼接正文。
+      const textResult = await pdf.getText({ pageJoiner: '' });
       await pdf.destroy();
       return (textResult.text || '').replace(/\u0000/g, '');
     } catch (e: any) {
