@@ -4,6 +4,7 @@ import {
   DEFAULT_MODELS,
   errorMessage,
   errorStatus,
+  isAttachmentRefusal,
   isDegradableError,
   isRateLimitError,
   loadModelCascadeConfig,
@@ -130,35 +131,29 @@ describe('模型分层：复杂度判定', () => {
     expect(r.score).toBeLessThan(99);
     expect(r.complexity).toBe('complex');
   });
+});
 
-  it('含文档/视频附件 → 档位下限抬到 complex（免费层 glm-4-flash 会无视附件）', () => {
-    // 极简提问 + 无任何复杂特征，纯靠附件把档位拉起来
-    const r = classifyComplexity({
-      userQuery: '请总结一下',
-      hasImages: false,
-      hasAttachment: true,
-    });
-    expect(r.complexity).toBe('complex');
-    expect(r.reasons.join()).toContain('含文档/视频附件');
+describe('附件拒答识别（glm-4-flash 触发后换 qwen 兜底）', () => {
+  it('命中典型拒答文案', () => {
+    expect(
+      isAttachmentRefusal('很抱歉，但我无法直接访问或阅读您上传的附件内容。'),
+    ).toBe(true);
+    expect(
+      isAttachmentRefusal('很抱歉，作为文本交互的AI，我无法直接读取或访问附件。'),
+    ).toBe(true);
+    expect(
+      isAttachmentRefusal('我无法查看您上传的文件。'),
+    ).toBe(true);
   });
 
-  it('含附件不会误升到 expert 档', () => {
-    const r = classifyComplexity({
-      userQuery: '请总结一下',
-      hasImages: false,
-      hasAttachment: true,
-      expertThreshold: 5,
-    });
-    expect(r.complexity).toBe('complex');
-  });
-
-  it('无附件的极简提问仍是 simple', () => {
-    const r = classifyComplexity({
-      userQuery: '请总结一下',
-      hasImages: false,
-      hasAttachment: false,
-    });
-    expect(r.complexity).toBe('simple');
+  it('正常回答不误判', () => {
+    expect(
+      isAttachmentRefusal('文档内容只包含一个单词 test，没有其他实质信息。'),
+    ).toBe(false);
+    expect(
+      isAttachmentRefusal('根据附件，项目代号是阿尔法。'),
+    ).toBe(false);
+    expect(isAttachmentRefusal('')).toBe(false);
   });
 });
 

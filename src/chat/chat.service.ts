@@ -68,6 +68,7 @@ import {
   classifyComplexity,
   errorMessage,
   errorStatus,
+  isAttachmentRefusal,
   isDegradableError,
   isRateLimitError,
   loadModelCascadeConfig,
@@ -1224,12 +1225,11 @@ export class ChatService {
       const complexity = classifyComplexity({
         userQuery,
         hasImages,
-        hasAttachment: usedAttachments.length > 0,
         liveInfo: liveInfoQuery,
         threshold: this.modelConfig.threshold,
         expertThreshold: this.modelConfig.expertThreshold,
       });
-      const candidates = resolveModelCandidates(complexity, this.modelConfig, {
+      let candidates = resolveModelCandidates(complexity, this.modelConfig, {
         zhipuAvailable: !!this.zhipu,
       });
       const chainText = candidates
@@ -1267,6 +1267,16 @@ export class ChatService {
         );
       }
 
+      // ✅ 免费层 glm-4-flash 对「上传的附件」有拒答反射（见 isAttachmentRefusal）：
+      //    含附件时先把开头一小段内容"扣住"不发给前端，足够判断是不是拒答；
+      //    若命中拒答就换到下一个候选（qwen）重试本轮，用户完全看不到那句拒答。
+      const guardRefusal =
+        (usedAttachments?.length ?? 0) > 0 &&
+        !hasImages &&
+        candidates[0]?.provider === 'zhipu';
+      const REFUSAL_GATE_CHARS = 120;
+      let refusalRetried = false;
+
       for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
         if (aborted()) return;
 
@@ -1274,6 +1284,13 @@ export class ChatService {
         const toolAcc: ToolCallAccumulator = {};
         let roundReply = '';
         let roundTtft: number | null = null;
+        // 拒答守卫：gateOpen=false 时内容先攒在 gateBuf，够长或确认非拒答才放行
+        let gateOpen = !guardRefusal;
+        let gateBuf = '';
+        const emitContent = (text: string) => {
+          if (gateOpen) onChunk('content', text);
+          else gateBuf += text;
+        };
 
         const payload = {
           messages,
@@ -1337,8 +1354,18 @@ export class ChatService {
 
           if (textContent) {
             roundReply += textContent;
-            rawFullReply += textContent;
-            onChunk('content', textContent);
+            if (gateOpen) {
+              rawFullReply += textContent;
+              onChunk('content', textContent);
+            } else {
+              gateBuf += textContent;
+              // 攒够阈值仍未见拒答 → 放行已攒内容，之后正常流式
+              if (gateBuf.length >= REFUSAL_GATE_CHARS) {
+                gateOpen = true;
+                rawFullReply += gateBuf;
+                onChunk('content', gateBuf);
+              }
+            }
           }
         }
         } finally {
@@ -1347,6 +1374,41 @@ export class ChatService {
         }
 
         const toolCalls = finalizeToolCalls(toolAcc);
+
+        // ✅ 附件拒答兜底：仍是智谱、还没吐过任何内容、且命中拒答文案 → 换 qwen 重试本轮
+        if (
+          guardRefusal &&
+          !gateOpen &&
+          !refusalRetried &&
+          candidate.provider === 'zhipu' &&
+          !toolCalls.length &&
+          isAttachmentRefusal(roundReply)
+        ) {
+          refusalRetried = true;
+          candidates = candidates.filter((c) => c.provider !== 'zhipu');
+          if (candidates.length) {
+            console.warn(
+              `🧠 [模型分层] ${candidate.provider}:${candidate.model} 疑似拒答附件，` +
+                `换 ${candidates[0].provider}:${candidates[0].model} 重试`,
+            );
+            onChunk('thought', '免费模型未能读取附件，正在切换备用模型…');
+            round--; // 重试同一轮
+            continue;
+          }
+          // 没有可用备用模型 → 退化为把拒答正常发出
+          gateOpen = true;
+          if (gateBuf) {
+            rawFullReply += gateBuf;
+            onChunk('content', gateBuf);
+          }
+        } else if (!gateOpen) {
+          // 未命中拒答（或正常短回答）→ 放行扣住的内容
+          gateOpen = true;
+          if (gateBuf) {
+            rawFullReply += gateBuf;
+            onChunk('content', gateBuf);
+          }
+        }
         console.log(
           `⏱️ [性能监控] 第 ${round + 1} 轮流式耗时: ${Date.now() - streamStartTime}ms` +
             `，本轮首字 ${roundTtft ?? '-'}ms` +

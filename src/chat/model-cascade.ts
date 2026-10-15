@@ -203,12 +203,6 @@ const LONG_OUTPUT = [
 export function classifyComplexity(input: {
   userQuery: string;
   hasImages: boolean;
-  /**
-   * 本轮是否带文档/视频附件。
-   * ⚠️ 免费层 glm-4-flash 实测**不遵循**「附件内容放在 system prompt」的格式，
-   *    会直接拒答（「我无法访问您上传的附件」）。因此含附件时必须抬到复杂档。
-   */
-  hasAttachment?: boolean;
   liveInfo?: boolean;
   threshold?: number;
   expertThreshold?: number;
@@ -223,9 +217,6 @@ export function classifyComplexity(input: {
 
   if (input.hasImages) {
     push(1, '含图片输入走视觉模型');
-  }
-  if (input.hasAttachment) {
-    reasons.push('含文档/视频附件（免费层不遵循该格式，强制升级档位）');
   }
   if (q.length > 200) push(2, '长输入>200字');
   else if (q.length > 80) push(1, '中等长度输入>80字');
@@ -252,22 +243,30 @@ export function classifyComplexity(input: {
     threshold,
     input.expertThreshold ?? threshold + 2,
   );
-  let level: Complexity['complexity'] =
+  const level =
     score >= expertThreshold
       ? 'expert'
       : score >= threshold
         ? 'complex'
         : 'simple';
-  // ✅ 含附件时档位下限拉到 complex：避免落到 glm-4-flash 导致附件被无视
-  if (input.hasAttachment && level === 'simple') {
-    level = 'complex';
-  }
   return {
     tier: input.hasImages ? 'vision' : 'text',
     complexity: level,
     score,
     reasons,
   };
+}
+
+/**
+ * 附件「拒答」识别：免费层 glm-4-flash 会把「用户上传的附件」当成它没权限访问的东西而拒答
+ * （实测：用户问句里出现「我上传的附件/文件」就触发，与系统提示无关）。
+ * 命中后由调用方换到下一个候选（qwen）重试，而不是把这句拒答丢给用户。
+ */
+export const ATTACHMENT_REFUSAL_RE =
+  /无法[^。\n！!]{0,24}(访问|读取|阅读|查看|打开|获取)[^。\n！!]{0,24}(附件|文件|上传|文档)/;
+
+export function isAttachmentRefusal(text: string): boolean {
+  return ATTACHMENT_REFUSAL_RE.test(text || '');
 }
 
 /**
