@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { ChatController } from './chat.controller';
 
 /**
- * 只传文件 / 只传已上传附件、不输问题时：
- * 控制器应补一条默认指令，把文件喂给大模型，而不是报「query 和文件至少要提供一样」。
+ * 只传文件 / 只传已上传附件 / 只传图片，甚至不输问题时：
+ * 控制器应补一条默认指令喂给大模型，而不是报「query 和文件/图片至少要提供一样」。
  */
 function mkController() {
   const chatService = {
@@ -90,7 +90,29 @@ describe('ChatController.streamMessage：只有文件没有 query', () => {
     const { controller } = mkController();
     await expect(
       controller.streamMessage({ id: 'dev-1' }, 'sess-1', { query: '' }, undefined, mkRes()),
-    ).rejects.toThrow('query 和文件至少要提供一样');
+    ).rejects.toThrow('query 和文件/图片至少要提供一样');
+  });
+
+  it('只传 images、query 为空 → 用默认指令喂给模型，不报错', async () => {
+    const { controller, chatService } = mkController();
+    const obs = await controller.streamMessage(
+      { id: 'dev-1' },
+      'sess-1',
+      { query: '', images: ['/uploads/img-1234567890-abcdef01-2345-6789-abcd-ef0123456789.png'] },
+      undefined,
+      mkRes(),
+    );
+    await drain(obs);
+
+    expect(chatService.sendMessageStream).toHaveBeenCalledTimes(1);
+    const [, query, , images, , , , inline, persistContent] =
+      chatService.sendMessageStream.mock.calls[0];
+    expect(query).toBe('请概括上面的内容。');
+    expect(images).toEqual([
+      '/uploads/img-1234567890-abcdef01-2345-6789-abcd-ef0123456789.png',
+    ]);
+    expect(persistContent).toBe(''); // 落库用用户原文，不写系统补的默认指令
+    expect(inline).toBeUndefined(); // 图片走 URL 列表，不是 inline file
   });
 
   it('只输 query、不带文件 → query 原样传入', async () => {
@@ -104,5 +126,40 @@ describe('ChatController.streamMessage：只有文件没有 query', () => {
     );
     await drain(obs);
     expect(chatService.sendMessageStream.mock.calls[0][1]).toBe('你好');
+  });
+});
+
+describe('ChatController.getAttachmentHtml：docx 在线预览', () => {
+  it('返回 text/html + CSP 头，正文来自 service', async () => {
+    const chatService = {
+      getAttachmentHtml: vi
+        .fn()
+        .mockResolvedValue('<!DOCTYPE html><body><p>hi</p></body>'),
+    };
+    const controller = new ChatController(
+      chatService as never,
+      { assertQuota: vi.fn(), recordUsage: vi.fn() } as never,
+    );
+    const headers: Record<string, string> = {};
+    const res = {
+      setHeader: vi.fn((k: string, v: string) => {
+        headers[k] = v;
+      }),
+      send: vi.fn(),
+    };
+    const ref = '00000000-0000-4000-8000-000000000003.docx';
+    await controller.getAttachmentHtml(ref, res as never);
+
+    expect(chatService.getAttachmentHtml).toHaveBeenCalledWith(ref);
+    expect(headers['Content-Type']).toBe('text/html; charset=utf-8');
+    expect(headers['Content-Security-Policy']).toContain(
+      "default-src 'none'",
+    );
+    expect(headers['Content-Security-Policy']).toContain('img-src data:');
+    expect(headers['X-Content-Type-Options']).toBe('nosniff');
+    expect(headers['Cache-Control']).toBe('no-store');
+    expect(res.send).toHaveBeenCalledWith(
+      '<!DOCTYPE html><body><p>hi</p></body>',
+    );
   });
 });

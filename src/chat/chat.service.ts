@@ -5,6 +5,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  UnsupportedMediaTypeException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { VectorService } from '../vector/vector.service.js';
@@ -33,9 +34,6 @@ import { createHash, randomUUID } from 'crypto';
 import { join, resolve, sep, extname } from 'path';
 import { tmpdir } from 'os';
 import { evaluate } from 'mathjs';
-import { PDFParse } from 'pdf-parse';
-import mammoth from 'mammoth';
-import WordExtractor from 'word-extractor';
 import {
   finalizeToolCalls,
   mergeToolCallDeltas,
@@ -46,6 +44,9 @@ import {
   extractDocumentText,
   isDocumentExt,
   isVideoExt,
+  convertDocxToHtml,
+  convertDocToHtml,
+  convertXlsxToHtml,
 } from './document-text.js';
 import {
   AttachmentStore,
@@ -61,6 +62,7 @@ import {
 import {
   checkExcelBuffer,
   ExcelTooLargeError,
+  formatExcelFindingsForModel,
   type ExcelCheckOptions,
   type ExcelCheckResult,
 } from './excel-check.js';
@@ -1072,9 +1074,11 @@ export class ChatService {
     8. 若用户追问的内容只存在于旧回答而本轮没有检索到相关资料，应说明它来自此前对话且本轮未能从当前启用资料重新核实。仅在相关时说明，不要每轮重复提醒。
     9. 【历史对话来源状态】只是给你判断来源是否可用的内部信息，属于系统注记，严禁在回答里复述或模仿这类内部标注。
      
-      【本轮用户提供的附件】：
-       ${attachmentContext ||
-         '（本次对话没有附带文档或视频；如用户声称传了文件，提醒重新上传）'}
+      【附件处理】：
+       - 本轮如有附件，其正文会直接附在用户消息里（以「【文档：文件名】」或「【视频转写：文件名】」开头），请基于它回答。
+       - 严禁声称「无法访问/读取附件」；也不要用历史对话里的旧附件代替本轮附件。
+       - 用户说「上面的内容」「这份文件」时，指的就是本轮附件。
+       - 若用户声称传了文件、但用户消息里并没有附件正文，提醒其重新上传。
 
      【参考资料】：
       ${context || '本轮没有提供知识库参考资料。'}
@@ -1127,9 +1131,13 @@ export class ChatService {
           image_url: { url: dataUrl },
         }));
 
+      // ✅ 附件正文并入「当前用户消息」（见下方 userMessage 说明），预算里也要按它算 token
+      const userText = attachmentContext
+        ? `${attachmentContext}\n\n${userQuery}`
+        : userQuery;
       const MAX_INPUT_TOKENS = 6000;
       const systemTokens = estimateTokens(systemPrompt);
-      const queryTokens = estimateTokens(userQuery);
+      const queryTokens = estimateTokens(userText);
       const currentImageUrls = await Promise.all(
         currentRefs.map((ref) => this.toDataURL(ref)),
       );
@@ -1188,17 +1196,19 @@ export class ChatService {
         keptMessages.unshift(msg);
       }
 
-      // ✅ 构造多模态用户消息：文本 + 图片（image_url），这样大模型可以识别图片内容
-      //   图片 URL 先统一转成 base64 data URL，保证本地/内网部署也能被大模型读取
+      // ✅ 附件正文放进「当前用户消息」而不是系统提示：默认指令是「请概括上面的内容。」，
+      //    只有把附件放在用户轮里，模型才会把它当作「上面的内容」来总结。放 system 里时，
+      //    模型会去总结历史对话（实测：会话里有过旧附件讨论时，模型会复述旧附件、忽略本轮新附件）。
+      //    userText 已在上面（预算计算处）定义。
       const userMessage: any = currentImageUrls.length
         ? {
             role: 'user',
             content: [
-              { type: 'text', text: userQuery },
+              { type: 'text', text: userText },
               ...imageParts(currentImageUrls),
             ],
           }
-        : { role: 'user', content: userQuery };
+        : { role: 'user', content: userText };
 
       // ✅ 保证 keptMessages 末尾是当前用户问题（带图的多模态版本）
       //   历史查询与上面的写入是并发的，可能已经把这条读进来了 → 原地替换而不是追加，避免重复发两条
@@ -1849,7 +1859,7 @@ export class ChatService {
       !isVideo && (isDocumentExt(ext) || mime.startsWith('text/'));
     if (!isVideo && !isDocument) {
       throw new BadRequestException(
-        `不支持的文件类型 ${ext || file.mimetype}，目前支持文档（pdf/doc/docx/txt/md/代码等）与视频（mp4/mov/mkv 等）`,
+        `不支持的文件类型 ${ext || file.mimetype}，目前支持文档（pdf/doc/docx/xlsx/txt/md/代码等）与视频（mp4/mov/mkv 等）`,
       );
     }
   }
@@ -1871,6 +1881,8 @@ export class ChatService {
     text: string;
     charCount: number;
     durationSec?: number;
+    /** .xlsx 专用：上传时默认跑一遍公式/数据质量检查，结果随附件回传 */
+    excelCheck?: ExcelCheckResult;
   }> {
     this.validateChatAttachment(file);
 
@@ -1919,7 +1931,25 @@ export class ChatService {
       };
     }
 
-    const text = (await extractDocumentText(file)).trim();
+    let text = (await extractDocumentText(file)).trim();
+    // ✅ .xlsx 默认走一遍公式/数据质量检查：把结果报告拼在最前面注入上下文，
+    //    用户不提问（默认指令「请概括上面的内容。」）也会先看到错误清单；
+    //    原始数据表附在后面，用户追问具体数据时仍可用。
+    let excelCheck: ExcelCheckResult | undefined;
+    if (ext === '.xlsx') {
+      try {
+        excelCheck = await checkExcelBuffer(name, file.buffer);
+        const report = formatExcelFindingsForModel(excelCheck);
+        text = report + (text ? `\n\n【原始数据】\n${text}` : '');
+        console.log(
+          `📊 xlsx 自动检查 ${name}: ${excelCheck.summary.total} 个问题` +
+            `（公式错误 ${excelCheck.summary.formulaErrors}，数据质量 ${excelCheck.summary.dataIssues}）`,
+        );
+      } catch (e: any) {
+        // 检查失败不致命：退回纯文本，附件照常可用
+        console.warn(`📊 xlsx 自动检查失败 ${name}:`, e?.message || e);
+      }
+    }
     if (!text) {
       await this.removeAttachmentFile(fileRef);
       throw new BadRequestException(
@@ -1929,7 +1959,7 @@ export class ChatService {
     console.log(
       `📎 文档解析完成 ${name}: ${text.length} 字，耗时 ${Date.now() - t0}ms`,
     );
-    return { ...base, kind: 'document', text, charCount: text.length };
+    return { ...base, kind: 'document', text, charCount: text.length, excelCheck };
   }
 
   /**
@@ -1971,6 +2001,8 @@ export class ChatService {
       charCount: parsed.charCount,
       durationSec: parsed.durationSec,
       url: parsed.url,
+      // .xlsx 会把上传时的自动检查结果一并回传，前端可即时渲染错误清单
+      excelCheck: parsed.excelCheck,
     };
   }
 
@@ -2125,7 +2157,7 @@ export class ChatService {
   /** 附件文件名规则：`<uuid>.<白名单扩展名>`，与落盘时一致 */
   private static readonly ATTACHMENT_EXTS = [
     // 文档
-    'pdf', 'doc', 'docx', 'txt', 'md', 'csv', 'json', 'log', 'xml',
+    'pdf', 'doc', 'docx', 'xlsx', 'txt', 'md', 'csv', 'json', 'log', 'xml',
     // 图片
     'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif',
     // 视频
@@ -2149,6 +2181,7 @@ export class ChatService {
     pdf: 'application/pdf',
     doc: 'application/msword',
     docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     txt: 'text/plain; charset=utf-8',
     md: 'text/plain; charset=utf-8',
     csv: 'text/csv; charset=utf-8',
@@ -2209,6 +2242,86 @@ export class ChatService {
       // 对外文件名统一用 uuid，不泄露原始文件名（附件名已在消息元数据里）
       fileName: fileRef,
     };
+  }
+
+  /**
+   * 把 .docx 附件转成自包含 HTML（图片内联 data URI）供 WebView 在线预览。
+   *
+   * 安全：mammoth 输出的正文文本已转义，且包裹模板由我们掌控；
+   *   控制器侧另加 CSP（禁脚本/禁外链）兜底，与「禁止直接以 text/html 直出磁盘文件」
+   *   的既有策略不冲突 —— 本接口只对转换结果输出，不接受用户原始 HTML。
+   *
+   * .docx 走 mammoth（带排版/图片）；老版 .doc 走 word-extractor 纯文本 HTML（仅可读，
+   * 无排版/图片）；.xlsx 走 exceljs 生成 HTML 表格；其余类型返回 415，前端回退下载。
+   */
+  async getAttachmentHtml(fileRef: string): Promise<string> {
+    if (!ChatService.ATTACHMENT_FILE_RE.test(fileRef)) {
+      throw new BadRequestException('非法文件名');
+    }
+    const path = resolve(this.attachmentDir, fileRef);
+    if (!path.startsWith(resolve(this.attachmentDir) + sep)) {
+      throw new BadRequestException('非法文件名');
+    }
+    const ext = extname(fileRef).slice(1).toLowerCase();
+    if (ext !== 'docx' && ext !== 'doc' && ext !== 'xlsx') {
+      throw new UnsupportedMediaTypeException(
+        '该文件类型不支持在线预览，请下载后查看',
+      );
+    }
+    if (!existsSync(path)) {
+      throw new NotFoundException('附件不存在或已过期删除');
+    }
+    let body: string;
+    try {
+      const buf = await readFile(path);
+      body =
+        ext === 'docx'
+          ? await convertDocxToHtml(buf)
+          : ext === 'doc'
+            ? await convertDocToHtml(buf)
+            : await convertXlsxToHtml(buf);
+    } catch (e: any) {
+      console.error(`📄 文档预览转换失败 ${fileRef}:`, e?.message || e);
+      throw new UnsupportedMediaTypeException('文档解析失败，无法预览');
+    }
+    return this.wrapPreviewHtml(body);
+  }
+
+  /** 包一层带基础样式（支持深色模式）的完整 HTML 文档 */
+  private wrapPreviewHtml(body: string): string {
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>文档预览</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;line-height:1.75;max-width:820px;margin:0 auto;padding:24px 16px;color:#1f2329;background:#fff;word-wrap:break-word;overflow-wrap:break-word;}
+  img{max-width:100%;height:auto;}
+  table{border-collapse:collapse;max-width:100%;}
+  td,th{border:1px solid #ccc;padding:6px 10px;}
+  h1,h2,h3,h4{line-height:1.4;}
+  a{color:#2b6cb0;}
+  .xl-sheet{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 0 24px;}
+  .xl-sheet-name{font-size:14px;font-weight:600;color:#888;margin:0 0 8px;}
+  table.sheet{font-size:13px;white-space:nowrap;max-width:none;}
+  table.sheet td{border:1px solid #ddd;padding:4px 8px;}
+  .xl-note{color:#999;font-size:12px;margin:6px 0 0;}
+  .xl-empty{color:#999;}
+  @media (prefers-color-scheme:dark){
+    body{color:#e5eaf3;background:#1a1a1a;}
+    td,th{border-color:#444;}
+    a{color:#6fa8ff;}
+    table.sheet td{border-color:#3a3a3a;}
+    .xl-sheet-name,.xl-note,.xl-empty{color:#9aa0a6;}
+  }
+</style>
+</head>
+<body>
+${body}
+</body>
+</html>`;
   }
 
   /**

@@ -657,3 +657,37 @@ export async function checkExcelBuffer(
     findings: findings.slice(0, opts.maxFindings),
   };
 }
+
+/**
+ * 把检查结果转成喂给大模型的紧凑文本报告。
+ * 用途：上传 .xlsx 时默认走一遍检查，把这报告拼进附件上下文，
+ * 用户即使不提问（默认「请概括上面的内容。」）也能看到错误清单。
+ * findings 最多列 maxItems 条，避免撑爆 prompt；外层还有 token 截断兜底。
+ */
+export function formatExcelFindingsForModel(
+  result: ExcelCheckResult,
+  maxItems = 50,
+): string {
+  const s = result.summary;
+  const checkedRows = result.sheets.reduce((n, x) => n + x.checkedRows, 0);
+  if (s.total === 0) {
+    return `【Excel 自动检查】${result.fileName}：未发现明显问题（已检查 ${checkedRows} 行数据）。`;
+  }
+  const lines = [
+    `【Excel 自动检查】${result.fileName}：共 ${s.total} 个问题` +
+      `（错误 ${s.errors} / 警告 ${s.warnings}；公式错误 ${s.formulaErrors} / 数据质量 ${s.dataIssues}）` +
+      (s.truncated ? '，结果已按规模截断' : '') +
+      '。',
+  ];
+  for (const f of result.findings.slice(0, maxItems)) {
+    const tag = f.type === 'formulaError' ? '公式错误' : '数据质量';
+    lines.push(
+      `- ${f.sheet}!${f.cell}【${tag} ${f.code}】${f.message}` +
+        (f.suggestion ? `；建议：${f.suggestion}` : ''),
+    );
+  }
+  if (result.findings.length > maxItems) {
+    lines.push(`（仅列出前 ${maxItems} 条，共 ${result.findings.length} 条）`);
+  }
+  return lines.join('\n');
+}

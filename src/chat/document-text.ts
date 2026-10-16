@@ -10,6 +10,7 @@ import { extname } from 'path';
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import WordExtractor from 'word-extractor';
+import ExcelJS from 'exceljs';
 
 export interface ParsableFile {
   buffer: Buffer;
@@ -32,7 +33,7 @@ export const DOC_TEXT_EXTS = [
 
 /** 这些扩展名认为是「文档」（可解析成文本给模型看） */
 export const DOCUMENT_EXTS = [
-  '.pdf', '.doc', '.docx',
+  '.pdf', '.doc', '.docx', '.xlsx',
   ...DOC_TEXT_EXTS.filter((e) => !['.env', '.gitignore'].includes(e)),
 ];
 
@@ -116,8 +117,176 @@ export async function extractDocumentText(
     }
   }
 
+  if (ext === '.xlsx') {
+    try {
+      return await extractXlsxText(file);
+    } catch (e: any) {
+      console.error(
+        `document-text: 解析 XLSX 失败 ${file.originalname}:`,
+        e?.message || e,
+      );
+      return '';
+    }
+  }
+
   console.warn(
     `document-text: 不支持的文件类型 ${file.originalname}（${file.mimetype}）`,
   );
   return '';
+}
+
+/**
+ * 把 exceljs 单元格值转成可读文本（公式取结果、错误取码、富文本/超链接取文字）。
+ * 与 excel-check 的 normalizeCell 同形，但这里只要纯文本、不要结构，故单独轻量实现。
+ */
+function xlsxCellToText(raw: unknown): string {
+  if (raw === null || raw === undefined) return '';
+  if (typeof raw === 'number') return String(raw);
+  if (typeof raw === 'boolean') return raw ? 'TRUE' : 'FALSE';
+  if (raw instanceof Date) return raw.toISOString().slice(0, 10);
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, any>;
+    if (obj.error) return String(obj.error);
+    // 公式取缓存结果；result 可能仍是对象（如富文本），递归一次即可
+    if (typeof obj.formula === 'string') return xlsxCellToText(obj.result);
+    if (Array.isArray(obj.richText))
+      return obj.richText.map((r: any) => r?.text ?? '').join('');
+    if (obj.hyperlink) return String(obj.text ?? obj.hyperlink);
+  }
+  try {
+    return JSON.stringify(raw);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * .xlsx → 每张工作表一段文本：表名 + 行（单元格用制表符分隔）。
+ * 上限 500 行/表，避免大表抽出超长文本撑爆 prompt（外层 buildAttachmentContext 还会再按 token 截断）。
+ * 仅 .xlsx；老版 .xls（BIFF）exceljs 不支持，由调用方拒绝。
+ */
+async function extractXlsxText(file: ParsableFile): Promise<string> {
+  const wb = new ExcelJS.Workbook();
+  // exceljs 声明入参是旧版 Buffer<ArrayBuffer>，与 @types/node 的 Buffer 在类型层不兼容，运行时一致
+  await wb.xlsx.load(file.buffer as unknown as any);
+
+  const parts: string[] = [];
+  wb.eachSheet((ws) => {
+    const rows = ws.rowCount || 0;
+    const cols = Math.max(1, ws.columnCount || 1);
+    const rowLimit = Math.min(rows, 500);
+    if (rowLimit === 0) return;
+    parts.push(`【工作表：${ws.name}】`);
+    for (let r = 1; r <= rowLimit; r++) {
+      const row = ws.getRow(r);
+      const cells: string[] = [];
+      for (let c = 1; c <= cols; c++) {
+        cells.push(xlsxCellToText(row.getCell(c).value));
+      }
+      // 整行空：跳过，省 token
+      if (cells.every((s) => s === '')) continue;
+      parts.push(cells.join('\t'));
+    }
+  });
+  return parts.join('\n').replace(/\u0000/g, '');
+}
+
+/**
+ * 把 .docx 转成 HTML 片段（不含 <html> 外壳），用于在线预览。
+ * 图片用 mammoth 内置 dataUri 转换器内联成 data URI，HTML 自包含、WebView 无需回拉。
+ * 仅 .docx 可转；老版 .doc 见 convertDocToHtml。
+ *
+ * @throws mammoth 解析失败时抛错（调用方应捕获后提示「无法预览」）
+ */
+export async function convertDocxToHtml(buffer: Buffer): Promise<string> {
+  const result = await mammoth.convertToHtml(
+    { buffer },
+    { convertImage: mammoth.images.dataUri },
+  );
+  return (result.value || '').replace(/\u0000/g, '');
+}
+
+/**
+ * 把纯文本转成可预览的 HTML 片段：HTML 转义 + 按空行分段包 <p>，段内换行转 <br>。
+ * 仅用于老版 .doc（word-extractor 只能取文本，无排版/表格/图片），凑一个「能读」的预览。
+ */
+export function docTextToHtml(text: string): string {
+  const escape = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
+    .filter((block) => block.length > 0)
+    .map((block) => `<p>${escape(block).replace(/\n/g, '<br>')}</p>`)
+    .join('');
+}
+
+/**
+ * 老版 .doc → 纯文本 HTML 片段（word-extractor 取正文再转义分段）。
+ * 无排版/表格/图片，仅「可读」预览。
+ *
+ * @throws 非 .doc 二进制或解析失败时抛错（调用方据此返回 415 回退下载）
+ */
+export async function convertDocToHtml(buffer: Buffer): Promise<string> {
+  const extractor = new WordExtractor();
+  const doc = await extractor.extract(buffer);
+  return docTextToHtml((doc.getBody() || '').replace(/\u0000/g, ''));
+}
+
+/** HTML 转义（预览用：单元格内容不可信，防止 < > & " 注入标签） */
+function escapeHtml(s: string): string {
+  return s.replace(
+    /[&<>"]/g,
+    (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] ?? c,
+  );
+}
+
+/**
+ * .xlsx → HTML 表格（每个工作表一个 section + table），供 WebView 在线预览。
+ * 单元格用 exceljs 值转文本后做 HTML 转义（不信任内容）。
+ * 每表最多 maxRowsPerSheet 行，超出给截断提示，避免超大表把 HTML 撑爆。
+ * 仅 .xlsx；老版 .xls（BIFF）exceljs 不支持，由调用方 415 回退下载。
+ *
+ * @throws 非 .xlsx 二进制解析失败时抛错（调用方据此返回 415）
+ */
+export async function convertXlsxToHtml(
+  buffer: Buffer,
+  maxRowsPerSheet = 1000,
+): Promise<string> {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buffer as unknown as any);
+
+  const sections: string[] = [];
+  wb.eachSheet((ws) => {
+    const rows = ws.rowCount || 0;
+    const cols = Math.max(1, ws.columnCount || 1);
+    const limit = Math.min(rows, maxRowsPerSheet);
+    const name = escapeHtml(ws.name);
+    if (limit === 0) {
+      sections.push(
+        `<section class="xl-sheet"><h3 class="xl-sheet-name">${name}</h3><p class="xl-empty">（空工作表）</p></section>`,
+      );
+      return;
+    }
+    const trs: string[] = [];
+    for (let r = 1; r <= limit; r++) {
+      const row = ws.getRow(r);
+      const tds: string[] = [];
+      for (let c = 1; c <= cols; c++) {
+        tds.push(`<td>${escapeHtml(xlsxCellToText(row.getCell(c).value))}</td>`);
+      }
+      trs.push(`<tr>${tds.join('')}</tr>`);
+    }
+    const note =
+      rows > limit
+        ? `<p class="xl-note">（仅显示前 ${limit} 行，共 ${rows} 行）</p>`
+        : '';
+    sections.push(
+      `<section class="xl-sheet"><h3 class="xl-sheet-name">${name}</h3><table class="sheet">${trs.join('')}</table>${note}</section>`,
+    );
+  });
+  if (!sections.length) return '<p class="xl-empty">（空工作簿）</p>';
+  return sections.join('').replace(/\u0000/g, '');
 }

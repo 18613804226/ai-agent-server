@@ -165,6 +165,29 @@ export class ChatController {
    * 历史回显不受影响。服务端另有定时清扫兜底未调用本接口的孤儿文件。
    */
   /**
+   * 在线预览 .docx / .doc：服务端转成自包含 HTML，WebView/iframe 直接 load 即可。
+   * - .docx：mammoth 转换，带排版 + 图片内联 data URI。
+   * - .doc：word-extractor 取纯文本包 HTML（仅可读，无排版/图片）。
+   * 仅有 CSP（禁脚本、禁外链）+ 已转义的正文，防存储型 XSS。
+   * 其余类型返回 415，前端回退下载。
+   */
+  @Get('attachments/:fileRef/html')
+  async getAttachmentHtml(
+    @Param('fileRef') fileRef: string,
+    @Res() res: Response,
+  ) {
+    const html = await this.chatService.getAttachmentHtml(fileRef);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'none'; img-src data:; style-src 'unsafe-inline'",
+    );
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(html);
+  }
+
+  /**
    * 读取/预览一个聊天附件（带登录态）。
    * PDF、图片、文本、视频按白名单 content-type 内联返回，其余走下载。
    * 不走静态托管：附件可能含 doc/txt/代码，任意后缀直出有存储型 XSS 风险。
@@ -256,15 +279,18 @@ export class ChatController {
     const fileIds = asList(body?.fileIds);
     const attachmentIds = asList(body?.attachmentIds);
 
-    // ✅ 「只传文件、没输问题」也要放行：有 file 或已上传附件即可。
-    //    两者都没有才报错，避免空请求白白建一条 SSE。
-    const hasAttachments = !!file || (attachmentIds?.length ?? 0) > 0;
+    // ✅ 「只传文件/图片、没输问题」也要放行：有 file、已上传附件或图片即可。
+    //    三者都没有才报错，避免空请求白白建一条 SSE。
+    const hasAttachments =
+      !!file ||
+      (attachmentIds?.length ?? 0) > 0 ||
+      (images?.length ?? 0) > 0;
     if (!rawQuery.trim() && !hasAttachments) {
-      throw new BadRequestException('query 和文件至少要提供一样');
+      throw new BadRequestException('query 和文件/图片至少要提供一样');
     }
-    // ✅ 只传了文件/附件时补一条默认指令，直接把文件喂给大模型阅读总结；
-    //    否则空 query 会变成一条空的 user 消息，部分模型会拒答或返回空。
-    // ⚠️ 措辞必须中性：实测 glm-4-flash 只要问句里出现「我上传的附件/文件」
+    // ✅ 只传了文件/图片/附件时补一条默认指令，直接喂给大模型阅读总结；
+    //    否则空 query 会变成一条空的 user 消息，部分模型会直接 400。
+    // ⚠️ 掌辞必须中性：实测 glm-4-flash 只要问句里出现「我上传的附件/文件」
     //    就条件反射式拒答（「我无法访问您上传的附件」），哪怕正文就在 system prompt 里。
     //    用「上面的内容」这种中性说法可规避该反射。
     const query = rawQuery.trim() ? rawQuery : '请概括上面的内容。';

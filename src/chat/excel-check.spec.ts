@@ -3,12 +3,15 @@ import {
   columnLettersToNumber,
   columnNumberToLetters,
   FORMULA_ERROR_META,
+  formatExcelFindingsForModel,
   inferColumnType,
   isRequiredColumn,
   normalizeCell,
   outlierBounds,
   parseCellRef,
   rowFingerprint,
+  type ExcelCheckResult,
+  type ExcelFinding,
   type NormalizedCell,
 } from './excel-check';
 
@@ -194,5 +197,76 @@ describe('excel-check：错误码元数据', () => {
       expect(meta.label.length).toBeGreaterThan(0);
       expect(meta.suggestion.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('excel-check：formatExcelFindingsForModel', () => {
+  const mkResult = (
+    summary: Partial<ExcelCheckResult['summary']>,
+    findings: ExcelFinding[],
+  ): ExcelCheckResult => ({
+    fileName: 'report.xlsx',
+    sheets: [{ name: 'Sheet1', rowCount: 3, columnCount: 2, checkedRows: 2 }],
+    summary: {
+      total: 0,
+      formulaErrors: 0,
+      dataIssues: 0,
+      errors: 0,
+      warnings: 0,
+      truncated: false,
+      ...summary,
+    },
+    findings,
+  });
+
+  const mkFinding = (over: Partial<ExcelFinding>): ExcelFinding => ({
+    sheet: 'Sheet1',
+    cell: 'A2',
+    row: 2,
+    column: 1,
+    columnName: '金额',
+    type: 'formulaError',
+    code: 'DIV0',
+    severity: 'error',
+    value: '#DIV/0!',
+    message: '公式报错 #DIV/0!：除数为 0 或空',
+    suggestion: '用 IFERROR 包一层',
+    ...over,
+  });
+
+  it('无问题时给「未发现明显问题」', () => {
+    const out = formatExcelFindingsForModel(mkResult({}, []));
+    expect(out).toContain('未发现明显问题');
+    expect(out).toContain('report.xlsx');
+  });
+
+  it('有问题时列出位置/类型/建议', () => {
+    const out = formatExcelFindingsForModel(
+      mkResult(
+        { total: 1, formulaErrors: 1, errors: 1 },
+        [mkFinding({})],
+      ),
+    );
+    expect(out).toContain('共 1 个问题');
+    expect(out).toContain('Sheet1!A2');
+    expect(out).toContain('公式错误');
+    expect(out).toContain('建议：用 IFERROR 包一层');
+  });
+
+  it('超过 maxItems 条时截断并提示', () => {
+    const findings = Array.from({ length: 5 }, (_, i) =>
+      mkFinding({ cell: `A${i + 1}`, message: `问题${i}` }),
+    );
+    const out = formatExcelFindingsForModel(
+      mkResult(
+        { total: 5, formulaErrors: 5, errors: 5 },
+        findings,
+      ),
+      2,
+    );
+    expect(out).toContain('问题0');
+    expect(out).toContain('问题1');
+    expect(out).not.toContain('问题2');
+    expect(out).toContain('仅列出前 2 条');
   });
 });
