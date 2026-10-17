@@ -14,6 +14,8 @@ RUN pnpm config set registry https://registry.npmmirror.com \
 # 2. 复制所有源码（.dockerignore 已排除 spec / test / vitest 配置）
 COPY . .
 
+ENV FFMPEG_BINARIES_URL=https://registry.npmmirror.com/-/binary/ffmpeg-static
+
 # 3. 安装依赖（含 devDependencies：prisma CLI、typescript 等编译期需要）
 RUN pnpm install --frozen-lockfile \
     --allow-build=@prisma/engines \
