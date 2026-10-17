@@ -34,13 +34,14 @@ RUN pnpm run build
 
 # 6. 裁剪开发依赖，砍掉镜像里约 165MB 的无用包
 #    （typescript / prisma CLI / @prisma studio / vitest / oxlint ...）
-#    ⚠️ 必须先备份 Prisma 生成的运行时客户端：万一 prune 影响到
-#       node_modules/.prisma，症状是上线后才报 "did not initialize yet"，
-#       这里备份 + 恢复把它兜住；--ignore-scripts 保证 prune 只做删除、
-#       不会重跑 ffmpeg-static 的下载或 @prisma/client 的生成脚本。
-RUN cp -r node_modules/.prisma /tmp/prisma-generated
+#    ⚠️ 生成的 Prisma 客户端在 pnpm 下位于 .pnpm/@prisma+client/…，顶层
+#       node_modules/.prisma 不一定存在（Prisma 7 就是这样），所以备份/恢复必须
+#       用 `if -d` 判断，否则路径不存在时 cp 直接失败。
+#       --ignore-scripts 保证 prune 只做删除、不重跑 ffmpeg-static 的下载或
+#       @prisma/client 的生成脚本；客户端最终是否可用由 step 7 的 selfcheck 把关。
+RUN if [ -d node_modules/.prisma ]; then cp -r node_modules/.prisma /tmp/prisma-generated; fi
 RUN pnpm prune --prod --ignore-scripts
-RUN rm -rf node_modules/.prisma && cp -r /tmp/prisma-generated node_modules/.prisma
+RUN if [ -d /tmp/prisma-generated ]; then rm -rf node_modules/.prisma && cp -r /tmp/prisma-generated node_modules/.prisma; fi
 
 # 7. 构建期自检：运行时依赖与 Prisma client 必须真的可用。
 #    宁可在这里构建失败，也不要带病上线（详见 scripts/selfcheck.cjs）
