@@ -15,7 +15,11 @@ RUN pnpm config set registry https://registry.npmmirror.com \
 COPY . .
 
 # 3. 安装依赖（含 devDependencies：prisma CLI、typescript 等编译期需要）
-RUN pnpm install
+RUN pnpm install --frozen-lockfile \
+    --allow-build=@prisma/engines \
+    --allow-build=esbuild \
+    --allow-build=ffmpeg-static \
+    --allow-build=prisma
 
 # 4. 注入临时 DATABASE_URL 并生成 Prisma 客户端
 RUN DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ai-agent" npx prisma generate
