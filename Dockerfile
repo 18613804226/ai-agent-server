@@ -1,4 +1,5 @@
-FROM dockerproxy.net/library/node:20-alpine
+# 改这一行
+FROM dockerproxy.net/library/node:20-slim
 WORKDIR /app
 
 # 1. 设置国内镜像源与网络超时参数
