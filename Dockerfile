@@ -3,10 +3,13 @@ FROM dockerproxy.net/library/node:20-slim
 WORKDIR /app
 
 # 1. 设置国内镜像源与网络超时参数
+#    pnpm 固定到 9：锁文件是 lockfileVersion 9.0（pnpm 9 生成），
+#    --frozen-lockfile 与 --allow-build 都是 pnpm 9 语义；装最新（pnpm 10）
+#    可能因版本漂移导致构建失败。
 RUN npm config set registry https://registry.npmmirror.com \
     && npm config set fetch-retry-mintimeout 20000 \
     && npm config set fetch-retry-maxtimeout 120000 \
-    && npm install -g pnpm
+    && npm install -g pnpm@9
 
 RUN pnpm config set registry https://registry.npmmirror.com \
     && pnpm config set fetch-timeout 60000 \
