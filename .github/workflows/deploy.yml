@@ -38,11 +38,13 @@ jobs:
             # 4. 同步数据库表结构。本项目没有 prisma/migrations，必须用 `db push`
             #    （不是 migrate deploy，那个没迁移文件时什么都不做）。
             #    在一次性容器里跑：用刚构建的 backend 镜像（prisma CLI 已在镜像里，
-            #    构建期装好，运行时无需联网下载），复用 .env 的 DATABASE_URL
-            #    （容器网络里是 postgres:5432）。--no-deps：postgres 上一步已起。
-            #    注意：不加 --accept-data-loss，避免非交互下静默删列/删表。
+            #    构建期装好，运行时无需联网下载）。--no-deps：postgres 上一步已起。
+            #    Prisma 7 的 db push 不认 --skip-generate；schema 的 datasource 没有 url，
+            #    所以用 --url 传连接串。`sh -c '...'` 单引号包住，让 $DATABASE_URL 在
+            #    容器内（.env 注入）展开，宿主机 shell 拿不到这个变量。
+            #    不加 --accept-data-loss，避免非交互下静默删列/删表。
             docker compose -f docker-compose.4001.yml --env-file .env run --rm --no-deps \
-              backend npx prisma db push --skip-generate
+              backend sh -c 'npx prisma db push --url "$DATABASE_URL"'
 
             # 5. 清理未使用的旧镜像，防止服务器磁盘被撑满.
             docker image prune -f
