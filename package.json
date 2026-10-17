@@ -73,6 +73,11 @@
     "vitest": "^4.1.2"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["prisma", "ffmpeg-static"]
+    "onlyBuiltDependencies": [
+      "@prisma/engines",
+      "prisma",
+      "esbuild",
+      "ffmpeg-static"
+    ]
   }
 }
