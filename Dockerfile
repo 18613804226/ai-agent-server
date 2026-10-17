@@ -21,11 +21,10 @@ COPY . .
 ENV FFMPEG_BINARIES_URL=https://registry.npmmirror.com/-/binary/ffmpeg-static
 
 # 3. 安装依赖（含 devDependencies：prisma CLI、typescript 等编译期需要）
-RUN pnpm install --frozen-lockfile \
-    --allow-build=@prisma/engines \
-    --allow-build=esbuild \
-    --allow-build=ffmpeg-static \
-    --allow-build=prisma
+#    构建脚本白名单走配置（package.json 的 pnpm.onlyBuiltDependencies / .npmrc 的
+#    only-built-dependencies）。pnpm 9 不认 --allow-build 这个 CLI flag，用了会直接报
+#    "Unknown option: 'allow-build'" 导致 install 失败——这正是之前构建失败的根因。
+RUN pnpm install --frozen-lockfile
 
 # 4. 注入临时 DATABASE_URL 并生成 Prisma 客户端
 RUN DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ai-agent" npx prisma generate
