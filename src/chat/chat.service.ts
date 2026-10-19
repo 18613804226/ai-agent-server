@@ -15,12 +15,7 @@ import * as https from 'https';
 import WebSocket from 'ws';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegPath from 'ffmpeg-static';
-import {
-  existsSync,
-  readdirSync,
-  readFileSync,
-  statSync,
-} from 'fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import {
   mkdir,
   readFile,
@@ -848,9 +843,7 @@ export class ChatService {
         durationSec: a.durationSec,
         // 原始文件已落盘，历史消息靠这两个字段回看/重新提问
         fileRef: a.fileRef,
-        url: a.fileRef
-          ? `/chat/attachments/${a.fileRef}`
-          : undefined,
+        url: a.fileRef ? `/chat/attachments/${a.fileRef}` : undefined,
       }));
       if (missingAttachments.length) {
         console.warn(
@@ -873,9 +866,7 @@ export class ChatService {
               // ✅ 图片 URL 一起落库，历史会话才能还原出图
               images: hasImages ? images : undefined,
               // ✅ 附件只落元数据（名称/类型/字数），原文仍在临时存储里、到期即弃
-              attachments: attachmentMeta.length
-                ? attachmentMeta
-                : undefined,
+              attachments: attachmentMeta.length ? attachmentMeta : undefined,
             },
           }),
           isCasualChat || liveInfoQuery
@@ -1260,7 +1251,9 @@ export class ChatService {
           ` 得分=${complexity.score}（complex>=${this.modelConfig.threshold}，` +
           `expert>=${this.modelConfig.expertThreshold}）` +
           `链路=${chainText || '无'}` +
-          (complexity.reasons.length ? ` | ${complexity.reasons.join(' ')}` : ''),
+          (complexity.reasons.length
+            ? ` | ${complexity.reasons.join(' ')}`
+            : ''),
       );
       // ✅ 把路由决策推给前端思考流：用户能直接看到"为什么选了这个模型"
       if (this.showRoutingThought && candidates.length) {
@@ -1335,59 +1328,61 @@ export class ChatService {
               break;
             }
 
-          if (roundTtft === null) roundTtft = Date.now() - streamStartTime;
-          if (firstTurnTtft === null) firstTurnTtft = roundTtft;
+            if (roundTtft === null) roundTtft = Date.now() - streamStartTime;
+            if (firstTurnTtft === null) firstTurnTtft = roundTtft;
 
-          // ✅ stream_options.include_usage 的用量只在最后一个 chunk 下发，累加起来
-          const chunkUsage = (chunk as any).usage;
-          if (chunkUsage?.total_tokens) {
-            usedTokens += chunkUsage.total_tokens;
-          }
+            // ✅ stream_options.include_usage 的用量只在最后一个 chunk 下发，累加起来
+            const chunkUsage = (chunk as any).usage;
+            if (chunkUsage?.total_tokens) {
+              usedTokens += chunkUsage.total_tokens;
+            }
 
-          const delta =
-            (chunk as any).choices?.[0]?.delta || (chunk as any).message || {};
+            const delta =
+              (chunk as any).choices?.[0]?.delta ||
+              (chunk as any).message ||
+              {};
 
-          if (delta.tool_calls?.length) {
-            mergeToolCallDeltas(toolAcc, delta.tool_calls);
-          }
+            if (delta.tool_calls?.length) {
+              mergeToolCallDeltas(toolAcc, delta.tool_calls);
+            }
 
-          const reasoningContent =
-            delta.reasoning_content ||
-            delta.reasoning ||
-            delta.thought ||
-            (chunk as any).reasoning_content ||
-            (chunk as any).thought ||
-            (chunk as any).reasoning ||
-            '';
+            const reasoningContent =
+              delta.reasoning_content ||
+              delta.reasoning ||
+              delta.thought ||
+              (chunk as any).reasoning_content ||
+              (chunk as any).thought ||
+              (chunk as any).reasoning ||
+              '';
 
-          const textContent =
-            delta.content ||
-            delta.text ||
-            delta.message ||
-            (chunk as any).content ||
-            (chunk as any).text ||
-            (typeof chunk === 'string' ? chunk : '');
+            const textContent =
+              delta.content ||
+              delta.text ||
+              delta.message ||
+              (chunk as any).content ||
+              (chunk as any).text ||
+              (typeof chunk === 'string' ? chunk : '');
 
-          if (!textContent && !reasoningContent) continue;
+            if (!textContent && !reasoningContent) continue;
 
-          if (reasoningContent) onChunk('thought', reasoningContent);
+            if (reasoningContent) onChunk('thought', reasoningContent);
 
-          if (textContent) {
-            roundReply += textContent;
-            if (gateOpen) {
-              rawFullReply += textContent;
-              onChunk('content', textContent);
-            } else {
-              gateBuf += textContent;
-              // 攒够阈值仍未见拒答 → 放行已攒内容，之后正常流式
-              if (gateBuf.length >= REFUSAL_GATE_CHARS) {
-                gateOpen = true;
-                rawFullReply += gateBuf;
-                onChunk('content', gateBuf);
+            if (textContent) {
+              roundReply += textContent;
+              if (gateOpen) {
+                rawFullReply += textContent;
+                onChunk('content', textContent);
+              } else {
+                gateBuf += textContent;
+                // 攒够阈值仍未见拒答 → 放行已攒内容，之后正常流式
+                if (gateBuf.length >= REFUSAL_GATE_CHARS) {
+                  gateOpen = true;
+                  rawFullReply += gateBuf;
+                  onChunk('content', gateBuf);
+                }
               }
             }
           }
-        }
         } finally {
           // 智谱锁：必须等整条流读完才放，避免并发打爆免费层的 1 并发限制
           release?.();
@@ -1445,8 +1440,13 @@ export class ChatService {
           content: roundReply || null,
           tool_calls: toolCalls,
         });
+        // ✅ 工具调用过程也推给前端（复用 thought；保持简短：只吐工具名 + 结果摘要，
+        //    不吐参数/结果全文，避免刷屏）。前端在思考区即可看到「调了什么、返回了啥」。
+        const shortTool = (s: string, n = 60) =>
+          s.length > n ? `${s.slice(0, n).trimEnd()}…` : s;
         for (const call of toolCalls) {
           if (aborted()) return;
+          onChunk('thought', `工具调用 ${call.function.name}`);
           let result: string;
           try {
             result = await this.execTool(
@@ -1456,6 +1456,7 @@ export class ChatService {
           } catch (e: any) {
             result = `工具执行出错：${e.message}`;
           }
+          onChunk('thought', `↩ ${call.function.name}：${shortTool(result)}`);
           messages.push({
             tool_call_id: call.id,
             role: 'tool',
@@ -1795,8 +1796,10 @@ export class ChatService {
     const ext = extname(name).toLowerCase();
     const mime = file.mimetype || '';
     const isExcel =
-      ext === '.xlsx' || ext === '.xls' ||
-      mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+      ext === '.xlsx' ||
+      ext === '.xls' ||
+      mime ===
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
       mime === 'application/vnd.ms-excel';
     if (!isExcel) {
       throw new BadRequestException(
@@ -1870,9 +1873,7 @@ export class ChatService {
    * 落盘目录与知识库完全隔离：files/chat-attachments/ 不做向量化、不进 RAG，
    * 只是普通文件存储，靠 TTL 清扫回收。
    */
-  async parseChatAttachment(
-    file: Express.Multer.File,
-  ): Promise<{
+  async parseChatAttachment(file: Express.Multer.File): Promise<{
     id: string;
     fileRef: string;
     url: string;
@@ -1959,7 +1960,13 @@ export class ChatService {
     console.log(
       `📎 文档解析完成 ${name}: ${text.length} 字，耗时 ${Date.now() - t0}ms`,
     );
-    return { ...base, kind: 'document', text, charCount: text.length, excelCheck };
+    return {
+      ...base,
+      kind: 'document',
+      text,
+      charCount: text.length,
+      excelCheck,
+    };
   }
 
   /**
@@ -2157,13 +2164,40 @@ export class ChatService {
   /** 附件文件名规则：`<uuid>.<白名单扩展名>`，与落盘时一致 */
   private static readonly ATTACHMENT_EXTS = [
     // 文档
-    'pdf', 'doc', 'docx', 'xlsx', 'txt', 'md', 'csv', 'json', 'log', 'xml',
+    'pdf',
+    'doc',
+    'docx',
+    'xlsx',
+    'txt',
+    'md',
+    'csv',
+    'json',
+    'log',
+    'xml',
     // 图片
-    'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif',
+    'png',
+    'jpg',
+    'jpeg',
+    'gif',
+    'webp',
+    'bmp',
+    'avif',
     // 视频
-    'mp4', 'mov', 'mkv', 'avi', 'webm', 'flv', 'm4v', 'wmv',
+    'mp4',
+    'mov',
+    'mkv',
+    'avi',
+    'webm',
+    'flv',
+    'm4v',
+    'wmv',
     // 代码（按纯文本内联展示）
-    'js', 'ts', 'py', 'go', 'java', 'css',
+    'js',
+    'ts',
+    'py',
+    'go',
+    'java',
+    'css',
     // 兜底：白名单外的一律存成 bin，只能下载不能渲染
     'bin',
   ];
@@ -2213,7 +2247,9 @@ export class ChatService {
 
   /** 落盘用的扩展名：白名单内保留原样，白名单外一律 bin（保证文件可服务、可清扫） */
   private attachmentExt(fileName: string): string {
-    const ext = extname(fileName || '').toLowerCase().replace(/^\./, '');
+    const ext = extname(fileName || '')
+      .toLowerCase()
+      .replace(/^\./, '');
     return ChatService.ATTACHMENT_EXTS.includes(ext) ? ext : 'bin';
   }
 
@@ -2344,7 +2380,8 @@ ${body}
     for (const id of uuidIds) {
       try {
         const fileRef = dirEntries.find(
-          (n) => n.startsWith(`${id}.`) && ChatService.ATTACHMENT_FILE_RE.test(n),
+          (n) =>
+            n.startsWith(`${id}.`) && ChatService.ATTACHMENT_FILE_RE.test(n),
         );
         if (!fileRef) continue;
 
@@ -2380,7 +2417,12 @@ ${body}
   private parseAttachmentSync(
     buffer: Buffer,
     fileRef: string,
-  ): { name: string; kind: AttachmentKind; text: string; durationSec?: number } | null {
+  ): {
+    name: string;
+    kind: AttachmentKind;
+    text: string;
+    durationSec?: number;
+  } | null {
     const ext = extname(fileRef).toLowerCase();
     const isVideo = isVideoExt(ext);
     if (isVideo) {
@@ -2393,8 +2435,15 @@ ${body}
     }
     const text = buffer.toString('utf8').replace(/\u0000/g, '');
     // PDF/DOCX 等二进制格式同步解析不了，只能提示
-    if (!text.trim() || /[\u0000-\u0008\u000e-\u001f]/.test(text.slice(0, 1000))) {
-      return { name: fileRef, kind: 'document', text: '（该文档内容已从内存回收，请重新发送以解析。）' };
+    if (
+      !text.trim() ||
+      /[\u0000-\u0008\u000e-\u001f]/.test(text.slice(0, 1000))
+    ) {
+      return {
+        name: fileRef,
+        kind: 'document',
+        text: '（该文档内容已从内存回收，请重新发送以解析。）',
+      };
     }
     return { name: fileRef, kind: 'document', text: text.trim() };
   }
@@ -2418,7 +2467,8 @@ ${body}
       if (referenced.has(name)) continue;
       try {
         const st = statSync(join(this.attachmentDir, name));
-        if (!st.isFile() || now - st.mtimeMs < this.attachmentRetainMs) continue;
+        if (!st.isFile() || now - st.mtimeMs < this.attachmentRetainMs)
+          continue;
         await rm(join(this.attachmentDir, name), { force: true });
         removed++;
       } catch {
@@ -2442,9 +2492,7 @@ ${body}
       FROM "Message", jsonb_array_elements("attachments"::jsonb) AS "elem"
       WHERE "attachments" IS NOT NULL
         AND jsonb_typeof("attachments"::jsonb) = 'array'`;
-    return new Set(
-      rows.map((r) => r.ref).filter((v): v is string => !!v),
-    );
+    return new Set(rows.map((r) => r.ref).filter((v): v is string => !!v));
   }
 
   /** 启动附件清扫定时器（unref，不拖住进程退出） */
@@ -2463,7 +2511,6 @@ ${body}
         `保留 ${Math.round(this.attachmentRetainMs / 86400000)} 天`,
     );
   }
-
 
   // ✅ 剥离服务器端存储路径，不对外暴露 filesystem 路径
   private kbPublic(record: any): any {
