@@ -1,5 +1,7 @@
-# 改这一行
-FROM dockerproxy.net/library/node:20-slim
+# 基础镜像：用官方名，加速交给 ECS 的 Docker 守护进程 registry-mirrors
+# （第三方代理前缀如 dockerproxy.net 会随时挂，别再硬编码到 Dockerfile。
+#  在 /etc/docker/daemon.json 配 registry-mirrors 后 restart docker 即可）
+FROM node:20-slim
 WORKDIR /app
 
 # 1. 设置国内镜像源与网络超时参数
