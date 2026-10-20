@@ -854,6 +854,8 @@ export class ChatService {
         console.log(`📎 附件已注入本轮上下文: ${attachmentContext.length} 字`);
       }
 
+      if (liveInfoQuery) onChunk('thought', '🔧 调用 web_search');
+
       const parallelStartTime = Date.now();
       const [, relevantDocs, historyMessages, webSearchResults] =
         await Promise.all([
@@ -906,7 +908,12 @@ export class ChatService {
             orderBy: { createdAt: 'desc' },
             take: 30,
           }),
-          liveInfoQuery ? searchTavily(userQuery, signal) : Promise.resolve([]),
+          liveInfoQuery
+            ? searchTavily(userQuery, signal).then((r) => {
+                onChunk('thought', `↩️ web_search：${r.length} 条结果。`);
+                return r;
+              })
+            : Promise.resolve([]),
         ]);
       const parallelDuration = Date.now() - parallelStartTime;
       console.log(
@@ -1273,9 +1280,9 @@ export class ChatService {
           'thought',
           `模型选择：${candidates[0].model}（${tierText}，复杂度评分 ` +
             `${complexity.score}/${this.modelConfig.threshold}）` +
-            (backups.length ? `，备用 ${backups.join('、')}。` : '，无备用') +
+            (backups.length ? `，备用 ${backups.join('、')}。` : '，无备用。') +
             (complexity.reasons.length
-              ? `。判定依据：${complexity.reasons.join('、')}`
+              ? `判定依据：${complexity.reasons.join('、')}`
               : ''),
         );
       }
@@ -1456,7 +1463,7 @@ export class ChatService {
           } catch (e: any) {
             result = `工具执行出错：${e.message}`;
           }
-          onChunk('thought', `🔙 ${call.function.name}：${shortTool(result)}`);
+          onChunk('thought', `↩️ ${call.function.name}：${shortTool(result)}`);
           messages.push({
             tool_call_id: call.id,
             role: 'tool',
