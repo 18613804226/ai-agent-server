@@ -32,8 +32,11 @@ jobs:
             git reset --hard origin/main
             echo "==> 部署提交: $(git rev-parse --short HEAD) $(git log -1 --pretty=%s)"
 
-            # 3. 重新构建镜像并启动容器（Docker Compose 会自动应用最新的代码和配置）
-            docker compose -f docker-compose.4001.yml --env-file .env up -d --build
+            # 3. 先单独构建镜像（限制并行，避免 ECS 内存/CPU 被打满导致 SSH 卡死）
+            docker compose -f docker-compose.4001.yml --env-file .env build --parallel 1
+
+            # 4. 再启动/更新容器
+            docker compose -f docker-compose.4001.yml --env-file .env up -d --no-build
 
             # 4. 同步数据库表结构。本项目没有 prisma/migrations，必须用 `db push`
             #    （不是 migrate deploy，那个没迁移文件时什么都不做）。
