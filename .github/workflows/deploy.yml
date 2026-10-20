@@ -33,7 +33,7 @@ jobs:
             echo "==> 部署提交: $(git rev-parse --short HEAD) $(git log -1 --pretty=%s)"
 
             # 3. 先单独构建镜像（限制并行，避免 ECS 内存/CPU 被打满导致 SSH 卡死）
-            docker compose -f docker-compose.4001.yml --env-file .env build --parallel 1
+            COMPOSE_PARALLEL_LIMIT=1 docker compose -f docker-compose.4001.yml --env-file .env build
 
             # 4. 再启动/更新容器
             docker compose -f docker-compose.4001.yml --env-file .env up -d --no-build
