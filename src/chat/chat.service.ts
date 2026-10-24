@@ -851,7 +851,7 @@ export class ChatService {
         );
       }
       if (attachmentContext) {
-        console.log(`📎 附件已注入本轮上下文: ${attachmentContext.length} 字`);
+//         console.log(`📎 附件已注入本轮上下文: ${attachmentContext.length} 字`);
       }
 
       if (liveInfoQuery) onChunk('thought', '🔧 调用 web_search');
@@ -877,29 +877,29 @@ export class ChatService {
               ? this.vectorService
                   .searchSimilarByFile(userQuery, fileIds, 3)
                   .then((results) => {
-                    console.log(
-                      '🔍 [RAG-byFile]',
-                      JSON.stringify(
-                        results.map((r: any) => ({
-                          similarity: r.similarity,
-                          content: (r.content || '').slice(0, 80),
-                        })),
-                      ),
-                    );
+//                     console.log(
+//                       '🔍 [RAG-byFile]',
+//                       JSON.stringify(
+//                         results.map((r: any) => ({
+//                           similarity: r.similarity,
+//                           content: (r.content || '').slice(0, 80),
+//                         })),
+//                       ),
+//                     );
                     return results;
                   })
               : this.vectorService
                   .searchSimilar(userQuery, 3)
                   .then((results) => {
-                    console.log(
-                      '🔍 [RAG]',
-                      JSON.stringify(
-                        results.map((r: any) => ({
-                          similarity: r.similarity,
-                          content: (r.content || '').slice(0, 80),
-                        })),
-                      ),
-                    );
+//                     console.log(
+//                       '🔍 [RAG]',
+//                       JSON.stringify(
+//                         results.map((r: any) => ({
+//                           similarity: r.similarity,
+//                           content: (r.content || '').slice(0, 80),
+//                         })),
+//                       ),
+//                     );
                     return results;
                   }),
           this.prisma.message.findMany({
@@ -916,9 +916,9 @@ export class ChatService {
             : Promise.resolve([]),
         ]);
       const parallelDuration = Date.now() - parallelStartTime;
-      console.log(
-        `⏱️ [性能监控] 数据库写入 + 向量库检索(${relevantDocs.length}条) + 历史消息查询，总耗时: ${parallelDuration}ms`,
-      );
+//       console.log(
+//         `⏱️ [性能监控] 数据库写入 + 向量库检索(${relevantDocs.length}条) + 历史消息查询，总耗时: ${parallelDuration}ms`,
+//       );
 
       if (aborted()) return;
 
@@ -983,9 +983,9 @@ export class ChatService {
               .join('\n---\n');
 
       const contextTokens = estimateTokens(context);
-      console.log(
-        `📚 [RAG] context 长度: ${contextTokens} tokens (limit: ${MAX_CONTEXT_TOKENS})，docs: ${relevantAndPassingDocs.length}/${relevantDocs.length}`,
-      );
+//       console.log(
+//         `📚 [RAG] context 长度: ${contextTokens} tokens (limit: ${MAX_CONTEXT_TOKENS})，docs: ${relevantAndPassingDocs.length}/${relevantDocs.length}`,
+//       );
 
       if (contextTokens > MAX_CONTEXT_TOKENS) {
         const sep = '\n---\n';
@@ -996,7 +996,7 @@ export class ChatService {
           const lastSep = context.lastIndexOf(sep);
           context = lastSep > 0 ? context.slice(0, lastSep) : '';
         }
-        console.log(`📚 [RAG] 截断后: ${estimateTokens(context)} tokens`);
+//         console.log(`📚 [RAG] 截断后: ${estimateTokens(context)} tokens`);
       }
 
       const webSearchContext = liveInfoQuery
@@ -1222,9 +1222,9 @@ export class ChatService {
       if (aborted()) return;
 
       // ✅ 日志加在这里
-      console.log(
-        `🧮 [Token] system=${systemTokens}, query=${queryTokens}, 历史保留 ${keptMessages.length} 条, 剩余预算=${budget}`,
-      );
+//       console.log(
+//         `🧮 [Token] system=${systemTokens}, query=${queryTokens}, 历史保留 ${keptMessages.length} 条, 剩余预算=${budget}`,
+//       );
 
       // ✅ 单轮流式 + 工具循环
       // 原来先跑一次「非流式决策轮」只为判断要不要调工具，产出 100% 被丢弃，
@@ -1253,15 +1253,15 @@ export class ChatService {
       const chainText = candidates
         .map((c) => `${c.provider}:${c.model}`)
         .join(' → ');
-      console.log(
-        `🧠 [模型分层] tier=${complexity.tier} 复杂度=${complexity.complexity}` +
-          ` 得分=${complexity.score}（complex>=${this.modelConfig.threshold}，` +
-          `expert>=${this.modelConfig.expertThreshold}）` +
-          `链路=${chainText || '无'}` +
-          (complexity.reasons.length
-            ? ` | ${complexity.reasons.join(' ')}`
-            : ''),
-      );
+//       console.log(
+//         `🧠 [模型分层] tier=${complexity.tier} 复杂度=${complexity.complexity}` +
+//           ` 得分=${complexity.score}（complex>=${this.modelConfig.threshold}，` +
+//           `expert>=${this.modelConfig.expertThreshold}）` +
+//           `链路=${chainText || '无'}` +
+//           (complexity.reasons.length
+//             ? ` | ${complexity.reasons.join(' ')}`
+//             : ''),
+//       );
       // ✅ 把路由决策推给前端思考流：用户能直接看到"为什么选了这个模型"
       if (this.showRoutingThought && candidates.length) {
         const tierText =
@@ -1431,11 +1431,11 @@ export class ChatService {
             onChunk('content', gateBuf);
           }
         }
-        console.log(
-          `⏱️ [性能监控] 第 ${round + 1} 轮流式耗时: ${Date.now() - streamStartTime}ms` +
-            `，本轮首字 ${roundTtft ?? '-'}ms` +
-            `，工具调用 ${toolCalls.length} 个，模型 ${usedModel}`,
-        );
+//         console.log(
+//           `⏱️ [性能监控] 第 ${round + 1} 轮流式耗时: ${Date.now() - streamStartTime}ms` +
+//             `，本轮首字 ${roundTtft ?? '-'}ms` +
+//             `，工具调用 ${toolCalls.length} 个，模型 ${usedModel}`,
+//         );
 
         // ✅ 没有工具要调 → 这一轮就是最终回答
         if (!toolCalls.length) break;
@@ -1504,10 +1504,10 @@ export class ChatService {
       });
 
       const totalDuration = Date.now() - overallStartTime;
-      console.log(
-        `🚀 [性能监控] 请求完整生命周期总耗时: ${totalDuration}ms` +
-          `，首字 ${firstTurnTtft ?? '-'}ms\n-----------------------------------------`,
-      );
+//       console.log(
+//         `🚀 [性能监控] 请求完整生命周期总耗时: ${totalDuration}ms` +
+//           `，首字 ${firstTurnTtft ?? '-'}ms\n-----------------------------------------`,
+//       );
 
       return {
         fullReply: finalCleanReply,
@@ -1525,14 +1525,14 @@ export class ChatService {
         error?.name === 'AbortError' ||
         error?.name === 'APIUserAbortError'
       ) {
-        console.log(
-          `⏹️ [性能监控] 客户端已断开，提前结束（累计 ${totalDuration}ms）`,
-        );
+//         console.log(
+//           `⏹️ [性能监控] 客户端已断开，提前结束（累计 ${totalDuration}ms）`,
+//         );
         return { fullReply: '', sources: [], tokens: 0, model: usedModel };
       }
 
       console.error('sendMessageStream 执行出错:', error);
-      console.log(`❌ [性能监控] 请求异常中断，累计耗时: ${totalDuration}ms`);
+//       console.log(`❌ [性能监控] 请求异常中断，累计耗时: ${totalDuration}ms`);
 
       const errorMsg =
         error.message || '服务器开小差了，请检查后端配置或账户余额';
@@ -1583,7 +1583,7 @@ export class ChatService {
             },
             { headers: { Authorization: `Bearer ${apiKey}` } },
           );
-          console.log('🔊 TTS 首字节延迟:', Date.now() - t0, 'ms');
+//           console.log('🔊 TTS 首字节延迟:', Date.now() - t0, 'ms');
 
           const audioUrl =
             data?.output?.audio?.url ||
@@ -1762,7 +1762,7 @@ export class ChatService {
       const wavPath = isWav ? tmpIn : await this.toWav(tmpIn);
 
       const text = (await this.asrByWs(wavPath)).trim();
-      console.log('🎙️ ASR 耗时:', Date.now() - t0, 'ms');
+//       console.log('🎙️ ASR 耗时:', Date.now() - t0, 'ms');
 
       if (!text) {
         throw new HttpException(
@@ -1828,11 +1828,11 @@ export class ChatService {
       const result = await checkExcelBuffer(name, file.buffer, {
         rules: parsedRules,
       });
-      console.log(
-        `📊 Excel 检查完成 ${name}: ${result.summary.total} 个问题` +
-          `（公式错误 ${result.summary.formulaErrors}，数据质量 ${result.summary.dataIssues}），` +
-          `耗时 ${Date.now() - t0}ms`,
-      );
+//       console.log(
+//         `📊 Excel 检查完成 ${name}: ${result.summary.total} 个问题` +
+//           `（公式错误 ${result.summary.formulaErrors}，数据质量 ${result.summary.dataIssues}），` +
+//           `耗时 ${Date.now() - t0}ms`,
+//       );
       return result;
     } catch (e: any) {
       if (e instanceof ExcelTooLargeError) {
@@ -1926,10 +1926,10 @@ export class ChatService {
         }
         throw new BadRequestException(`视频解析失败：${e?.message || e}`);
       }
-      console.log(
-        `🎬 视频转写完成 ${name}: ${Math.round(result.durationSec)}s → ` +
-          `${result.text.length} 字，耗时 ${Date.now() - t0}ms`,
-      );
+//       console.log(
+//         `🎬 视频转写完成 ${name}: ${Math.round(result.durationSec)}s → ` +
+//           `${result.text.length} 字，耗时 ${Date.now() - t0}ms`,
+//       );
       return {
         ...base,
         kind: 'video',
@@ -1949,10 +1949,10 @@ export class ChatService {
         excelCheck = await checkExcelBuffer(name, file.buffer);
         const report = formatExcelFindingsForModel(excelCheck);
         text = report + (text ? `\n\n【原始数据】\n${text}` : '');
-        console.log(
-          `📊 xlsx 自动检查 ${name}: ${excelCheck.summary.total} 个问题` +
-            `（公式错误 ${excelCheck.summary.formulaErrors}，数据质量 ${excelCheck.summary.dataIssues}）`,
-        );
+//         console.log(
+//           `📊 xlsx 自动检查 ${name}: ${excelCheck.summary.total} 个问题` +
+//             `（公式错误 ${excelCheck.summary.formulaErrors}，数据质量 ${excelCheck.summary.dataIssues}）`,
+//         );
       } catch (e: any) {
         // 检查失败不致命：退回纯文本，附件照常可用
         console.warn(`📊 xlsx 自动检查失败 ${name}:`, e?.message || e);
@@ -1964,9 +1964,9 @@ export class ChatService {
         `没能从 ${name} 解析出文字（可能是扫描版图片型文档，暂无 OCR）`,
       );
     }
-    console.log(
-      `📎 文档解析完成 ${name}: ${text.length} 字，耗时 ${Date.now() - t0}ms`,
-    );
+//     console.log(
+//       `📎 文档解析完成 ${name}: ${text.length} 字，耗时 ${Date.now() - t0}ms`,
+//     );
     return {
       ...base,
       kind: 'document',
@@ -2483,11 +2483,11 @@ ${body}
       }
     }
     if (removed) {
-      console.log(
-        `🧹 附件清扫：删除 ${removed} 个超过 ${Math.round(
-          this.attachmentRetainMs / 86400000,
-        )} 天且未被引用的附件`,
-      );
+//       console.log(
+//         `🧹 附件清扫：删除 ${removed} 个超过 ${Math.round(
+//           this.attachmentRetainMs / 86400000,
+//         )} 天且未被引用的附件`,
+//       );
     }
     return removed;
   }
@@ -2513,10 +2513,10 @@ ${body}
       );
     }, intervalMs);
     timer.unref();
-    console.log(
-      `🧹 附件清扫已启动：每 ${Math.round(intervalMs / 3600000)} 小时一次，` +
-        `保留 ${Math.round(this.attachmentRetainMs / 86400000)} 天`,
-    );
+//     console.log(
+//       `🧹 附件清扫已启动：每 ${Math.round(intervalMs / 3600000)} 小时一次，` +
+//         `保留 ${Math.round(this.attachmentRetainMs / 86400000)} 天`,
+//     );
   }
 
   // ✅ 剥离服务器端存储路径，不对外暴露 filesystem 路径
