@@ -32,6 +32,19 @@ jobs:
             git reset --hard origin/main
             echo "==> 部署提交: $(git rev-parse --short HEAD) $(git log -1 --pretty=%s)"
 
+            # 2.5 monorepo 后 .env 预期在 apps/server/.env；兼容旧部署：根目录 .env 自动迁移
+            #     （.env 被 gitignore，git reset --hard 不动它，旧文件仍在原处）
+            if [ ! -f apps/server/.env ]; then
+              if [ -f .env ]; then
+                mkdir -p apps/server
+                cp .env apps/server/.env
+                echo "==> 已将根目录 .env 迁移到 apps/server/.env"
+              else
+                echo "==> 缺少 apps/server/.env，请先创建（参考 apps/server/.env.example）"
+                exit 1
+              fi
+            fi
+
             # 3. 建：CPU 限 1.5 核 / 内存限 2G，构建再猛 SSH 也有资源响应
             systemd-run --scope --quiet \
             -p CPUQuota=150% -p MemoryMax=1200M \
