@@ -1,13 +1,14 @@
-# 基础镜像：用官方名，加速交给 ECS 的 Docker 守护进程 registry-mirrors
-# （第三方代理前缀如 dockerproxy.net 会随时挂，别再硬编码到 Dockerfile。
-#  在 /etc/docker/daemon.json 配 registry-mirrors 后 restart docker 即可）
+# 基于镜像：用官方名，加速交互（ECS 的 Docker 构建进程 registry-mirrors 代理）
 FROM node:20-slim
 WORKDIR /app
 
+# 仅用于构建期 `prisma generate` 的占位连接串（prisma.config.ts 会读取 DATABASE_URL）。
+# 不会进入运行时：运行时由 docker compose 的 env_file 注入真实值。
+ARG BUILD_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ai-agent"
+
 # 1. 设置国内镜像源与网络超时参数
 #    pnpm 固定到 9：锁文件是 lockfileVersion 9.0（pnpm 9 生成），
-#    --frozen-lockfile 与 --allow-build 都是 pnpm 9 语义；装最新（pnpm 10）
-#    可能因版本漂移导致构建失败。
+#    --frozen-lockfile 与 --allow-build 都是 pnpm 9 语法。
 RUN npm config set registry https://registry.npmmirror.com \
     && npm config set fetch-retry-mintimeout 20000 \
     && npm config set fetch-retry-maxtimeout 120000 \
@@ -17,39 +18,46 @@ RUN pnpm config set registry https://registry.npmmirror.com \
     && pnpm config set fetch-timeout 60000 \
     && pnpm config set fetch-retries 5
 
-# 2. 复制所有源码（.dockerignore 已排除 spec / test / vitest 配置）
-COPY . .
+# 2. 复制 workspace 清单与所有包/应用的 package.json，先装依赖（利用层缓存）
+#    ⚠️ apps/editor-desktop 也在 pnpm-workspace 里，必须把它的 package.json 一起复制，
+#       否则 --frozen-lockfile 会因「workspace 与锁文件不一致」直接失败。
+#       但只装 server 的依赖子图（--filter @repo/server...），不会拉 electron/react。
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+COPY packages/ ./packages/
+COPY apps/server/package.json ./apps/server/package.json
+COPY apps/editor-desktop/package.json ./apps/editor-desktop/package.json
 
 ENV FFMPEG_BINARIES_URL=https://registry.npmmirror.com/-/binary/ffmpeg-static
 
-# 3. 安装依赖（含 devDependencies：prisma CLI、typescript 等编译期需要）
-#    构建脚本白名单走配置（package.json 的 pnpm.onlyBuiltDependencies / .npmrc 的
-#    only-built-dependencies）。pnpm 9 不认 --allow-build 这个 CLI flag，用了会直接报
-#    "Unknown option: 'allow-build'" 导致 install 失败——这正是之前构建失败的根因。
-RUN pnpm install --frozen-lockfile
+# 3. 只安装 @repo/server 及其依赖（orchestrator/agent-types），含 devDependencies
+#    （Prisma CLI、typescript 等编译期需要）
+RUN DATABASE_URL="$BUILD_DATABASE_URL" pnpm install --frozen-lockfile --filter @repo/server...
 
-# 4. 注入临时 DATABASE_URL 并生成 Prisma 客户端
-RUN DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ai-agent" npx prisma generate
+# 4. 复制 server 源码（packages 已在第 2 步复制）
+COPY apps/server/ ./apps/server/
 
-# 5. 执行编译
-RUN pnpm run build
+# 5. 生成 Prisma 客户端（在 server 包内执行，读 apps/server/prisma/schema.prisma）
+RUN DATABASE_URL="$BUILD_DATABASE_URL" pnpm --filter @repo/server exec prisma generate
 
-# 6. 裁剪开发依赖，砍掉镜像里约 165MB 的无用包
-#    （typescript / prisma CLI / @prisma studio / vitest / oxlint ...）
-#    ⚠️ 生成的 Prisma 客户端在 pnpm 下位于 .pnpm/@prisma+client/…，顶层
-#       node_modules/.prisma 不一定存在（Prisma 7 就是这样），所以备份/恢复必须
-#       用 `if -d` 判断，否则路径不存在时 cp 直接失败。
-#       --ignore-scripts 保证 prune 只做删除、不重跑 ffmpeg-static 的下载或
-#       @prisma/client 的生成脚本；客户端最终是否可用由 step 7 的 selfcheck 把关。
-RUN if [ -d node_modules/.prisma ]; then cp -r node_modules/.prisma /tmp/prisma-generated; fi
-RUN pnpm prune --prod --ignore-scripts
-RUN if [ -d /tmp/prisma-generated ]; then rm -rf node_modules/.prisma && cp -r /tmp/prisma-generated node_modules/.prisma; fi
+# 6. 编译：先构建共享编排器（server 从它的 dist 取类型与运行时），再构建 server。
+#    不用 `pnpm build`（turbo），因为桌面端源码不在镜像里，turbo 会去构建它。
+RUN pnpm --filter @repo/agent-orchestrator build \
+    && pnpm --filter @repo/server build
 
-# 7. 构建期自检：运行时依赖与 Prisma client 必须真的可用。
-#    宁可在这里构建失败，也不要带病上线（详见 scripts/selfcheck.cjs）
-RUN node scripts/selfcheck.cjs
+# 7. 裁剪开发依赖：从 dev 安装切到 prod 安装。
+#    ⚠️ 不能用 `pnpm prune --prod`：在 `--filter` 安装后它会把生产依赖也误删（已实测）。
+#    CI=true 让 pnpm 非交互地重建 modules，否则会卡在「是否清空 node_modules」的确认提示。
+ENV CI=true
+RUN DATABASE_URL="$BUILD_DATABASE_URL" pnpm install --prod --frozen-lockfile --filter @repo/server... --ignore-scripts
 
-# 8. 生产运行阶段
+# 7.1 prod 安装会重建 @prisma/client，之前生成的 client 会丢，必须再生成一次。
+#     （@prisma/engines 的 engine 二进制不受影响，实测保留，`prisma db push` 可用）
+RUN DATABASE_URL="$BUILD_DATABASE_URL" pnpm --filter @repo/server exec prisma generate
+
+# 8. 构建期自检：运行时依赖与 Prisma client 必须真的可用
+RUN node apps/server/scripts/selfcheck.cjs
+
+# 9. 运行阶段：cwd 必须是 apps/server，main.ts 用 process.cwd() 定位 uploads/files
 EXPOSE 3000
-
+WORKDIR /app/apps/server
 CMD ["node", "dist/main.js"]

@@ -1,0 +1,725 @@
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Optional,
+} from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service.js';
+import { VectorService } from '../vector/vector.service.js';
+import { createDefaultModelClients } from '../agent/model-clients.js';
+import { createOrchestrator } from '../agent/orchestrator.factory.js';
+import axios from 'axios';
+import { evaluate } from 'mathjs';
+import {
+  AgentOrchestrator,
+  classifyComplexity,
+  formatRoutingThought,
+  isAttachmentRefusal,
+  resolveModelCandidates,
+  type ContentGate,
+  type RegisteredTool,
+} from '@repo/agent-orchestrator';
+import {
+  ATTACHMENT_TTL_MS,
+  type AttachmentKind,
+} from './attachment-store.js';
+import {
+  formatWebSearchContext,
+  isLiveInfoQuery,
+  searchTavily,
+} from './web-search.js';
+import { buildSystemPrompt, estimateTokens } from './chat-prompt.js';
+import { ImageService } from './image.service.js';
+import { AttachmentService } from './attachment.service.js';
+import { SpeechService } from './speech.service.js';
+
+// ✅ 一次最多 2 张图进模型上下文（当前轮优先，剩余名额从最新历史消息补）
+const MAX_MODEL_IMAGES = 2;
+// ✅ 单图预算（压缩后长边上限 1280 时实测 1095 token），取整留余量做保守估算
+const MODEL_IMAGE_TOKEN_COST = 1200;
+
+@Injectable()
+export class ChatService {
+  /** 聊天附件：解析、落盘、预览、删除、清扫 */
+  private readonly attachmentService: AttachmentService;
+  /** 语音：TTS + ASR（视频附件转写需要） */
+  private readonly speechService: SpeechService;
+  /** 共享编排器：模型级联 + 工具循环 */
+  private readonly orchestrator: AgentOrchestrator;
+  /** 图片上传/压缩/安全校验/孤儿清扫 */
+  private readonly imageService: ImageService;
+  /** 本 agent 注册的工具集（定义 + 实现） */
+  private readonly tools: RegisteredTool[] = [
+    {
+      definition: {
+        type: 'function',
+        function: {
+          name: 'fetchWeatherInfo',
+          description:
+            '当用户明确询问某个城市或地区的实时天气、气温情况时调用。只在问天气时用。',
+          parameters: {
+            type: 'object',
+            properties: {
+              cityName: {
+                type: 'string',
+                description: '城市名称，如：北京、广州',
+              },
+            },
+            required: ['cityName'],
+          },
+        },
+      },
+      handler: (args) =>
+        this.fetchWeatherInfoByCity(String(args.cityName || '广州')),
+    },
+    {
+      definition: {
+        type: 'function',
+        function: {
+          name: 'calculator',
+          description:
+            '数学计算器。只要问题涉及任何数值计算（加减乘除、百分比、折扣、日期差、单位换算等）必须使用，禁止心算。',
+          parameters: {
+            type: 'object',
+            properties: {
+              expression: {
+                type: 'string',
+                description: '数学表达式，如 (100+20)*0.85、 365*24 ',
+              },
+            },
+            required: ['expression'],
+          },
+        },
+      },
+      handler: (args) => {
+        try {
+          const result = evaluate(String(args.expression || ''));
+          return `计算结果：${args.expression} = ${result}`;
+        } catch (e: any) {
+          return `表达式无法计算：${e.message}。请提醒用户检查算式。`;
+        }
+      },
+    },
+  ];
+
+  constructor(
+    private prisma: PrismaService,
+    private vectorService: VectorService,
+    /** 全进程共享的编排器（由 AgentModule 提供）；测试模块未提供时用默认环境配置 */
+    @Optional() orchestrator?: AgentOrchestrator,
+    /** 图片服务（由 ChatModule 提供）；测试可不传，用默认实例 */
+    @Optional() imageService?: ImageService,
+    /** 附件服务（由 ChatModule 提供）；测试可不传，用默认实例 */
+    @Optional() attachmentService?: AttachmentService,
+    /** 语音服务（由 ChatModule 提供）；测试可不传，用默认实例 */
+    @Optional() speechService?: SpeechService,
+  ) {
+    this.orchestrator =
+      orchestrator ?? createOrchestrator(createDefaultModelClients());
+    this.imageService = imageService ?? new ImageService(this.prisma);
+    this.attachmentService =
+      attachmentService ?? new AttachmentService(this.prisma);
+    this.speechService = speechService ?? new SpeechService();
+    // 视频转写需要 ASR，附件模块不直接依赖语音实现，由这里注入回调
+    this.attachmentService.setAsrRunner((wavPath) =>
+      this.speechService.transcribeWav(wavPath),
+    );
+    if (this.orchestrator.zhipuAvailable) {
+      console.log(
+        `🧠 [模型分层] GLM 免费层已启用，首选 ${this.orchestrator.modelConfig.textSimple} / ${this.orchestrator.modelConfig.visionPrimary}`,
+      );
+    } else {
+      console.log(
+        '🧠 [模型分层] 未配置 GLM_API_KEY，全部请求走 qwen（未开启级联）',
+      );
+    }
+  }
+
+  // 辅助函数：根据城市名获取天气
+  private async fetchWeatherInfoByCity(cityName: string): Promise<string> {
+    try {
+      const encodedCity = encodeURIComponent(cityName);
+      const res = await axios.get(`https://wttr.in/${encodedCity}?format=j1`, {
+        timeout: 4000,
+      });
+      const current = res.data.current_condition[0];
+      const tempC = current.temp_C;
+      const desc = current.weatherDesc[0].value;
+      const humidity = current.humidity;
+      return `【实时天气播报 - ${cityName}】：当前气温 ${tempC}℃，天气状况：${desc}，湿度：${humidity}%。`;
+    } catch (error) {
+      console.error('获取天气接口失败:', error);
+      return `【实时天气播报】：暂时无法获取 ${cityName} 的实时天气数据。`;
+    }
+  }
+
+  //  核心：支持 Function Calling 与流式（Streaming）输出的对话方法
+  //  signal：客户端断开时 abort，会立刻掐断上游大模型请求（否则模型还在烧 token）
+  async sendMessageStream(
+    sessionId: string,
+    userQuery: string,
+    onChunk: (
+      type: 'thought' | 'content' | 'error' | 'sources',
+      text: string | any[],
+    ) => void,
+    images?: string[],
+    signal?: AbortSignal,
+    fileIds?: string[],
+    attachmentIds?: string[],
+    /** 随本条消息直传、已当场解析好的附件（单步流：文件和消息同一个请求） */
+    inlineAttachments?: Array<{
+      name: string;
+      kind: AttachmentKind;
+      text: string;
+      durationSec?: number;
+    }>,
+    /**
+     * 落库到 Message.content 的原文（默认 = userQuery）。
+     * 「只传文件、没输问题」时，控制器会补一句默认指令喂给模型，
+     * 但**不该把这句系统补的话写进聊天记录** —— 传这个字段存用户原始输入（可能为空）。
+     */
+    persistContent?: string,
+  ) {
+    const overallStartTime = Date.now();
+    const aborted = () => signal?.aborted === true;
+    let usedModel = ''; // 实际所用模型（函数级作用域，catch 兜底返回也要用）
+
+    try {
+      if (aborted()) return;
+
+      // ✅ 先校验图片来源：不可信就直接失败，别把注定发不出去的消息写进库
+      const hasImages = Array.isArray(images) && images.length > 0;
+      if (hasImages) {
+        for (const ref of images!) {
+          if (!this.imageService.classifyImageRef(ref)) {
+            throw new BadRequestException(
+              '图片来源不被信任：只允许本站已上传的图片（/uploads/），或 IMAGE_FETCH_ALLOWLIST 白名单内的地址',
+            );
+          }
+        }
+      }
+
+      // ✅ 闲聊不查 RAG，省掉一次 embedding 调用 + 向量检索
+      const isCasualChat = /你的名字|你是谁|你好|在干嘛|hi|hello/.test(
+        userQuery,
+      );
+      const liveInfoQuery = isLiveInfoQuery(userQuery);
+
+      // 附件先取出来：既要在落库时记元数据，也要拼进 prompt
+      // （内联附件 = 随本条消息直传的；attachmentIds = 先上传后引用的）
+      const {
+        context: attachmentContext,
+        used: usedAttachments,
+        missing: missingAttachments,
+      } = this.attachmentService.buildAttachmentContext(
+        attachmentIds,
+        inlineAttachments,
+      );
+      const attachmentMeta = usedAttachments.map((a) => ({
+        id: a.id,
+        name: a.name,
+        kind: a.kind,
+        charCount: a.charCount,
+        durationSec: a.durationSec,
+        // 原始文件已落盘，历史消息靠这两个字段回看/重新提问
+        fileRef: a.fileRef,
+        url: a.fileRef ? `/chat/attachments/${a.fileRef}` : undefined,
+      }));
+      if (missingAttachments.length) {
+        console.warn(
+          `📎 附件已过期或不存在: ${missingAttachments.join(',')}（附件仅保留 ${ATTACHMENT_TTL_MS / 60000} 分钟）`,
+        );
+      }
+      if (attachmentContext) {
+//         console.log(`📎 附件已注入本轮上下文: ${attachmentContext.length} 字`);
+      }
+
+      if (liveInfoQuery) onChunk('thought', '🔧 调用 web_search');
+
+      const parallelStartTime = Date.now();
+      const [, relevantDocs, historyMessages, webSearchResults] =
+        await Promise.all([
+          this.prisma.message.create({
+            data: {
+              sessionId,
+              role: 'user',
+              // ✅ 落库用用户原文：只传文件时控制器补的默认指令不能进聊天记录
+              content: persistContent ?? userQuery,
+              // ✅ 图片 URL 一起落库，历史会话才能还原出图
+              images: hasImages ? images : undefined,
+              // ✅ 附件只落元数据（名称/类型/字数），原文仍在临时存储里、到期即弃
+              attachments: attachmentMeta.length ? attachmentMeta : undefined,
+            },
+          }),
+          isCasualChat || liveInfoQuery
+            ? Promise.resolve([] as any[])
+            : fileIds && fileIds.length
+              ? this.vectorService
+                  .searchSimilarByFile(userQuery, fileIds, 3)
+                  .then((results) => {
+//                     console.log(
+//                       '🔍 [RAG-byFile]',
+//                       JSON.stringify(
+//                         results.map((r: any) => ({
+//                           similarity: r.similarity,
+//                           content: (r.content || '').slice(0, 80),
+//                         })),
+//                       ),
+//                     );
+                    return results;
+                  })
+              : this.vectorService
+                  .searchSimilar(userQuery, 3)
+                  .then((results) => {
+//                     console.log(
+//                       '🔍 [RAG]',
+//                       JSON.stringify(
+//                         results.map((r: any) => ({
+//                           similarity: r.similarity,
+//                           content: (r.content || '').slice(0, 80),
+//                         })),
+//                       ),
+//                     );
+                    return results;
+                  }),
+          this.prisma.message.findMany({
+            where: { sessionId },
+            // ✅ 取最近 30 条（原来 asc 取的是最旧 30 条，长会话下最近上下文全丢）
+            orderBy: { createdAt: 'desc' },
+            take: 30,
+          }),
+          liveInfoQuery
+            ? searchTavily(userQuery, signal).then((r) => {
+                onChunk('thought', `↩️ web_search：${r.length} 条结果。`);
+                return r;
+              })
+            : Promise.resolve([]),
+        ]);
+      const parallelDuration = Date.now() - parallelStartTime;
+//       console.log(
+//         `⏱️ [性能监控] 数据库写入 + 向量库检索(${relevantDocs.length}条) + 历史消息查询，总耗时: ${parallelDuration}ms`,
+//       );
+
+      if (aborted()) return;
+
+      const session = await this.prisma.chatSession.findUnique({
+        where: { id: sessionId },
+      });
+      if (!session) {
+        throw new NotFoundException(`ChatSession not found: ${sessionId}`);
+      }
+
+      if (liveInfoQuery && webSearchResults.length === 0) {
+        const reply = '没有获取到实时结果，暂时无法可靠回答这个问题。';
+        await this.prisma.message.create({
+          data: { sessionId, role: 'assistant', content: reply, sources: [] },
+        });
+        await this.prisma.chatSession.update({
+          where: { id: sessionId },
+          data: { updatedAt: new Date() },
+        });
+        onChunk('content', reply);
+        return { fullReply: reply, sources: [] };
+      }
+
+      // ✅ 反转回时间正序，再从最旧一条开始装上下文
+      historyMessages.reverse();
+      // ⚠️ 只传文件的用户消息 content 为空，glm 收到空 content 会直接 400。
+      //    历史里这类空消息直接丢弃（它对应的助手回复仍有内容，上下文不受影响）。
+      const historyForModel = historyMessages.filter((m: any) =>
+        typeof m.content === 'string' ? m.content.trim() !== '' : true,
+      );
+
+      const MAX_CONTEXT_TOKENS = 800;
+      const SIMILARITY_THRESHOLD = 0.45;
+
+      const relevantAndPassingDocs = (relevantDocs as any[]).filter(
+        (doc: any) => doc.similarity >= SIMILARITY_THRESHOLD,
+      );
+      const replySources = [
+        ...new Map(
+          relevantAndPassingDocs
+            .filter((doc: any) => typeof doc.metadata?.fileId === 'string')
+            .map((doc: any) => [
+              doc.metadata.fileId,
+              {
+                fileId: doc.metadata.fileId,
+                fileName: doc.metadata.fileName || '知识库',
+              },
+            ]),
+        ).values(),
+      ];
+      const hasRelevantDocs =
+        !isCasualChat && relevantAndPassingDocs.length > 0;
+
+      let context =
+        isCasualChat || !hasRelevantDocs
+          ? ''
+          : relevantAndPassingDocs
+              .map(
+                (doc: any) =>
+                  `【来源：${doc.metadata?.fileName || '知识库'}】\n${doc.content}`,
+              )
+              .join('\n---\n');
+
+      const contextTokens = estimateTokens(context);
+//       console.log(
+//         `📚 [RAG] context 长度: ${contextTokens} tokens (limit: ${MAX_CONTEXT_TOKENS})，docs: ${relevantAndPassingDocs.length}/${relevantDocs.length}`,
+//       );
+
+      if (contextTokens > MAX_CONTEXT_TOKENS) {
+        const sep = '\n---\n';
+        while (
+          estimateTokens(context) > MAX_CONTEXT_TOKENS &&
+          context.length > 0
+        ) {
+          const lastSep = context.lastIndexOf(sep);
+          context = lastSep > 0 ? context.slice(0, lastSep) : '';
+        }
+//         console.log(`📚 [RAG] 截断后: ${estimateTokens(context)} tokens`);
+      }
+
+      const webSearchContext = liveInfoQuery
+        ? formatWebSearchContext(webSearchResults)
+        : '';
+      const historySourceIds = [
+        ...new Set(
+          historyForModel.flatMap((message: any) =>
+            Array.isArray(message.sources)
+              ? message.sources
+                  .map((source: any) => source?.fileId)
+                  .filter(
+                    (fileId: unknown): fileId is string =>
+                      typeof fileId === 'string',
+                  )
+              : [],
+          ),
+        ),
+      ];
+      const historySourceFiles = historySourceIds.length
+        ? await this.prisma.knowledgeFile.findMany({
+            where: { id: { in: historySourceIds } },
+            select: { id: true, enabled: true },
+          })
+        : [];
+      const historySourceEnabled = new Map(
+        historySourceFiles.map((file) => [file.id, file.enabled]),
+      );
+      // ✅ 历史来源状态改为「系统提示里统一说明」：不再逐条拼进历史回答正文。
+      //    原实现把 `【历史回答来源：…】` 追加到每条历史 assistant 消息后，
+      //    模型会模仿这个格式，把它原样吐进本轮回答（线上已复现），污染聊天记录。
+      const historySourceLabels = historyForModel
+        .filter(
+          (m: any) =>
+            m.role === 'assistant' &&
+            Array.isArray(m.sources) &&
+            m.sources.length,
+        )
+        .flatMap((m: any) =>
+          (m.sources as any[]).map((source: any) => {
+            const enabled = historySourceEnabled.get(source?.fileId);
+            const status =
+              enabled === undefined
+                ? '文档已删除'
+                : enabled
+                  ? '当前启用，但本轮未重新检索'
+                  : '当前已停用';
+            return `${source?.fileName || '知识库'}（${status}）`;
+          }),
+        );
+      const historySourceSummary = historySourceLabels.length
+        ? [...new Set(historySourceLabels)].join('、')
+        : '此前对话未引用知识库资料。';
+      const systemPrompt = buildSystemPrompt({
+        context,
+        historySourceSummary,
+        webSearchContext,
+      });
+
+      // ✅ 分配图片名额：当前轮优先，剩余名额从最新的历史消息往前补。
+      //   这样「刚才那张红图再帮我看看」能接上，又不会让 token 随对话轮数无限膨胀。
+      const currentRefs = (hasImages ? images! : []).slice(0, MAX_MODEL_IMAGES);
+      const slotsForHistory = Math.max(
+        0,
+        MAX_MODEL_IMAGES - currentRefs.length,
+      );
+      const historyImageRefs: string[] = [];
+      for (let i = historyForModel.length - 1; i >= 0; i--) {
+        if (historyImageRefs.length >= slotsForHistory) break;
+        const prev = historyForModel[i].images;
+        if (!Array.isArray(prev)) continue;
+        for (const ref of prev) {
+          if (historyImageRefs.length >= slotsForHistory) break;
+          if (typeof ref === 'string' && !currentRefs.includes(ref)) {
+            historyImageRefs.push(ref);
+          }
+        }
+      }
+      // 历史图可能已被清理或来源变不可信，单张失败就跳过，不影响整轮
+      const historyImageUrls = new Map<string, string>();
+      await Promise.all(
+        historyImageRefs.map(async (ref) => {
+          try {
+            historyImageUrls.set(ref, await this.imageService.toDataURL(ref));
+          } catch {
+            /* 跳过这张 */
+          }
+        }),
+      );
+
+      const imageParts = (urls: string[]) =>
+        urls.map((dataUrl) => ({
+          type: 'image_url',
+          image_url: { url: dataUrl },
+        }));
+
+      // ✅ 附件正文并入「当前用户消息」（见下方 userMessage 说明），预算里也要按它算 token
+      const userText = attachmentContext
+        ? `${attachmentContext}\n\n${userQuery}`
+        : userQuery;
+      const MAX_INPUT_TOKENS = 6000;
+      const systemTokens = estimateTokens(systemPrompt);
+      const queryTokens = estimateTokens(userText);
+      const currentImageUrls = await Promise.all(
+        currentRefs.map((ref) => this.imageService.toDataURL(ref)),
+      );
+      // ✅ 当前轮的图在这里扣；历史图的费用由下面的装配循环按条扣，避免重复计费
+      const imageTokens = currentImageUrls.length * MODEL_IMAGE_TOKEN_COST;
+      let budget = MAX_INPUT_TOKENS - systemTokens - queryTokens - imageTokens;
+
+      const formattedMessages = (liveInfoQuery ? [] : historyForModel).map(
+        (msg: any) => {
+          const role = ['user', 'assistant', 'system', 'tool'].includes(
+            msg.role,
+          )
+            ? (msg.role as 'user' | 'assistant' | 'system' | 'tool')
+            : 'user';
+          // ✅ 历史里带图且抢到名额的消息，还原成多模态，让模型记得之前看过的图
+          if (role === 'user' && Array.isArray(msg.images)) {
+            const urls = (msg.images as string[])
+              .filter((ref) => historyImageUrls.has(ref))
+              .map((ref) => historyImageUrls.get(ref)!);
+            if (urls.length) {
+              return {
+                role,
+                content: [
+                  { type: 'text', text: msg.content },
+                  ...imageParts(urls),
+                ],
+              } as any;
+            }
+          }
+          // ⚠️ 不要往历史消息正文里拼「历史回答来源」标注：模型会模仿该格式并原样输出，
+          //    污染聊天记录（线上已复现）。来源状态改由 system prompt 统一说明。
+          return {
+            role,
+            content: msg.content ?? '',
+          } as any;
+        },
+      );
+      // 从最新一条往前装，装不下就停（旧消息直接丢）
+      const keptMessages: any[] = [];
+      for (let i = formattedMessages.length - 1; i >= 0; i--) {
+        const msg = formattedMessages[i];
+        const parts = Array.isArray(msg.content) ? msg.content : null;
+        const imageCount = parts
+          ? parts.filter((p: any) => p.type === 'image_url').length
+          : 0;
+        const text = parts
+          ? parts
+              .filter((p: any) => p.type === 'text')
+              .map((p: any) => p.text)
+              .join('')
+          : String(msg.content ?? '');
+        // ✅ 图片也要算钱，否则 estimateTokens 返回 0，预算永远扣不动
+        const t = estimateTokens(text) + imageCount * MODEL_IMAGE_TOKEN_COST;
+        if (budget - t < 0) break;
+        budget -= t;
+        keptMessages.unshift(msg);
+      }
+
+      // ✅ 附件正文放进「当前用户消息」而不是系统提示：默认指令是「请概括上面的内容。」，
+      //    只有把附件放在用户轮里，模型才会把它当作「上面的内容」来总结。放 system 里时，
+      //    模型会去总结历史对话（实测：会话里有过旧附件讨论时，模型会复述旧附件、忽略本轮新附件）。
+      //    userText 已在上面（预算计算处）定义。
+      const userMessage: any = currentImageUrls.length
+        ? {
+            role: 'user',
+            content: [
+              { type: 'text', text: userText },
+              ...imageParts(currentImageUrls),
+            ],
+          }
+        : { role: 'user', content: userText };
+
+      // ✅ 保证 keptMessages 末尾是当前用户问题（带图的多模态版本）
+      //   历史查询与上面的写入是并发的，可能已经把这条读进来了 → 原地替换而不是追加，避免重复发两条
+      const lastKept = keptMessages[keptMessages.length - 1];
+      const isCurrentUserMsg =
+        lastKept?.role === 'user' && lastKept.content === userQuery;
+      if (isCurrentUserMsg) {
+        keptMessages[keptMessages.length - 1] = userMessage;
+      } else {
+        keptMessages.push(userMessage);
+      }
+
+      if (aborted()) return;
+
+      // ✅ 日志加在这里
+//       console.log(
+//         `🧮 [Token] system=${systemTokens}, query=${queryTokens}, 历史保留 ${keptMessages.length} 条, 剩余预算=${budget}`,
+//       );
+
+      // ✅ 单轮流式 + 工具循环：全部交给共享编排器
+      const messages: any[] = [
+        { role: 'system', content: systemPrompt },
+        ...keptMessages,
+      ];
+
+      // ✅ 选择本轮候选链：含图片走视觉，否则按规则判复杂度决定免费/付费起点
+      const complexity = classifyComplexity({
+        userQuery,
+        hasImages,
+        liveInfo: liveInfoQuery,
+        threshold: this.orchestrator.modelConfig.threshold,
+        expertThreshold: this.orchestrator.modelConfig.expertThreshold,
+      });
+      const candidates = resolveModelCandidates(
+        complexity,
+        this.orchestrator.modelConfig,
+        { zhipuAvailable: this.orchestrator.zhipuAvailable },
+      );
+
+      // ✅ 把路由决策推给前端思考流：用户能直接看到"为什么选了这个模型"
+      if (this.orchestrator.showRoutingThought && candidates.length) {
+        onChunk(
+          'thought',
+          formatRoutingThought(
+            complexity,
+            candidates,
+            this.orchestrator.modelConfig,
+          ),
+        );
+      }
+
+      // ✅ 免费层 glm-4-flash 对「上传的附件」有拒答反射（见 isAttachmentRefusal）：
+      //    含附件时先把开头一小段内容"扣住"，命中拒答就换 qwen 重试本轮。
+      const guardRefusal =
+        (usedAttachments?.length ?? 0) > 0 &&
+        !hasImages &&
+        candidates[0]?.provider === 'zhipu';
+      const gate: ContentGate | undefined = guardRefusal
+        ? {
+            enabled: true,
+            threshold: 120,
+            isRefusal: isAttachmentRefusal,
+            nextCandidates: (current) => {
+              const next = current.filter((c) => c.provider !== 'zhipu');
+              return next.length ? next : null;
+            },
+          }
+        : undefined;
+
+      const shortTool = (s: string, n = 60) =>
+        s.length > n ? `${s.slice(0, n).trimEnd()}…` : s;
+
+      let fullReply = '';
+      let usedTokens = 0;
+
+      for await (const ev of this.orchestrator.run(
+        {
+          messages,
+          tools: this.tools,
+          candidates,
+          maxToolRounds: 4,
+          includeTools: !liveInfoQuery,
+          signal,
+        },
+        gate,
+      )) {
+        if (aborted()) break;
+        switch (ev.type) {
+          case 'thought':
+            onChunk('thought', ev.content ?? '');
+            break;
+          case 'content':
+            onChunk('content', ev.content ?? '');
+            break;
+          case 'tool_call':
+            onChunk('thought', `🔧 调用 ${ev.name}`);
+            break;
+          case 'tool_result':
+            onChunk(
+              'thought',
+              `↩️ ${ev.name}：${shortTool(ev.result ?? '')}`,
+            );
+            break;
+          case 'error':
+            onChunk('error', ev.content ?? '');
+            break;
+          case 'done':
+            fullReply = ev.fullReply ?? '';
+            usedModel = ev.model ?? '';
+            usedTokens = ev.tokens ?? 0;
+            break;
+        }
+      }
+
+      if (fullReply) {
+        await this.prisma.message.create({
+          data: {
+            sessionId,
+            role: 'assistant',
+            content: fullReply,
+            sources: replySources,
+          },
+        });
+        onChunk(
+          'sources',
+          replySources.map((source) => ({
+            ...source,
+            usedInThisReply: true,
+          })),
+        );
+      }
+
+      await this.prisma.chatSession.update({
+        where: { id: sessionId },
+        data: { updatedAt: new Date() },
+      });
+
+      return {
+        fullReply,
+        sources: relevantAndPassingDocs,
+        tokens: usedTokens,
+        model: usedModel,
+      };
+    } catch (error: any) {
+      const totalDuration = Date.now() - overallStartTime;
+
+      // ✅ 客户端主动断开不是错误：上游请求被 abort 会抛 APIUserAbortError，
+      //    这里安静收尾即可，别给前端推 error 事件（连接已经没了，推了也没人收）
+      if (
+        aborted() ||
+        error?.name === 'AbortError' ||
+        error?.name === 'APIUserAbortError'
+      ) {
+//         console.log(
+//           `⏹️ [性能监控] 客户端已断开，提前结束（累计 ${totalDuration}ms）`,
+//         );
+        return { fullReply: '', sources: [], tokens: 0, model: usedModel };
+      }
+
+      console.error('sendMessageStream 执行出错:', error);
+//       console.log(`❌ [性能监控] 请求异常中断，累计耗时: ${totalDuration}ms`);
+
+      const errorMsg =
+        error.message || '服务器开小差了，请检查后端配置或账户余额';
+      try {
+        onChunk('error', errorMsg);
+      } catch {}
+
+      throw error;
+    }
+  }
+}

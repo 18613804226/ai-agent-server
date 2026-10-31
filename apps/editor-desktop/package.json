@@ -1,0 +1,38 @@
+{
+  "name": "@repo/editor-desktop",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Cursor-like editor desktop demo (Electron + React)",
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "start": "electron-vite preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "pnpm run typecheck:node && pnpm run typecheck:web"
+  },
+  "dependencies": {
+    "@repo/agent-orchestrator": "workspace:*",
+    "@repo/editor-agent": "workspace:*",
+    "dotenv": "^18.0.1",
+    "monaco-editor": "^0.52.0",
+    "openai": "^7.20.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^45.1.0",
+    "electron-vite": "^6.0.0",
+    "typescript": "^5.7.2",
+    "vite": "^8.3.5"
+  }
+}

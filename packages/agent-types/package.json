@@ -1,0 +1,21 @@
+{
+  "name": "@repo/agent-types",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cross-repo contract for agent streaming events",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}

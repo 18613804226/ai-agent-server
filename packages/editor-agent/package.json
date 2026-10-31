@@ -1,0 +1,31 @@
+{
+  "name": "@repo/editor-agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Editor agent: local filesystem tools + prompt, root-injectable",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "oxlint --type-aware src/"
+  },
+  "dependencies": {
+    "@repo/agent-orchestrator": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "oxlint": "^1.58.0",
+    "oxlint-tsgolint": "^7.0.2001",
+    "typescript": "^6.0.2",
+    "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^4.1.2"
+  }
+}
