@@ -58,6 +58,7 @@ describe('agent 注册', () => {
       'fetchWeatherInfo',
       'calculator',
       'web_search',
+      'festival_info',
     ]);
   });
 

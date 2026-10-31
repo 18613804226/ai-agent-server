@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { evaluate } from 'mathjs';
 import { formatWebSearchContext, searchTavily } from '../../chat/web-search.js';
+import { getFestivalDate } from './festival.js';
 import type { RegisteredTool } from '@repo/agent-orchestrator';
 
 async function fetchWeather(cityName: string): Promise<string> {
@@ -90,5 +91,28 @@ export const generalTools: RegisteredTool[] = [
       const results = await searchTavily(String(args.query || ''));
       return formatWebSearchContext(results);
     },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'festival_info',
+        description:
+          '查询传统节日/农历节日的公历日期（春节、中秋、端午、清明、七夕、重阳、腊八、除夕等）。问「春节是哪天」「中秋几号」时使用。',
+        parameters: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: '节日名，如：春节、中秋、端午' },
+            year: { type: 'number', description: '年份，默认今年' },
+          },
+          required: ['name'],
+        },
+      },
+    },
+    handler: async (args) =>
+      getFestivalDate(
+        String(args.name || ''),
+        args.year ? Number(args.year) : undefined,
+      ),
   },
 ];

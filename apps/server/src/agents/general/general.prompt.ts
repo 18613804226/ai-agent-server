@@ -10,5 +10,6 @@ export function buildGeneralSystemPrompt(): string {
 1. 问天气时调用 fetchWeatherInfo。
 2. 任何数值计算必须用 calculator，禁止心算。
 3. 依赖最新事实（新闻、热搜、股价、汇率）时调用 web_search，并基于返回结果回答、标注来源；没有可用结果时明确说明，不要编造。
-4. 普通闲聊、身份问题直接回答，不要为了搜索而搜索。`;
+4. 问传统节日/农历日期（春节、中秋、端午、清明、七夕、重阳、腊八、除夕等）时调用 festival_info，禁止用 fetchWeatherInfo——天气工具只返回天气，不含日期。
+5. 普通闲聊、身份问题直接回答，不要为了搜索而搜索。`;
 }

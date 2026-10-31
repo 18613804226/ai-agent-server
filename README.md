@@ -82,7 +82,7 @@ packages/
 - `src/agent/`：全局唯一的 `ModelClients` + `AgentOrchestrator`（`@Global` 模块）
 - `src/agents/`：各 agent 的工具集、系统提示与通用 SSE 路由
   - `editor/`：`read_file` / `write_file` / `edit_file` / `apply_patch` / `delete_file` / `move_file` / `create_directory` / `list_dir` / `search_files` / `glob` / `run_terminal` / `git_status` / `git_diff`
-  - `general/`：`fetchWeatherInfo` / `calculator` / `web_search`
+  - `general/`：`fetchWeatherInfo` / `calculator` / `web_search` / `festival_info`
 - `src/chat/`：聊天、RAG、附件、语音、知识库、Excel 检查（已按职责拆分，见上表）
 
 ### 编排器（`packages/agent-orchestrator`）
