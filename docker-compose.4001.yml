@@ -1,13 +1,28 @@
 services:
-  # 1. 带有 pgvector 插件的 PostgreSQL 数据库
+  # 1. 带 pgvector 插件的 PostgreSQL 数据库
   postgres:
     image: pgvector/pgvector:pg16
     container_name: postgres-vector
-    restart: always
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME}
+    # 2G 小机器：限制数据库资源，避免和后端抢内存/CPU
+    command: >
+      postgres
+      -c shared_buffers=128MB
+      -c work_mem=4MB
+      -c maintenance_work_mem=64MB
+      -c effective_cache_size=256MB
+      -c max_connections=50
+    deploy:
+      resources:
+        limits:
+          cpus: '0.8'
+          memory: 512M
+        reservations:
+          memory: 256M
     ports:
       - "5433:5432"
     volumes:
@@ -26,7 +41,17 @@ services:
     build: .
     image: my-backend-app:latest
     container_name: ai-agent-backend
-    restart: always
+    restart: unless-stopped
+    environment:
+      # 限制 Node 堆，防止 2G 机器被后端吃光
+      NODE_OPTIONS: '--max-old-space-size=512'
+    deploy:
+      resources:
+        limits:
+          cpus: '1.2'
+          memory: 768M
+        reservations:
+          memory: 384M
     ports:
       - "4001:3000"
     env_file:
@@ -34,6 +59,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     networks:
       - app-network
 

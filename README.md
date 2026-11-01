@@ -193,11 +193,24 @@ SSE 事件：`thought | content | error | done`（`/chat` 接口额外有 `sourc
 Docker 构建上下文是仓库根（要拿到 `packages/`）：
 
 ```bash
-docker compose -f docker-compose.4001.yml --env-file apps/server/.env build
+# 构建（限制 buildkit 内存，避免小机器 OOM）
+docker buildx build --memory 1500m -t my-backend-app:latest .
+
+# 启动
 docker compose -f docker-compose.4001.yml --env-file apps/server/.env up -d --no-build
 ```
 
 > 注意：`.env` 位于 `apps/server/.env`，不是仓库根。
+
+### 2 核 2G 小机器建议
+
+- **构建是 CPU 密集型**：`pnpm install` + `tsc` + `prisma generate` 会跑满 2 核。如果部署时机器卡死，
+  建议在 CI（ubuntu-latest）里构建并推送到镜像仓库，ECS 只 `docker pull`。
+- **运行时资源已在 compose 里限制**：postgres `0.8 核 / 512M`，backend `1.2 核 / 768M`，
+  Node 堆 `--max-old-space-size=512`，postgres 参数已调小。
+- **加 swap**：`fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile`，
+  避免内存尖峰直接触发 OOM。
+- **监控**：`docker stats` / `htop` 看是构建还是运行时吃 CPU；`docker logs -f ai-agent-backend` 看是否崩溃重启。
 
 ## 路线图
 
