@@ -20,6 +20,17 @@ export interface ProviderPreset {
   models: ModelConfig[];
 }
 
+/**
+ * 首次启动内置的默认模型 id。
+ *
+ * 这是编辑器桌面端「默认模型」的**唯一真源**：config.ts 的 selectedModel、
+ * models.ts 的 DEFAULT_LOCAL_MODEL 都从这里引用，改这一处即可。
+ */
+export const DEFAULT_MODEL_ID = 'glm-4.5-flash';
+
+/** 首次启动内置的提供商 id（对应下面 PROVIDER_PRESETS 里的一项） */
+export const DEFAULT_PROVIDER_ID = 'zhipu';
+
 export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     id: 'openai',

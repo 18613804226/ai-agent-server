@@ -380,6 +380,14 @@ export class ChatController {
           if (!isClientDisconnected) {
             // ✅ 完成后记账：次数 +1、token 累加（客户端断开不重复计）
             void this.authService.recordUsage(device.id, result?.tokens ?? 0);
+            // 把本轮 token / 模型推给前端，供消息下方展示「耗时 · tokens」
+            subscriber.next({
+              data: {
+                type: 'done',
+                tokens: result?.tokens ?? 0,
+                model: result?.model ?? '',
+              },
+            } as MessageEvent);
             subscriber.complete();
           }
         } catch (err) {

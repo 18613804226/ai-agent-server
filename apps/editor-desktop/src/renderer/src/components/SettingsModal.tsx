@@ -5,6 +5,7 @@ import type {
   ProviderStatus,
 } from '../mode/types';
 import { ProviderModal } from './ProviderModal';
+import { DEFAULT_MODEL_ID } from '../../../shared/providers';
 
 export function SettingsModal({
   config,
@@ -115,7 +116,7 @@ export function SettingsModal({
               选择里。
             </p>
             <p className="hint">
-              默认只内置免费模型 <code>glm-4-flash</code>；通义/付费模型不预置，
+              默认只内置免费模型 <code>{DEFAULT_MODEL_ID}</code>；通义/付费模型不预置，
               需要更好的模型请自行添加提供商。
             </p>
           </section>

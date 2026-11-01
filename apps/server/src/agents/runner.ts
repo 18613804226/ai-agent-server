@@ -65,11 +65,9 @@ export class AgentRunner {
             model: input.modelOverride,
           },
         ]
-      : resolveModelCandidates(
-          complexity,
-          this.orchestrator.modelConfig,
-          { zhipuAvailable: this.orchestrator.zhipuAvailable },
-        );
+      : resolveModelCandidates(complexity, this.orchestrator.modelConfig, {
+          zhipuAvailable: this.orchestrator.zhipuAvailable,
+        });
 
     if (this.orchestrator.showRoutingThought && candidates.length) {
       yield {
@@ -88,7 +86,9 @@ export class AgentRunner {
       candidates,
       complexity,
       includeTools: agent.includeTools ?? true,
-      verifyAfterTools: input.disableAutoVerify ? undefined : agent.verifyAfterTools,
+      verifyAfterTools: input.disableAutoVerify
+        ? undefined
+        : agent.verifyAfterTools,
       editToolNames: agent.editToolNames,
       approvalPolicy: agent.approvalPolicy,
       requestApproval: agent.requestApproval,

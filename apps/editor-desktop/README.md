@@ -28,13 +28,13 @@ pnpm --filter @repo/editor-desktop dev
 在 `apps/editor-desktop/.env` 里配置（复制 `.env.example`）：
 
 ```bash
-GLM_API_KEY=xxx          # 智谱（默认免费模型 glm-4-flash）
+GLM_API_KEY=xxx          # 智谱（默认免费模型 glm-4.5-flash）
 OPENAI_API_KEY=xxx       # 通义千问 / 其它 OpenAI 兼容
 ```
 
 也可以在启动 Electron 前直接设置环境变量；修改 `.env` 后需重启应用。
 
-默认只显示**一个免费模型** `glm-4-flash`；更多模型/提供商在「设置 → 提供商」里添加
+默认只显示**一个免费模型** `glm-4.5-flash`；更多模型/提供商在「设置 → 提供商」里添加
 （参考 Cursor / Cherry Studio 的自定义提供商表单）：
 
 - 提供商 ID、显示名称、基础 URL
@@ -49,13 +49,13 @@ OPENAI_API_KEY=xxx       # 通义千问 / 其它 OpenAI 兼容
 
 | 提供商 | Key 环境变量 | 默认模型 |
 |--------|--------------|----------|
-| 智谱 GLM（免费） | `GLM_API_KEY` | `glm-4-flash` |
+| 智谱 GLM（免费） | `GLM_API_KEY` | `glm-4.5-flash` |
 
 **只有配置了 key 的提供商，其模型才会出现在顶栏模型下拉里**；一个 key 都没配时
 会提示「没有可用模型」。顶栏模型下拉本地/云端都能切换：本地直接换模型，云端把
 模型名透传给后端。
 
-> 默认只内置免费 `glm-4-flash`；**不预置通义/付费模型**。需要更强的模型请自行
+> 默认只内置免费 `glm-4.5-flash`；**不预置通义/付费模型**。需要更强的模型请自行
 > 添加提供商。云端模式也会显式带上选中的模型，不会落到后端的付费级联。
 
 首次启动**不预置任何工作区**（文件树为空）；点「打开文件夹」选择项目后，
@@ -72,7 +72,7 @@ OPENAI_API_KEY=xxx       # 通义千问 / 其它 OpenAI 兼容
    `POST /agent/editor/session/:id/tool-result` 回传结果。
 
 所以云端模式改的仍是本地项目，模型用后端的 key；模型可在顶栏下拉切换，
-默认带 `glm-4-flash`，不会落到后端的付费级联。
+默认带 `glm-4.5-flash`，不会落到后端的付费级联。
 
 ## 构建与校验
 

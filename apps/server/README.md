@@ -159,12 +159,12 @@ pnpm --filter @repo/server start:dev
 含图片/视频？
   ├─ 是 → qwen3.7-flash（全模态，付费）
   └─ 否（纯文本）→ 按规则判定复杂度，三级分流：
-        简单(得分<3)  → glm-4-flash（免费）→ qwen3.7-flash 兜底
+        简单(得分<3)  → glm-4.5-flash（免费）→ qwen3.7-flash 兜底
         复杂(3~4)    → qwen3.7-flash
-        高难度(>=5)  → qwen3.8-max → qwen3.7-flash 退路
+        高难度(>=5)  → qwen3.8-max-0902 → qwen3.7-flash 退路
 ```
 
-阿里云侧所有模型（`qwen3.7-flash` / `qwen3.7-plus` / `qwen3.8-max`）共用同一套 `OPENAI_API_KEY` + `OPENAI_BASE_URL`，**无需额外配置**，只是模型名不同。
+阿里云侧所有模型（`qwen3.7-flash` / `qwen3.7-plus` / `qwen3.8-max-0902`）共用同一套 `OPENAI_API_KEY` + `OPENAI_BASE_URL`，**无需额外配置**，只是模型名不同。
 
 复杂度用**纯规则**判定（输入长度、是否多问题、代码/计算/结构化输出特征、实时信息查询等），命中项会写进日志的 `[模型分层]` 行，便于回头调整阈值。规则不引入额外模型调用，零开销。
 
@@ -174,7 +174,7 @@ pnpm --filter @repo/server start:dev
 |------|---------|------|
 | `GLM-4.7-Flash` | 高峰期首字 53s→240s（免费池排队） | 不可用 |
 | `GLM-4.6V-Flash` | 指令遵循弱，会把图片问题胡编成不存在的工具调用（如 `fetchImageContent`） | 质量不可用 |
-| `glm-4-flash` | 快（2.7s）、回答稳 | ✅ 简单文本默认档 |
+| `glm-4.5-flash` | 快（2.7s）、回答稳 | ✅ 简单文本默认档 |
 
 级联降级只对**报错**生效（限流、5xx、模型不存在），对「回答质量差但返回 200」无能为力。所以质量不达标的模型不能靠降级兜底，只能从默认档位里排除——这也是视觉档直接选 qwen 的原因。
 
@@ -184,11 +184,11 @@ pnpm --filter @repo/server start:dev
 
 | 型号 | 实测首字 | 是否免费 | 用途 |
 |------|---------|---------|------|
-| `glm-4-flash` | ~2.7s | ✅ 免费 | 简单文本（默认） |
+| `glm-4.5-flash` | ~2.7s | ✅ 免费 | 简单文本（默认） |
 | `GLM-4.6V-Flash` | ~4.4s | ✅ 免费 | 实测质量不可用，已从默认档位移除 |
 | `qwen3.7-flash` | 秒级 | ❌ 付费 | 复杂文本 / 视觉（默认）/ 兜底 |
 
-思考链默认给智谱请求带上 `thinking:{type:'disabled'}`：它会让「你好」这种问候也产出上千字推理，严重拖慢首字。需要模型自行深度推理时配 `CHAT_GLM_THINKING=true`（且必须换成 `GLM-4.6V-Flash` 等推理模型，`glm-4-flash` 无推理能力）。
+思考链默认给智谱请求带上 `thinking:{type:'disabled'}`：它会让「你好」这种问候也产出上千字推理，严重拖慢首字。需要模型自行深度推理时配 `CHAT_GLM_THINKING=true`（且必须换成 `GLM-4.6V-Flash` 等推理模型，`glm-4-flash` 等非推理型号无推理能力）。
 
 智谱免费层**限 1 个并发请求**，是 429 的主要来源；本项目已用进程内串行锁规避，并配了限流原地重试。
 
@@ -200,9 +200,9 @@ GLM_API_KEY="智谱开放平台的 API Key"
 GLM_BASE_URL="https://open.bigmodel.cn/api/paas/v4"   # 可选
 
 CHAT_MODEL_VISION="qwen3.7-flash"            # 含图片时首选
-CHAT_MODEL_TEXT_SIMPLE="glm-4-flash"         # 纯文本-简单 首选（免费）
+CHAT_MODEL_TEXT_SIMPLE="glm-4.5-flash"       # 纯文本-简单 首选（免费）
 CHAT_MODEL_TEXT_COMPLEX="qwen3.7-flash"      # 纯文本-复杂 首选
-CHAT_MODEL_TEXT_EXPERT="qwen3.8-max"         # 纯文本-高难度 首选（顶级模型）
+CHAT_MODEL_TEXT_EXPERT="qwen3.8-max-0902"    # 纯文本-高难度 首选（顶级模型）
 CHAT_MODEL_COMPLEX_FALLBACK="qwen3.7-flash"  # 复杂档兜底，可改 qwen3.7-plus
 CHAT_MODEL_FALLBACK="qwen3.7-flash"          # 全局兜底
 CHAT_COMPLEXITY_THRESHOLD="3"                # 得分达到该值算「复杂」
@@ -215,8 +215,8 @@ CHAT_SHOW_ROUTING_THOUGHT="true"             # 是否把模型选择推给前端
 调试时可看日志判断实际走了哪条链路：
 
 ```text
-🧠 [模型分层] tier=text 复杂度=expert 得分=6（complex>=3，expert>=5）链路=dashscope:qwen3.8-max → dashscope:qwen3.7-flash | 长输入>200字(+2) 复杂意图:设计/架构(+2)
-🧠 [模型分层] tier=text 复杂度=simple 链路=zhipu:glm-4-flash → dashscope:qwen3.7-flash
+🧠 [模型分层] tier=text 复杂度=expert 得分=6（complex>=3，expert>=5）链路=dashscope:qwen3.8-max-0902 → dashscope:qwen3.7-flash | 长输入>200字(+2) 复杂意图:设计/架构(+2)
+🧠 [模型分层] tier=text 复杂度=simple 链路=zhipu:glm-4.5-flash → dashscope:qwen3.7-flash
 ⏱️ [性能监控] 第 1 轮流式耗时: 1181ms，本轮首字 1102ms，工具调用 0 个，模型 dashscope:qwen3.7-flash
 ```
 

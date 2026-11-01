@@ -1,7 +1,12 @@
 import { app } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
-import type { ModelConfig } from '../shared/providers.js';
+import {
+  DEFAULT_MODEL_ID,
+  DEFAULT_PROVIDER_ID,
+  PROVIDER_PRESETS,
+  type ModelConfig,
+} from '../shared/providers.js';
 
 export type { ModelConfig };
 
@@ -39,25 +44,24 @@ export interface AppConfig {
 /**
  * 内置提供商：没添加自定义提供商时只显示一个免费模型。
  * 更多模型/提供商在「设置 → 提供商」里自行添加。
+ *
+ * 直接从 PROVIDER_PRESETS 派生，避免和预设各写一份模型列表（改一处即可）。
  */
-export const DEFAULT_PROVIDERS: ProviderConfig[] = [
-  {
-    id: 'glm',
-    name: '智谱 GLM（免费）',
-    api: 'zhipu',
-    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    apiKeyEnv: 'GLM_API_KEY',
-    models: [
-      { id: 'glm-4.5-flash', name: 'GLM-4.5-Flash（免费）' },
-      { id: 'glm-4-flash', name: 'GLM-4-Flash（免费）' },
-      { id: 'glm-4-flash-250414', name: 'GLM-4-Flash-250414（免费）' },
-    ],
-  },
-];
+export const DEFAULT_PROVIDERS: ProviderConfig[] = PROVIDER_PRESETS.filter(
+  (p) => p.id === DEFAULT_PROVIDER_ID,
+).map((p) => ({
+  id: p.id,
+  name: p.label,
+  api: p.id,
+  baseUrl: p.baseUrl,
+  apiKeyEnv: p.apiKeyEnv,
+  requiresKey: p.requiresKey,
+  models: p.models,
+}));
 
 const DEFAULTS: AppConfig = {
   providers: DEFAULT_PROVIDERS,
-  selectedModel: 'glm-4.5-flash',
+  selectedModel: DEFAULT_MODEL_ID,
   approvalMode: 'ask',
   local: { workspaceRoots: [] },
   remote: { model: '' },
