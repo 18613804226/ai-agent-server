@@ -74,8 +74,11 @@ export class ChatService {
       this.speechService.transcribeWav(wavPath),
     );
     if (this.orchestrator.zhipuAvailable) {
+      const cfg = this.orchestrator.modelConfig;
       console.log(
-        `🧠 [模型分层] GLM 免费层已启用，首选 ${this.orchestrator.modelConfig.textSimple} / ${this.orchestrator.modelConfig.visionPrimary}`,
+        `🧠 [模型分层] GLM 免费层已启用，首选 ${cfg.textSimple} / ${cfg.visionPrimary}；` +
+          `复杂 ${cfg.textComplex} → ${cfg.textComplexFallback}；` +
+          `专家 ${cfg.textExpert}；兜底 ${cfg.fallback}`,
       );
     } else {
       console.log(

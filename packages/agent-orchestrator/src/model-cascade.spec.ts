@@ -63,6 +63,25 @@ describe('模型分层：复杂度判定', () => {
     expect(r.complexity).toBe('complex');
   });
 
+  it('自然语言描述的代码实现请求 → complex', () => {
+    const r = classifyComplexity({
+      userQuery:
+        '帮我用 TypeScript 实现一个带 LRU 缓存的 HTTP 客户端，要求支持重试、超时和并发限制，并解释设计思路',
+      hasImages: false,
+      expertThreshold: 99,
+    });
+    expect(r.complexity).toBe('complex');
+    expect(r.reasons.join()).toContain('代码特征');
+  });
+
+  it('只提到技术名词的科普问题仍保持 simple', () => {
+    const r = classifyComplexity({
+      userQuery: '什么是缓存？',
+      hasImages: false,
+    });
+    expect(r.complexity).toBe('simple');
+  });
+
   it('长度是重要权重：>200 字直接 +2', () => {
     const r = classifyComplexity({ userQuery: '啊'.repeat(201), hasImages: false });
     expect(r.score).toBeGreaterThanOrEqual(2);
