@@ -368,14 +368,27 @@ export function errorMessage(err: unknown): string {
 
 /**
  * 判断错误是否值得降级到下一个候选。
- * 除「客户端主动断开」外都降级：限流、5xx、模型不存在、连不上都算，
- * 实际就踩过「模型名不存在 404」靠降级自救的坑。
+ *
+ * 401/403/402 属于配置/权限问题，换模型也没用，直接失败，避免白试整条候选链；
+ * 其余错误（限流、5xx、模型不存在、连不上、超时）都降级——
+ * 实际踩过「模型名不存在 404」和「建连超时」靠降级自救的坑。
  */
 export function isDegradableError(err: unknown): boolean {
-  const e = err as { name?: string; message?: string; code?: string };
+  const e = err as {
+    name?: string;
+    message?: string;
+    code?: string;
+    status?: number;
+    response?: { status?: number };
+  };
   if (!e) return false;
   if (e.name === 'AbortError' || e.name === 'APIUserAbortError') return false;
+
+  const status = e.status ?? e.response?.status;
+  if (status === 401 || status === 403 || status === 402) return false;
+
   if (e.code === 'ECONNRESET' || e.code === 'ETIMEDOUT') return true;
+  if (e.name === 'TimeoutError') return true;
   return true;
 }
 

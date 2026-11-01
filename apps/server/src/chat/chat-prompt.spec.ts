@@ -55,6 +55,19 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('【本轮联网搜索结果】：\n      【搜索结果】...');
   });
 
+  it('注入权威农历日期，并提示以本轮计算为准', () => {
+    const prompt = buildSystemPrompt({
+      context: '',
+      historySourceSummary: '此前对话未引用知识库资料。',
+      webSearchContext: '',
+      festivalContext: '【权威农历日期】\n2027年春节：公历 2027-02-06',
+      now,
+    });
+    expect(prompt).toContain('【权威农历日期】');
+    expect(prompt).toContain('2027-02-06');
+    expect(prompt).toContain('festival_info');
+  });
+
   it('空值使用兜底文案', () => {
     const prompt = buildSystemPrompt({
       context: '',

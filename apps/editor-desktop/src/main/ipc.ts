@@ -221,17 +221,27 @@ export function registerIpc(): void {
       payload: {
         query: string;
         history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+        context?: {
+          activeFile?: string;
+          activeContent?: string;
+          selection?: string;
+        };
       },
     ) => {
     controller?.abort();
     controller = new AbortController();
     const signal = controller.signal;
     const agent = getAgent();
+    // 审批请求也走同一个 agent:event 通道
+    agent.setEventSink((ev) => {
+      if (!event.sender.isDestroyed()) event.sender.send('agent:event', ev);
+    });
     try {
       for await (const ev of agent.run(
         payload.query,
         signal,
         payload.history,
+        payload.context,
       )) {
         if (event.sender.isDestroyed()) break;
         event.sender.send('agent:event', ev);
@@ -244,6 +254,7 @@ export function registerIpc(): void {
         });
       }
     } finally {
+      agent.setEventSink(null);
       if (controller?.signal === signal) controller = null;
     }
     },
@@ -251,12 +262,59 @@ export function registerIpc(): void {
 
   ipcMain.handle(
     'agent:execTool',
-    async (_event, payload: { name: string; args: Record<string, unknown> }) => {
-      return getAgent().execTool(payload.name, payload.args ?? {});
+    async (event, payload: { name: string; args: Record<string, unknown> }) => {
+      const agent = getAgent();
+      agent.setEventSink((ev) => {
+        if (!event.sender.isDestroyed()) event.sender.send('agent:event', ev);
+      });
+      try {
+        return await agent.execTool(payload.name, payload.args ?? {});
+      } finally {
+        agent.setEventSink(null);
+      }
     },
   );
 
   ipcMain.handle('agent:abort', () => {
     controller?.abort();
+  });
+
+  ipcMain.handle(
+    'agent:respondApproval',
+    (_event, payload: { id: string; approved: boolean }) => {
+      getAgent().respondApproval(payload.id, payload.approved);
+      return true;
+    },
+  );
+
+  ipcMain.handle('agent:undo', () => getAgent().undoLastRun());
+
+  ipcMain.handle('agent:getChanges', () => getAgent().getChanges());
+
+  ipcMain.handle('agent:resetChanges', () => {
+    getAgent().resetChanges();
+    return true;
+  });
+
+  ipcMain.handle('agent:getRunState', () => getAgent().getState());
+
+  ipcMain.handle('agent:pause', () => getAgent().pause());
+
+  ipcMain.handle('agent:cancel', () => getAgent().cancel());
+
+  ipcMain.handle('agent:resume', async (event) => {
+    const agent = getAgent();
+    agent.setEventSink((ev) => {
+      if (!event.sender.isDestroyed()) event.sender.send('agent:event', ev);
+    });
+    try {
+      for await (const ev of agent.resume()) {
+        if (event.sender.isDestroyed()) break;
+        event.sender.send('agent:event', ev);
+      }
+    } finally {
+      agent.setEventSink(null);
+    }
+    return agent.getState();
   });
 }

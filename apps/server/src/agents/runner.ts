@@ -5,6 +5,7 @@ import {
   providerForModel,
   resolveModelCandidates,
   type AgentEvent,
+  type AgentPromptContext,
   type RegisteredTool,
 } from '@repo/agent-orchestrator';
 import type { AgentDefinition } from './types.js';
@@ -20,6 +21,10 @@ export interface AgentRunInput {
   toolsOverride?: RegisteredTool[];
   /** 覆盖系统提示（云端模式用客户端的本地工作区根目录） */
   systemPromptOverride?: string;
+  /** 关闭 agent 定义的自动验证（云端代理模式：客户端通过 verify_workspace 验证） */
+  disableAutoVerify?: boolean;
+  /** 编辑器上下文（active file / 选区） */
+  context?: AgentPromptContext;
 }
 
 /**
@@ -38,7 +43,12 @@ export class AgentRunner {
     const messages: Array<Record<string, unknown>> = [
       {
         role: 'system',
-        content: input.systemPromptOverride ?? agent.buildSystemPrompt(),
+        content:
+          input.systemPromptOverride ??
+          agent.buildSystemPrompt({
+            query: input.query,
+            context: input.context,
+          }),
       },
       ...(input.history ?? []),
       { role: 'user', content: input.query },
@@ -78,6 +88,10 @@ export class AgentRunner {
       candidates,
       complexity,
       includeTools: agent.includeTools ?? true,
+      verifyAfterTools: input.disableAutoVerify ? undefined : agent.verifyAfterTools,
+      editToolNames: agent.editToolNames,
+      approvalPolicy: agent.approvalPolicy,
+      requestApproval: agent.requestApproval,
       signal: input.signal,
     });
   }

@@ -74,4 +74,16 @@ describe('SimpleLock 进程内互斥', () => {
     ]);
     expect(raced).toBe('blocked');
   });
+
+  it('acquire 超时会拒绝，而不是永远排队', async () => {
+    const lock = new SimpleLock();
+    const release = await lock.acquire();
+
+    await expect(lock.acquire(20)).rejects.toThrow('等待并发锁超时');
+
+    // 超时的 waiter 不能污染队列：释放后新的 acquire 仍能立刻拿到
+    release();
+    const next = await lock.acquire(20);
+    next();
+  });
 });

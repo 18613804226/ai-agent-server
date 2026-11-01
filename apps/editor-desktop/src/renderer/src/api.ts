@@ -3,6 +3,7 @@
  * 后端已开 CORS（origin: '*'），渲染进程直接 fetch 即可。
  */
 import { CLOUD_BACKEND_URL } from './cloud';
+import type { RunStateInfo } from './mode/types';
 
 const backendUrl = CLOUD_BACKEND_URL.replace(/\/+$/, '');
 
@@ -129,6 +130,12 @@ export async function streamChatWithTools(
     model?: string;
     workspaceRoots?: string[];
     workspaceSummary?: string;
+    context?: {
+      activeFile?: string;
+      activeContent?: string;
+      selection?: string;
+    };
+    resume?: boolean;
   } = {},
 ): Promise<void> {
   const res = await fetch(
@@ -146,6 +153,10 @@ export async function streamChatWithTools(
         ...(options.workspaceSummary
           ? { workspaceSummary: options.workspaceSummary }
           : {}),
+        ...(options.context
+          ? { context: options.context }
+          : {}),
+        ...(options.resume ? { resume: true } : {}),
       }),
       signal: options.signal,
     },
@@ -213,6 +224,39 @@ export async function fetchWorkspaceFile(
   );
   if (!res.ok) throw new Error(`读取文件失败：HTTP ${res.status}`);
   return (await res.json()) as { path: string; content: string };
+}
+
+export async function pauseAgentSession(
+  sessionId: string,
+): Promise<RunStateInfo> {
+  const res = await fetch(
+    `${backendUrl}/agent/editor/session/${sessionId}/pause`,
+    { method: 'POST', headers: authHeaders() },
+  );
+  if (!res.ok) throw new Error(`暂停失败：HTTP ${res.status}`);
+  return (await res.json()) as RunStateInfo;
+}
+
+export async function cancelAgentSession(
+  sessionId: string,
+): Promise<RunStateInfo> {
+  const res = await fetch(
+    `${backendUrl}/agent/editor/session/${sessionId}/cancel`,
+    { method: 'POST', headers: authHeaders() },
+  );
+  if (!res.ok) throw new Error(`取消失败：HTTP ${res.status}`);
+  return (await res.json()) as RunStateInfo;
+}
+
+export async function getAgentRunState(
+  sessionId: string,
+): Promise<RunStateInfo> {
+  const res = await fetch(
+    `${backendUrl}/agent/editor/session/${sessionId}/state`,
+    { headers: authHeaders() },
+  );
+  if (!res.ok) throw new Error(`查询运行态失败：HTTP ${res.status}`);
+  return (await res.json()) as RunStateInfo;
 }
 
 function authHeaders(): Record<string, string> {

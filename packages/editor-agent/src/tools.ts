@@ -21,6 +21,7 @@ import {
   sep,
 } from 'path';
 import type {
+  FileChange,
   RegisteredTool,
   ToolDefinition,
   ToolHandler,
@@ -50,9 +51,9 @@ const IGNORE_DIRS = new Set([
 function tool(definition: ToolDefinition, handler: ToolHandler): RegisteredTool {
   return {
     definition,
-    handler: async (args) => {
+    handler: async (args, context) => {
       try {
-        return await handler(args);
+        return await handler(args, context);
       } catch (e: any) {
         return `工具执行出错：${e.message ?? '未知错误'}`;
       }
@@ -65,6 +66,9 @@ function truncate(s: string): string {
     ? `${s.slice(0, MAX_RESULT_CHARS)}\n…（结果过长，已截断）`
     : s;
 }
+
+/** 超过这个长度就转 artifact，避免大文件全文进上下文 */
+const ARTIFACT_THRESHOLD = 4000;
 
 /** 去掉前导斜杠、统一正斜杠：AI 输入常带 /test/a.js 这种路径 */
 function cleanPath(s: string): string {
@@ -292,7 +296,7 @@ export function createEditorTools(
   /** 把用户给的路径解析成某个工作区根内的绝对路径；越界抛错 */
   const safeResolve = (p: string): string => resolveInRoots(roots, p);
 
-  return [
+  const tools: RegisteredTool[] = [
     tool(
       {
         type: 'function',
@@ -310,17 +314,22 @@ export function createEditorTools(
           },
         },
       },
-      async (args) => {
+      async (args, context) => {
         const abs = safeResolve(String(args.path));
         if (!existsSync(abs)) return `文件不存在：${args.path}`;
         if (isProbablyBinary(abs)) return `二进制文件，无法读取：${args.path}`;
-        return truncate(
-          readTextFile(
-            abs,
-            Number(args.offset) || 0,
-            Number(args.limit) || undefined,
-          ),
+        const content = readTextFile(
+          abs,
+          Number(args.offset) || 0,
+          Number(args.limit) || undefined,
         );
+        if (content.length > ARTIFACT_THRESHOLD && context.artifacts) {
+          const id = context.artifacts.create(content, {
+            path: String(args.path),
+          });
+          return `【文件较大，已存为 artifact】\nartifact: ${id}\n预览（前 1000 字符）：\n${content.slice(0, 1000)}\n\n需要全文请调用 read_artifact，参数 {"id":"${id}"}`;
+        }
+        return truncate(content);
       },
     ),
     tool(
@@ -765,19 +774,65 @@ export function createEditorTools(
         }
       },
     ),
+    tool(
+      {
+        type: 'function',
+        function: {
+          name: 'read_artifact',
+          description:
+            '读取之前工具返回的 artifact 全文（大文件、大结果）。参数是 artifact id。',
+          parameters: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'artifact id' },
+            },
+            required: ['id'],
+          },
+        },
+      },
+      async (args, context) => {
+        const id = String(args.id ?? '');
+        const content = context.artifacts?.get(id);
+        return content ?? `未找到 artifact：${id}`;
+      },
+    ),
   ];
+
+  // 只读工具可以并行执行；写操作串行 + 审批
+  const readOnlyNames = new Set([
+    'read_file',
+    'read_artifact',
+    'list_dir',
+    'search_files',
+    'glob',
+    'git_status',
+    'git_diff',
+  ]);
+  for (const item of tools) {
+    if (readOnlyNames.has(item.definition.function.name)) {
+      item.readOnly = true;
+    }
+  }
+  return tools;
 }
 
 /** 工作区里有哪些目录（给 prompt 用） */
 export function workspaceSummary(rootsInput: WorkspaceRootsInput): string {
   const roots = normalizeRoots(rootsInput);
+  const allFiles = collectWorkspaceFiles(roots);
   return roots
     .map((root) => {
       try {
         if (!existsSync(root.path)) {
           return `【${root.name}】${root.path}（不存在）`;
         }
-        return `【${root.name}】${root.path}\n${listDir(root.path)}`;
+        const prefix = `${root.name}/`;
+        const files = allFiles
+          .filter((file) => file.rel.startsWith(prefix))
+          .slice(0, 200)
+          .map((file) => `  ${file.rel}`)
+          .join('\n');
+        return `【${root.name}】${root.path}\n${listDir(root.path)}\n文件（最多 200 个）：\n${files}`;
       } catch (e: any) {
         return `【${root.name}】${root.path}（无法读取：${e.message}）`;
       }
@@ -896,4 +951,138 @@ export function readWorkspaceFile(
     throw new Error(`二进制文件，无法读取：${relativePath}`);
   }
   return readTextFile(abs);
+}
+
+/**
+ * 撤销一轮文件改动（checkpoint/undo）：
+ * 按相反顺序恢复 before 内容、删除新建文件、把重命名移回去。
+ * 越界路径或 IO 失败会记入 failed，不中断其余恢复。
+ */
+export function restoreChanges(
+  rootsInput: WorkspaceRootsInput,
+  changes: FileChange[],
+): { restored: string[]; failed: string[] } {
+  const roots = normalizeRoots(rootsInput);
+  const restored: string[] = [];
+  const failed: string[] = [];
+
+  const absolute = (relativePath: string): string =>
+    resolveInRoots(roots, relativePath);
+
+  const write = (abs: string, content?: string) => {
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content ?? '', 'utf8');
+  };
+
+  const remove = (abs: string) => {
+    if (!existsSync(abs)) return;
+    if (statSync(abs).isDirectory()) {
+      rmSync(abs, { recursive: true, force: true });
+    } else {
+      rmSync(abs, { force: true });
+    }
+  };
+
+  for (const change of [...changes].reverse()) {
+    try {
+      if (change.kind === 'created') {
+        remove(absolute(change.path));
+        restored.push(change.path);
+      } else if (change.kind === 'modified' || change.kind === 'deleted') {
+        write(absolute(change.path), change.before);
+        restored.push(change.path);
+      } else if (change.kind === 'renamed') {
+        const from = change.from ? absolute(change.from) : undefined;
+        const to = absolute(change.path);
+        if (from) write(from, change.before);
+        remove(to);
+        restored.push(`${change.from ?? ''} → ${change.path}`);
+      }
+    } catch (error: any) {
+      failed.push(`${change.path}: ${error?.message ?? String(error)}`);
+    }
+  }
+
+  return { restored, failed };
+}
+
+/** 审批预览：根据工具入参算出 before/after，供 UI 展示 diff */
+export interface ApprovalPreview {
+  kind: 'create' | 'modify' | 'delete' | 'rename' | 'command';
+  path?: string;
+  from?: string;
+  before?: string;
+  after?: string;
+  command?: string;
+}
+
+export function previewApproval(
+  rootsInput: WorkspaceRootsInput,
+  toolName: string,
+  args: Record<string, unknown>,
+): ApprovalPreview[] {
+  const roots = normalizeRoots(rootsInput);
+  const abs = (relativePath: string) => resolveInRoots(roots, relativePath);
+  const read = (relativePath: string): string | undefined => {
+    const target = abs(relativePath);
+    return existsSync(target) ? tryReadText(target) : undefined;
+  };
+  const str = (value: unknown): string =>
+    typeof value === 'string' ? value : '';
+
+  if (toolName === 'write_file') {
+    const path = str(args.path);
+    return [
+      {
+        kind: existsSync(abs(path)) ? 'modify' : 'create',
+        path,
+        before: read(path),
+        after: str(args.content),
+      },
+    ];
+  }
+
+  if (toolName === 'edit_file') {
+    const path = str(args.path);
+    const before = read(path) ?? '';
+    const next = before.split(str(args.old_string)).join(str(args.new_string));
+    return [{ kind: 'modify', path, before, after: next }];
+  }
+
+  if (toolName === 'apply_patch') {
+    const edits = Array.isArray(args.edits) ? (args.edits as any[]) : [];
+    return edits.map((edit) => {
+      const path = str(edit?.path);
+      if (typeof edit?.content === 'string') {
+        return {
+          kind: existsSync(abs(path)) ? 'modify' : 'create',
+          path,
+          before: read(path),
+          after: edit.content,
+        } as ApprovalPreview;
+      }
+      const before = read(path) ?? '';
+      const next = before.split(str(edit?.old_string)).join(str(edit?.new_string));
+      return { kind: 'modify', path, before, after: next } as ApprovalPreview;
+    });
+  }
+
+  if (toolName === 'delete_file') {
+    const path = str(args.path);
+    return [{ kind: 'delete', path, before: read(path), after: '' }];
+  }
+
+  if (toolName === 'move_file') {
+    const from = str(args.from);
+    const to = str(args.to);
+    return [
+      { kind: 'rename', path: to, from, before: read(from), after: read(to) },
+    ];
+  }
+
+  if (toolName === 'run_terminal') {
+    return [{ kind: 'command', command: str(args.command) }];
+  }
+
+  return [];
 }

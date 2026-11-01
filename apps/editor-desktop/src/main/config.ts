@@ -18,10 +18,14 @@ export interface ProviderConfig {
   models: ModelConfig[];
 }
 
+export type ApprovalMode = 'ask' | 'auto';
+
 export interface AppConfig {
   providers: ProviderConfig[];
   /** 本地模式选中的模型 id */
   selectedModel: string;
+  /** 工具审批：always 询问 / auto 自动放行 */
+  approvalMode: ApprovalMode;
   local: {
     /** 上次打开的多个工作区文件夹（下次启动恢复） */
     workspaceRoots?: string[];
@@ -50,6 +54,7 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
 const DEFAULTS: AppConfig = {
   providers: DEFAULT_PROVIDERS,
   selectedModel: 'glm-4-flash',
+  approvalMode: 'ask',
   local: { workspaceRoots: [] },
   remote: { model: '' },
 };
@@ -77,6 +82,7 @@ export function getConfig(): AppConfig {
         typeof raw.selectedModel === 'string'
           ? raw.selectedModel
           : DEFAULTS.selectedModel,
+      approvalMode: raw.approvalMode === 'auto' ? 'auto' : 'ask',
       local: {
         workspaceRoots: Array.isArray(raw.local?.workspaceRoots)
           ? raw.local.workspaceRoots

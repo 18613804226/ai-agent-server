@@ -96,6 +96,9 @@ importers:
       '@repo/editor-agent':
         specifier: workspace:*
         version: link:../../packages/editor-agent
+      '@repo/general-agent':
+        specifier: workspace:*
+        version: link:../../packages/general-agent
       axios:
         specifier: ^1.20.0
         version: 1.21.0
@@ -111,15 +114,9 @@ importers:
       fluent-ffmpeg:
         specifier: ^2.1.3
         version: 2.1.3
-      lunar-javascript:
-        specifier: ^1.7.7
-        version: 1.7.7
       mammoth:
         specifier: ^1.13.0
         version: 1.13.0
-      mathjs:
-        specifier: ^15.2.0
-        version: 15.2.0
       multer:
         specifier: ^2.4.0
         version: 2.5.0
@@ -251,6 +248,40 @@ importers:
       '@repo/agent-orchestrator':
         specifier: workspace:*
         version: link:../agent-orchestrator
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.2
+      oxlint:
+        specifier: ^1.58.0
+        version: 1.90.0(oxlint-tsgolint@7.0.2005)
+      oxlint-tsgolint:
+        specifier: ^7.0.2001
+        version: 7.0.2005
+      typescript:
+        specifier: ^6.0.2
+        version: 6.0.3
+      vite-tsconfig-paths:
+        specifier: ^5.1.4
+        version: 5.1.4(typescript@6.0.3)(vite@8.3.5(@types/node@24.19.2)(jiti@2.7.0))
+      vitest:
+        specifier: ^4.1.2
+        version: 4.1.12(@types/node@24.19.2)(@vitest/coverage-v8@4.1.12)(vite@8.3.5(@types/node@24.19.2)(jiti@2.7.0))
+
+  packages/general-agent:
+    dependencies:
+      '@repo/agent-orchestrator':
+        specifier: workspace:*
+        version: link:../agent-orchestrator
+      axios:
+        specifier: ^1.20.0
+        version: 1.21.0
+      lunar-javascript:
+        specifier: ^1.7.7
+        version: 1.7.7
+      mathjs:
+        specifier: ^15.2.0
+        version: 15.2.0
     devDependencies:
       '@types/node':
         specifier: ^24.0.0

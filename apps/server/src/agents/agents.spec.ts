@@ -50,6 +50,8 @@ describe('agent 注册', () => {
       'run_terminal',
       'git_status',
       'git_diff',
+      'read_artifact',
+      'verify_workspace',
     ]);
   });
 

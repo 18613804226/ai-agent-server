@@ -1,5 +1,5 @@
+import { generalAgent } from '@repo/general-agent';
 import { editorAgent } from './editor/editor.definition.js';
-import { generalAgent } from './general/general.definition.js';
 import type { AgentDefinition } from './types.js';
 
 /** agent id → 定义。新增 agent 只需在这里注册。 */

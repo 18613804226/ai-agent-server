@@ -40,10 +40,11 @@ COPY apps/server/ ./apps/server/
 RUN DATABASE_URL="$BUILD_DATABASE_URL" pnpm --filter @repo/server exec prisma generate
 
 # 6. 编译：按依赖顺序构建（server 从它们的 dist 取类型与运行时）。
-#    顺序：agent-orchestrator → editor-agent → server
+#    顺序：agent-orchestrator → editor-agent / general-agent → server
 #    不用 `pnpm build`（turbo），因为桌面端源码不在镜像里，turbo 会去构建它。
 RUN pnpm --filter @repo/agent-orchestrator build \
     && pnpm --filter @repo/editor-agent build \
+    && pnpm --filter @repo/general-agent build \
     && pnpm --filter @repo/server build
 
 # 7. 裁剪开发依赖：从 dev 安装切到 prod 安装。

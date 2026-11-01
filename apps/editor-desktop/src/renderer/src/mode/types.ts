@@ -40,6 +40,8 @@ export interface ProviderStatus {
 export interface AppConfig {
   providers: ProviderConfig[];
   selectedModel: string;
+  /** 工具审批：always 询问 / auto 自动放行 */
+  approvalMode?: 'ask' | 'auto';
   local: { workspaceRoot?: string };
   remote: { model?: string };
 }
@@ -53,6 +55,16 @@ export interface FileChange {
 }
 
 /** 两种模式共用的流式事件（本地 IPC / 云端 SSE 结构一致） */
+/** 审批预览：根据工具入参算出的 before/after */
+export interface ApprovalPreview {
+  kind: 'create' | 'modify' | 'delete' | 'rename' | 'command';
+  path?: string;
+  from?: string;
+  before?: string;
+  after?: string;
+  command?: string;
+}
+
 export interface ChatEvent {
   type:
     | 'thought'
@@ -76,6 +88,12 @@ export interface ChatEvent {
   changes?: FileChange[];
   /** file_edit 事件携带的编辑意图（流式动画用） */
   edit?: FileEdit;
+  /** approval_request 事件 */
+  id?: string;
+  toolName?: string;
+  preview?: ApprovalPreview[];
+  /** tool_call / tool_result 的本轮序号，UI 据此匹配 */
+  index?: number;
 }
 
 /** 流式文件编辑意图：工具调用解析出的单次编辑，供编辑器做「一行一行往下刷」动画 */
@@ -114,12 +132,53 @@ export interface ChatHistoryItem {
   content: string;
 }
 
+export interface AgentPromptContext {
+  activeFile?: string;
+  activeContent?: string;
+  selection?: string;
+}
+
+export interface RunStateInfo {
+  state: string;
+  checkpoint: {
+    id: string;
+    query: string;
+    history: Array<{ role: 'user' | 'assistant'; content: string }>;
+    context?: {
+      activeFile?: string;
+      activeContent?: string;
+      selection?: string;
+    };
+    changes: Array<{
+      path: string;
+      kind: 'created' | 'modified' | 'deleted' | 'renamed';
+      before?: string;
+      after?: string;
+      from?: string;
+    }>;
+    state: string;
+    updatedAt: number;
+  } | null;
+}
+
 export interface AgentTransport {
   run(
     query: string,
     onEvent: (ev: ChatEvent) => void,
     signal?: AbortSignal,
-    options?: { model?: string; history?: ChatHistoryItem[] },
+    options?: {
+      model?: string;
+      history?: ChatHistoryItem[];
+      context?: AgentPromptContext;
+    },
   ): Promise<void>;
+  /** 断点续跑：从检查点继续（本地/云端都支持） */
+  resume?(onEvent: (ev: ChatEvent) => void, signal?: AbortSignal): Promise<void>;
+  /** 暂停当前运行 */
+  pause(): Promise<RunStateInfo>;
+  /** 取消当前运行 */
+  cancel(): Promise<RunStateInfo>;
+  /** 查询运行态与检查点 */
+  getRunState(): Promise<RunStateInfo>;
   abort(): void;
 }

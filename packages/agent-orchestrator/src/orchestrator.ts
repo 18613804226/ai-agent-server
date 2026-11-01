@@ -12,10 +12,27 @@ import {
 import {
   finalizeToolCalls,
   mergeToolCallDeltas,
+  type AccumulatedToolCall,
   type ToolCallAccumulator,
 } from './tool-call-accumulator.js';
 import { SimpleLock } from './simple-lock.js';
-import type { AgentEvent, AgentInput, ContentGate, FileEdit } from './types.js';
+import { withIdleTimeout, withTimeout } from './async-utils.js';
+import { ToolRuntime, validateToolArgs } from './tool-runtime.js';
+import { ArtifactStore } from './artifact-store.js';
+import {
+  ContextManager,
+  type ContextManagerOptions,
+} from './context-manager.js';
+import type {
+  AgentEvent,
+  AgentInput,
+  ApprovalHook,
+  ApprovalPolicy,
+  ContentGate,
+  ContextStats,
+  FileEdit,
+  RegisteredTool,
+} from './types.js';
 
 /** 编排器配置：全部由宿主注入，编排器自身不读 process.env */
 export interface OrchestratorConfig {
@@ -34,6 +51,33 @@ export interface OrchestratorConfig {
   zhipuLock: SimpleLock;
   /** 默认最大工具轮数 */
   defaultMaxRounds?: number;
+  /** 模型建连超时（ms），默认 60s */
+  connectTimeoutMs?: number;
+  /** 流式空闲超时（ms），默认 90s；两个 chunk 之间无数据即中止 */
+  streamIdleTimeoutMs?: number;
+  /** 智谱锁等待超时（ms），默认 30s；拿不到锁就降级到下一个候选 */
+  lockAcquireTimeoutMs?: number;
+  /** 单次工具执行超时（ms），默认 120s */
+  toolTimeoutMs?: number;
+  /** 工具结果最大字符数，默认 8000 */
+  toolMaxResultChars?: number;
+  /** 上下文压缩策略 */
+  contextOptions?: ContextManagerOptions;
+}
+
+/** 默认会触发自动验证的编辑类工具 */
+const DEFAULT_EDIT_TOOL_NAMES = [
+  'write_file',
+  'edit_file',
+  'apply_patch',
+  'delete_file',
+  'move_file',
+];
+
+/** 验证结果回填前统一截断，避免长 lint 输出撑爆上下文 */
+function capVerdict(text: string, maxChars = 4000): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n…（验证输出已截断）`;
 }
 
 /**
@@ -43,7 +87,22 @@ export interface OrchestratorConfig {
  * 通过 ContentGate 注入「拒答守卫」这类场景逻辑。
  */
 export class AgentOrchestrator {
-  constructor(private readonly config: OrchestratorConfig) {}
+  private readonly connectTimeoutMs: number;
+  private readonly streamIdleTimeoutMs: number;
+  private readonly lockAcquireTimeoutMs: number;
+  private readonly toolRuntime: ToolRuntime;
+  private readonly contextManager: ContextManager;
+
+  constructor(private readonly config: OrchestratorConfig) {
+    this.connectTimeoutMs = config.connectTimeoutMs ?? 60_000;
+    this.streamIdleTimeoutMs = config.streamIdleTimeoutMs ?? 90_000;
+    this.lockAcquireTimeoutMs = config.lockAcquireTimeoutMs ?? 30_000;
+    this.toolRuntime = new ToolRuntime({
+      timeoutMs: config.toolTimeoutMs,
+      maxResultChars: config.toolMaxResultChars,
+    });
+    this.contextManager = new ContextManager(config.contextOptions);
+  }
 
   /** 模型级联配置（供宿主推导候选链、生成路由思考） */
   get modelConfig(): ModelCascadeConfig {
@@ -80,16 +139,43 @@ export class AgentOrchestrator {
     stream: any;
     candidate: ModelCandidate;
     release?: () => void;
+    /** 中止底层请求并解绑 signal；调用方在流结束后必须调用 */
+    dispose: () => void;
   }> {
     let lastError: any = null;
+    let attempted = 0;
+
     for (const candidate of candidates) {
       const client = this.clientFor(candidate.provider);
       if (!client) continue;
 
-      const release =
-        candidate.provider === 'zhipu'
-          ? await this.config.zhipuLock.acquire()
-          : undefined;
+      attempted++;
+      let release: (() => void) | undefined;
+      try {
+        release =
+          candidate.provider === 'zhipu'
+            ? await this.config.zhipuLock.acquire(this.lockAcquireTimeoutMs)
+            : undefined;
+      } catch (err: any) {
+        // 锁等待超时：不阻塞在这里，直接降级到下一个候选
+        lastError = err;
+        onThought?.(`${candidate.model} 并发已满，切换备用模型…`);
+        console.warn(
+          `🧠 [模型分层] ${candidate.provider}:${candidate.model} 获取并发锁超时，切换下一个候选`,
+        );
+        continue;
+      }
+
+      const controller = new AbortController();
+      const onAbort = () => controller.abort();
+      if (signal) {
+        if (signal.aborted) controller.abort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      }
+      const dispose = () => {
+        controller.abort();
+        signal?.removeEventListener('abort', onAbort);
+      };
 
       const maxTries = this.config.rateLimitRetries + 1;
       for (let attempt = 1; attempt <= maxTries; attempt++) {
@@ -99,13 +185,19 @@ export class AgentOrchestrator {
             candidate.provider === 'zhipu'
               ? { ...payload, model: candidate.model, ...zhipuThinkingParam() }
               : { ...payload, model: candidate.model };
-          const stream = await client.chat.completions.create(body as any, {
-            signal,
-          });
+          const stream = await withTimeout(
+            client.chat.completions.create(body as any, {
+              signal: controller.signal,
+            }),
+            this.connectTimeoutMs,
+            controller.signal,
+            `模型建连超时（${candidate.model}，${this.connectTimeoutMs}ms）`,
+          );
           // 锁交给调用方：流读完再释放，保证全程只有 1 个智谱请求在飞
-          return { stream, candidate, release };
+          return { stream, candidate, release, dispose };
         } catch (err: any) {
           if (signal?.aborted) {
+            dispose();
             release?.();
             throw err;
           }
@@ -132,17 +224,25 @@ export class AgentOrchestrator {
           onThought?.(
             `首选模型 ${candidate.model} 暂时不可用，正在切换备用模型…`,
           );
-          // isDegradableError 目前恒真（除客户端断开），保留判断便于日后收紧策略
+          // 401/403/402 这类配置错误不降级，避免白试所有候选
           if (!isDegradableError(err)) {
+            dispose();
             release?.();
             throw err;
           }
+          dispose(); // 中止可能挂着的底层请求
           release?.(); // 放弃这个候选，放锁再试下一个
           break;
         }
       }
     }
-    throw lastError;
+
+    if (lastError) throw lastError;
+    throw new Error(
+      attempted
+        ? '所有模型候选均请求失败'
+        : '没有可用的模型客户端（请检查 provider 配置）',
+    );
   }
 
   /** 候选链缺省时按复杂度推导 */
@@ -157,6 +257,66 @@ export class AgentOrchestrator {
    * 跑一轮完整的 agent 循环：建流 → 累积 tool_calls → 执行工具 → 回填 → 再跑一轮，
    * 直到不再调工具或达到最大轮数。通过 AsyncGenerator 吐出 AgentEvent。
    */
+  /**
+   * 执行单个工具调用（不吐事件）：审批 → 参数校验 → 重复调用缓存 → ToolRuntime。
+   * 只读工具的结果会进缓存；重复调用返回引用而不是全文。
+   */
+  private async executeToolCall(
+    call: AccumulatedToolCall,
+    args: Record<string, unknown>,
+    context: {
+      signal?: AbortSignal;
+      approvalPolicy?: ApprovalPolicy;
+      requestApproval?: ApprovalHook;
+      tools: RegisteredTool[];
+      artifacts?: ArtifactStore;
+      resultCache: Map<string, string>;
+    },
+  ): Promise<string> {
+    const tool = context.tools.find(
+      (t) => t.definition.function.name === call.function.name,
+    );
+    const policy = context.approvalPolicy?.(call.function.name, args) ?? 'allow';
+    let approved = policy !== 'deny';
+    if (approved && policy === 'ask') {
+      if (context.signal?.aborted) approved = false;
+      else if (context.requestApproval) {
+        approved = await context.requestApproval({
+          toolName: call.function.name,
+          args,
+          signal: context.signal,
+        });
+      } else {
+        approved = false; // 配置为 ask 但没有审批钩子：安全起见拒绝
+      }
+    }
+    if (!approved) {
+      return policy === 'deny'
+        ? `工具被策略拒绝：${call.function.name}`
+        : `用户拒绝执行：${call.function.name}`;
+    }
+    if (!tool) return `未知工具：${call.function.name}`;
+
+    const invalid = validateToolArgs(tool.definition, args);
+    if (invalid) return `工具参数错误（${call.function.name}）：${invalid}`;
+
+    const key = `${call.function.name}:${JSON.stringify(args)}`;
+    if (tool.readOnly) {
+      const cached = context.resultCache.get(key);
+      if (cached !== undefined) {
+        return `【重复调用】与之前相同，结果已省略（原长 ${cached.length} 字符）。如需完整内容请重新读取。`;
+      }
+    }
+
+    const result = await this.toolRuntime.execute(tool, args, {
+      signal: context.signal,
+      toolName: call.function.name,
+      artifacts: context.artifacts,
+    });
+    if (tool.readOnly) context.resultCache.set(key, result);
+    return result;
+  }
+
   async *run(input: AgentInput, gate?: ContentGate): AsyncGenerator<AgentEvent> {
     const {
       messages,
@@ -164,6 +324,10 @@ export class AgentOrchestrator {
       maxToolRounds = this.config.defaultMaxRounds ?? 4,
       signal,
       includeTools = true,
+      verifyAfterTools,
+      editToolNames,
+      approvalPolicy,
+      requestApproval,
     } = input;
 
     let chain = input.candidates ?? this.deriveCandidates(input);
@@ -171,6 +335,11 @@ export class AgentOrchestrator {
     let usedTokens = 0;
     let rawFullReply = '';
     let refusalRetried = false;
+    let lastFinishReason: string | undefined;
+    let lastContextStats: ContextStats | undefined;
+    // 本轮 artifact 存储 + 只读工具重复调用缓存
+    const artifacts = new ArtifactStore();
+    const resultCache = new Map<string, string>();
 
     if (!chain.length) {
       yield { type: 'error', content: '没有可用的模型候选' };
@@ -184,9 +353,20 @@ export class AgentOrchestrator {
       const toolAcc: ToolCallAccumulator = {};
       let roundReply = '';
       let roundTtft: number | null = null;
+      let roundFinishReason: string | undefined;
       // 拒答守卫：gateOpen=false 时内容先攒在 gateBuf，够长或确认非拒答才放行
       let gateOpen = !gate?.enabled;
       let gateBuf = '';
+
+      // ✅ 每次调模型前先做上下文治理：旧工具结果压成预览，避免每轮重发全文。
+      const contextStats = this.contextManager.compact(messages);
+      if (
+        contextStats.compactedToolResults > 0 ||
+        contextStats.compactedToolCalls > 0 ||
+        contextStats.compactedMessages > 0
+      ) {
+        lastContextStats = contextStats;
+      }
 
       const payload = {
         messages,
@@ -198,20 +378,27 @@ export class AgentOrchestrator {
         stream_options: { include_usage: true },
       };
       const pendingThoughts: string[] = [];
-      const { stream, candidate, release } = await this.createChatStream(
-        chain,
-        payload,
-        signal,
-        this.config.showRoutingThought
-          ? (t) => pendingThoughts.push(t)
-          : undefined,
-      );
+      const { stream, candidate, release, dispose } =
+        await this.createChatStream(
+          chain,
+          payload,
+          signal,
+          this.config.showRoutingThought
+            ? (t) => pendingThoughts.push(t)
+            : undefined,
+        );
       usedModel = `${candidate.provider}:${candidate.model}`;
-      // 建流阶段的路径决策（限流重试、切换候选）先于内容吐出
-      for (const t of pendingThoughts) yield { type: 'thought', content: t };
-
       try {
-        for await (const chunk of stream) {
+        // 建流阶段的路径决策（限流重试、切换候选）先于内容吐出；
+        // 放进 try 里是为了消费者在 thought 处提前断开时也能释放锁/中止请求。
+        for (const t of pendingThoughts) yield { type: 'thought', content: t };
+
+        for await (const chunk of withIdleTimeout(
+          stream,
+          this.streamIdleTimeoutMs,
+          signal,
+          dispose,
+        )) {
           if (signal?.aborted) {
             console.log('检测到用户中断，强行跳出大模型流生成。');
             break;
@@ -224,6 +411,9 @@ export class AgentOrchestrator {
           if (chunkUsage?.total_tokens) {
             usedTokens += chunkUsage.total_tokens;
           }
+
+          const chunkFinishReason = (chunk as any).choices?.[0]?.finish_reason;
+          if (chunkFinishReason) roundFinishReason = chunkFinishReason;
 
           const delta =
             (chunk as any).choices?.[0]?.delta ||
@@ -264,8 +454,13 @@ export class AgentOrchestrator {
               yield { type: 'content', content: textContent };
             } else {
               gateBuf += textContent;
-              // 攒够阈值仍未见拒答 → 放行已攒内容，之后正常流式
-              if (gateBuf.length >= (gate?.threshold ?? 120)) {
+              // 攒够阈值仍未见拒答 → 放行已攒内容，之后正常流式。
+              // 拒答识别依赖「无法」，所以只要 32 字内没出现「无法」就可以提前放行，
+              // 不必死等 120 字——否则短回答要等整条流结束才显示，体感像“不吐字”。
+              const gateThreshold = gate?.threshold ?? 120;
+              const earlyOpen =
+                gateBuf.length >= 32 && !gateBuf.includes('无法');
+              if (gateBuf.length >= gateThreshold || earlyOpen) {
                 gateOpen = true;
                 rawFullReply += gateBuf;
                 yield { type: 'content', content: gateBuf };
@@ -274,9 +469,14 @@ export class AgentOrchestrator {
           }
         }
       } finally {
-        // 智谱锁：必须等整条流读完才放，避免并发打爆免费层的 1 并发限制
+        // 先中止底层请求（正常结束也无害），再放智谱锁：
+        // 锁必须等整条流读完才放，避免并发打爆免费层的 1 并发限制
+        dispose();
         release?.();
       }
+
+      // 记录本轮 finish_reason；最后一轮的值会带进 done 事件
+      lastFinishReason = roundFinishReason;
 
       const toolCalls = finalizeToolCalls(toolAcc);
 
@@ -325,38 +525,126 @@ export class AgentOrchestrator {
         content: roundReply || null,
         tool_calls: toolCalls,
       });
-      for (const call of toolCalls) {
-        if (signal?.aborted) return;
-        // 先解析入参：tool_call 事件要带上 args，让宿主能展示「读/写/编辑哪个文件」
-        let args: Record<string, unknown> = {};
+      const results = new Map<string, string>();
+      const parseArgs = (call: AccumulatedToolCall) => {
         try {
-          args = JSON.parse(call.function.arguments || '{}');
+          return JSON.parse(call.function.arguments || '{}');
         } catch {
-          args = {};
+          return {};
         }
-        yield { type: 'tool_call', name: call.function.name, args };
-
-        const handler = tools.find(
+      };
+      const isReadOnly = (call: AccumulatedToolCall) =>
+        tools.find(
           (t) => t.definition.function.name === call.function.name,
-        )?.handler;
-        let result: string;
-        try {
-          // 文件编辑类工具：在真正执行前把编辑意图吐给宿主，做「一行一行往下刷」的动画
-          const edit = parseFileEdit(call.function.name, args);
-          if (edit) yield { type: 'file_edit', edit };
-          result = handler
-            ? await handler(args)
-            : `未知工具：${call.function.name}`;
-        } catch (e: any) {
-          result = `工具执行出错：${e.message}`;
-        }
-        yield { type: 'tool_result', name: call.function.name, result };
+        )?.readOnly === true;
+
+      // 1. 先吐所有 tool_call，UI 立刻展示本轮要调哪些工具
+      for (let index = 0; index < toolCalls.length; index++) {
+        const call = toolCalls[index];
+        yield {
+          type: 'tool_call',
+          name: call.function.name,
+          args: parseArgs(call),
+          index,
+        };
+      }
+
+      // 2. 写工具：先吐 file_edit 动画，再串行执行（审批/副作用）
+      for (let index = 0; index < toolCalls.length; index++) {
+        const call = toolCalls[index];
+        if (isReadOnly(call)) continue;
+        if (signal?.aborted) break;
+        const args = parseArgs(call);
+        const tool = tools.find(
+          (t) => t.definition.function.name === call.function.name,
+        );
+        const invalid = tool
+          ? validateToolArgs(tool.definition, args)
+          : null;
+        const edit = invalid
+          ? undefined
+          : parseFileEdit(call.function.name, args);
+        if (edit) yield { type: 'file_edit', edit };
+        results.set(
+          call.id,
+          await this.executeToolCall(call, args, {
+            signal,
+            approvalPolicy,
+            requestApproval,
+            tools,
+            artifacts,
+            resultCache,
+          }),
+        );
+      }
+
+      // 3. 只读工具并行执行
+      const readOnlyCalls = toolCalls.filter((call) => isReadOnly(call));
+      await Promise.all(
+        readOnlyCalls.map(async (call) => {
+          const args = parseArgs(call);
+          results.set(
+            call.id,
+            await this.executeToolCall(call, args, {
+              signal,
+              approvalPolicy,
+              requestApproval,
+              tools,
+              artifacts,
+              resultCache,
+            }),
+          );
+        }),
+      );
+
+      // 4. 按原始顺序回填 tool_result 与消息
+      for (let index = 0; index < toolCalls.length; index++) {
+        const call = toolCalls[index];
+        const result = results.get(call.id) ?? '工具未执行';
+        yield {
+          type: 'tool_result',
+          name: call.function.name,
+          result,
+          index,
+        };
         messages.push({
           tool_call_id: call.id,
           role: 'tool',
           name: call.function.name,
           content: result,
         });
+      }
+
+      // ✅ 验证闭环：本轮有编辑类工具且还有下一轮时，自动跑验证并回填结果。
+      //    宿主提供验证器（editor 场景是 lint/typecheck），返回 null 表示跳过。
+      if (
+        verifyAfterTools &&
+        round < maxToolRounds &&
+        !signal?.aborted &&
+        toolCalls.some((call) =>
+          (editToolNames ?? DEFAULT_EDIT_TOOL_NAMES).includes(
+            call.function.name,
+          ),
+        )
+      ) {
+        yield { type: 'thought', content: '🔎 自动验证改动…' };
+        let verdict: string | null = null;
+        try {
+          verdict = await verifyAfterTools({
+            toolNames: toolCalls.map((call) => call.function.name),
+            signal,
+          });
+        } catch (e: any) {
+          verdict = `验证执行失败：${e?.message ?? String(e)}`;
+        }
+        if (verdict) {
+          messages.push({
+            role: 'user',
+            content:
+              `【自动验证】\n${capVerdict(verdict)}\n` +
+              '请根据验证结果继续修复；如果验证已通过，直接给出最终答复。',
+          });
+        }
       }
     }
 
@@ -367,7 +655,15 @@ export class AgentOrchestrator {
       .replace(/<\/?tool_call>/g, '')
       .trimStart();
 
-    yield { type: 'done', model: usedModel, tokens: usedTokens, fullReply };
+    yield {
+      type: 'done',
+      model: usedModel,
+      tokens: usedTokens,
+      fullReply,
+      finishReason: lastFinishReason,
+      truncated: lastFinishReason === 'length',
+      context: lastContextStats,
+    };
   }
 }
 

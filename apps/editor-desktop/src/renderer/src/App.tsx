@@ -16,7 +16,8 @@ import {
   import { SettingsModal } from './components/SettingsModal';
   import { Terminal } from './components/Terminal';
   import { Welcome } from './components/Welcome';
-  import { changeLabel } from './diff';
+  import { changeLabel, diffLines } from './diff';
+  import type { RunCheckpointInfo } from './electron';
   import { extractMentions, flattenFiles } from './files';
   import { useMode } from './mode/ModeContext';
   import { DEFAULT_LOCAL_MODEL } from './models';
@@ -26,6 +27,7 @@ import {
     AgentMode,
     AgentTransport,
     AppConfig,
+    ApprovalPreview,
     ChatEvent,
     FileChange,
     FileEdit,
@@ -40,6 +42,8 @@ interface ToolActivity {
   name: string;
   args?: Record<string, unknown>;
   result?: string;
+  /** 对应 tool_call 的本轮序号 */
+  index?: number;
 }
 
 interface ChatMsg {
@@ -166,6 +170,14 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [changes, setChanges] = useState<FileChange[]>([]);
   const [activeDiff, setActiveDiff] = useState<FileChange | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<{
+    id: string;
+    toolName: string;
+    args: Record<string, unknown>;
+    preview?: ApprovalPreview[];
+  } | null>(null);
+  const [runState, setRunState] = useState<string>('idle');
+  const [checkpoint, setCheckpoint] = useState<RunCheckpointInfo | null>(null);
   const [savedContent, setSavedContent] = useState('');
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
@@ -205,6 +217,13 @@ export function App() {
       }
     };
   }, [streaming]);
+
+  useEffect(() => {
+    void backend.transport.getRunState?.().then((info) => {
+      setRunState(info.state);
+      setCheckpoint(info.checkpoint);
+    });
+  }, [backend.transport]);
 
   const reload = useCallback(
     async (b = backend) => {
@@ -537,6 +556,88 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [saveCurrent]);
 
+  /** 把 agent 事件应用到消息列表；本地/云端/断点续跑共用 */
+  const applyAgentEvent = useCallback((ev: ChatEvent, assistantId: string) => {
+    if (ev.type === 'approval_request') {
+      setPendingApproval({
+        id: ev.id ?? '',
+        toolName: ev.toolName ?? '',
+        args: ev.args ?? {},
+      });
+      return;
+    }
+    if (ev.type === 'done' && ev.changes) {
+      setChanges(ev.changes);
+    }
+    // file_edit：在编辑器里一行一行往下刷（Cline 风格）
+    if (ev.type === 'file_edit' && ev.edit) {
+      const edit = ev.edit;
+      const editPath = edit.path ? normalizePath(edit.path) : '';
+      setStreamingEditPath(editPath || null);
+      // 异步执行：不同文件时先切换并等待编辑器重建，避免竞态
+      void (async () => {
+        try {
+          if (editPath && editPath !== activeFileRef.current) {
+            setActiveFile(editPath);
+            try {
+              const content = await backend.workspace.readFile(editPath);
+              setFileContent(content);
+              setSavedContent(content);
+            } catch {
+              // 文件可能不存在（新建文件场景）
+            }
+            // 等 React 重渲染 + Monaco 编辑器重建完成
+            await new Promise((r) => setTimeout(r, 250));
+          }
+          await editorRef.current?.applyStreamingEdit(edit);
+          // 动画结束后同步内容到状态
+          if (editPath) {
+            const latest = editorRef.current?.getValue() ?? '';
+            setFileContent(latest);
+          }
+        } finally {
+          setStreamingEditPath(null);
+        }
+      })();
+    }
+    setMessages((m) =>
+      m.map((msg) => {
+        if (msg.id !== assistantId) return msg;
+        switch (ev.type) {
+          case 'thought':
+            return {
+              ...msg,
+              thought: (msg.thought ?? '') + (ev.content ?? ''),
+            };
+          case 'content':
+            return { ...msg, content: msg.content + (ev.content ?? '') };
+          case 'tool_call':
+            return {
+              ...msg,
+              tools: [
+                ...(msg.tools ?? []),
+                { name: ev.name ?? '', args: ev.args, index: ev.index },
+              ],
+            };
+          case 'tool_result':
+            return {
+              ...msg,
+              tools: (msg.tools ?? []).map((tool) =>
+                tool.index === ev.index ? { ...tool, result: ev.result } : tool,
+              ),
+            };
+          case 'error':
+            return {
+              ...msg,
+              content: msg.content + `\n⚠️ ${ev.content ?? ''}`,
+            };
+          default:
+            return msg;
+        }
+      }),
+    );
+  }, []);
+
   const send = async () => {
     const displayQuery = input.trim();
     if (!displayQuery || streaming) return;
@@ -571,6 +672,7 @@ export function App() {
       { id: crypto.randomUUID(), role: 'user', content: displayQuery },
     ]);
     setStreaming(true);
+    setRunState('running');
     const assistantId = crypto.randomUUID();
     setMessages((m) => [
       ...m,
@@ -578,81 +680,20 @@ export function App() {
     ]);
     abortRef.current = new AbortController();
 
+    // 编辑器上下文：当前文件、内容、选区，随本轮一起发给 agent
+    const selection = editorRef.current?.getSelection() ?? '';
+    const agentContext = activeFile
+      ? {
+          activeFile,
+          activeContent: fileContent.slice(0, 20000),
+          selection: selection || undefined,
+        }
+      : undefined;
+
     try {
       await backend.transport.run(
         agentQuery,
-        (ev: ChatEvent) => {
-          if (ev.type === 'done' && ev.changes) {
-            setChanges(ev.changes);
-          }
-          // file_edit：在编辑器里一行一行往下刷（Cline 风格）
-          if (ev.type === 'file_edit' && ev.edit) {
-            const edit = ev.edit;
-            const editPath = edit.path ? normalizePath(edit.path) : '';
-            setStreamingEditPath(editPath || null);
-            // 异步执行：不同文件时先切换并等待编辑器重建，避免竞态
-            void (async () => {
-              try {
-                if (editPath && editPath !== activeFileRef.current) {
-                  setActiveFile(editPath);
-                  try {
-                    const content = await backend.workspace.readFile(editPath);
-                    setFileContent(content);
-                    setSavedContent(content);
-                  } catch {
-                    // 文件可能不存在（新建文件场景）
-                  }
-                  // 等 React 重渲染 + Monaco 编辑器重建完成
-                  await new Promise((r) => setTimeout(r, 250));
-                }
-                await editorRef.current?.applyStreamingEdit(edit);
-                // 动画结束后同步内容到状态
-                if (editPath) {
-                  const latest = editorRef.current?.getValue() ?? '';
-                  setFileContent(latest);
-                }
-              } finally {
-                setStreamingEditPath(null);
-              }
-            })();
-          }
-          setMessages((m) =>
-            m.map((msg) => {
-              if (msg.id !== assistantId) return msg;
-              switch (ev.type) {
-                case 'thought':
-                  return {
-                    ...msg,
-                    thought: (msg.thought ?? '') + (ev.content ?? ''),
-                  };
-                case 'content':
-                  return { ...msg, content: msg.content + (ev.content ?? '') };
-                case 'tool_call':
-                  return {
-                    ...msg,
-                    tools: [
-                      ...(msg.tools ?? []),
-                      { name: ev.name ?? '', args: ev.args },
-                    ],
-                  };
-                case 'tool_result':
-                  return {
-                    ...msg,
-                    tools: (msg.tools ?? []).map((t, i, arr) =>
-                      i === arr.length - 1 ? { ...t, result: ev.result } : t,
-                    ),
-                  };
-                case 'error':
-                  return {
-                    ...msg,
-                    content: msg.content + `\n⚠️ ${ev.content ?? ''}`,
-                  };
-                default:
-                  return msg;
-              }
-            }),
-          );
-        },
+        (ev: ChatEvent) => applyAgentEvent(ev, assistantId),
         abortRef.current.signal,
         {
           // 云端也显式带模型，避免落到后端的付费级联
@@ -663,6 +704,7 @@ export function App() {
                 DEFAULT_LOCAL_MODEL
               : undefined,
           history,
+          context: agentContext,
         },
       );
     } catch (e: any) {
@@ -679,6 +721,10 @@ export function App() {
     } finally {
       setStreaming(false);
       abortRef.current = null;
+      void backend.transport.getRunState?.().then((info) => {
+        setRunState(info.state);
+        setCheckpoint(info.checkpoint);
+      });
       void reload();
     }
   };
@@ -686,6 +732,89 @@ export function App() {
   const stop = () => {
     backend.transport.abort();
     abortRef.current?.abort();
+  };
+
+  const pauseRun = async () => {
+    const info = await backend.transport.pause();
+    setRunState(info.state);
+    setCheckpoint(info.checkpoint);
+  };
+
+  const cancelRun = async () => {
+    const info = await backend.transport.cancel();
+    setRunState(info.state);
+    setCheckpoint(info.checkpoint);
+  };
+
+  const resumeRun = async () => {
+    const info = await backend.transport.getRunState();
+    const cp = info.checkpoint;
+    if (!cp) return;
+    setMessages(
+      cp.history.map((m) => ({ ...m, id: crypto.randomUUID() })),
+    );
+    setCheckpoint(cp);
+    setRunState('running');
+    setStreaming(true);
+    const assistantId = crypto.randomUUID();
+    setMessages((m) => [
+      ...m,
+      { id: assistantId, role: 'assistant', content: '', thought: '' },
+    ]);
+    abortRef.current = new AbortController();
+    try {
+      await backend.transport.resume?.(
+        (ev) => applyAgentEvent(ev, assistantId),
+        abortRef.current.signal,
+      );
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') {
+        setMessages((m) => [
+          ...m,
+          {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: `⚠️ ${e?.message || e}`,
+          },
+        ]);
+      }
+    } finally {
+      setStreaming(false);
+      abortRef.current = null;
+      const state = await backend.transport.getRunState?.();
+      if (state) {
+        setRunState(state.state);
+        setCheckpoint(state.checkpoint);
+      }
+      void reload();
+    }
+  };
+
+  const respondApproval = (approved: boolean) => {
+    const request = pendingApproval;
+    if (!request) return;
+    setPendingApproval(null);
+    void window.electron.agent.respondApproval(request.id, approved);
+  };
+
+  const undoLastRun = async () => {
+    if (!changes.length) return;
+    const result = await window.electron.agent.undoAgent();
+    if (result.failed.length) {
+      setError(`撤销失败：${result.failed.join('；')}`);
+      return;
+    }
+    setChanges([]);
+    setActiveDiff(null);
+    if (activeFileRef.current) {
+      try {
+        const content = await backend.workspace.readFile(activeFileRef.current);
+        setFileContent(content);
+        setSavedContent(content);
+      } catch {
+        // 文件可能已被撤销删除
+      }
+    }
   };
 
   return (
@@ -951,6 +1080,13 @@ export function App() {
               <div className="changes">
                 <div className="changes-title">
                   本轮改动 ({changes.length})
+                  <button
+                    type="button"
+                    className="changes-undo"
+                    onClick={() => void undoLastRun()}
+                  >
+                    撤销本轮
+                  </button>
                 </div>
                 <ul className="changes-list">
                   {changes.map((c, i) => (
@@ -977,6 +1113,23 @@ export function App() {
             )}
           </div>
           <div className="composer-wrap">
+            {runState === 'paused' && checkpoint ? (
+              <div className="resume-banner">
+                <span className="resume-text">
+                  任务已暂停：{checkpoint.query.slice(0, 60)}
+                </span>
+                <button type="button" onClick={() => void resumeRun()}>
+                  继续
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void cancelRun()}
+                >
+                  放弃
+                </button>
+              </div>
+            ) : null}
             {mention ? (
               <MentionPicker
                 results={mentionResults}
@@ -1063,13 +1216,22 @@ export function App() {
                 </div>
                 <div className="composer-right">
                   {streaming ? (
-                    <button
-                      className="send-btn stop"
-                      title="停止"
-                      onClick={stop}
-                    >
-                      ■
-                    </button>
+                    <>
+                      <button
+                        className="send-btn"
+                        title="暂停"
+                        onClick={() => void pauseRun()}
+                      >
+                        ⏸
+                      </button>
+                      <button
+                        className="send-btn stop"
+                        title="停止"
+                        onClick={stop}
+                      >
+                        ■
+                      </button>
+                    </>
                   ) : (
                     <button
                       className="send-btn"
@@ -1123,6 +1285,72 @@ export function App() {
           onClose={() => setSettingsOpen(false)}
           onSave={saveConfig}
         />
+      ) : null}
+
+      {pendingApproval ? (
+        <div className="modal-overlay">
+          <div className="approval-modal">
+            <div className="modal-title">等待确认</div>
+            <div className="approval-tool">{pendingApproval.toolName}</div>
+            {(pendingApproval.preview?.length
+              ? pendingApproval.preview
+              : ([
+                  {
+                    kind: 'command',
+                    command: JSON.stringify(pendingApproval.args),
+                  },
+                ] as ApprovalPreview[])
+            ).map((preview, index) => (
+              <div key={index} className="approval-preview">
+                {preview.path ? (
+                  <div className="approval-path">
+                    {preview.kind === 'rename' && preview.from
+                      ? `${preview.from} → ${preview.path}`
+                      : preview.path}
+                  </div>
+                ) : null}
+                {preview.kind === 'command' ? (
+                  <pre className="approval-args">{preview.command}</pre>
+                ) : (
+                  <div className="approval-diff">
+                    {diffLines(preview.before ?? '', preview.after ?? '').map(
+                      (line, lineIndex) => (
+                        <div
+                          key={lineIndex}
+                          className={`diff-line diff-${line.type}`}
+                        >
+                          <span className="diff-sign">
+                            {line.type === 'add'
+                              ? '+'
+                              : line.type === 'del'
+                                ? '-'
+                                : ' '}
+                          </span>
+                          <span className="diff-text">{line.text || ' '}</span>
+                        </div>
+                      ),
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+            <div className="approval-actions">
+              <button
+                type="button"
+                onClick={() => respondApproval(true)}
+              >
+                允许
+              </button>
+              <button
+                type="button"
+                className="danger"
+                onClick={() => respondApproval(false)}
+              >
+                拒绝
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </div>
   );

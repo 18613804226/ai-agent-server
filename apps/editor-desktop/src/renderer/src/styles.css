@@ -1855,3 +1855,158 @@ body {
   align-self: flex-start;
   margin-top: 4px;
 }
+
+/* 审批弹窗 */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.approval-modal {
+  width: min(560px, 92vw);
+  max-height: 80vh;
+  background: var(--panel, #1e1e1e);
+  border: 1px solid var(--border, #333);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.approval-tool {
+  font-weight: 600;
+  color: var(--accent, #4fc3f7);
+}
+
+.approval-args {
+  margin: 0;
+  padding: 10px;
+  background: var(--bg, #151515);
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  font-size: 12px;
+  max-height: 32vh;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.approval-actions button {
+  padding: 6px 16px;
+  border-radius: 4px;
+  border: 1px solid var(--border, #333);
+  background: var(--panel-2, #2a2a2a);
+  color: inherit;
+  cursor: pointer;
+}
+
+.approval-actions button.danger {
+  border-color: #b3453a;
+  color: #ff8a80;
+}
+
+.changes-undo {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 1px solid var(--border, #333);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.approval-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.approval-path {
+  font-size: 12px;
+  color: var(--muted, #888);
+  word-break: break-all;
+}
+
+.approval-diff {
+  max-height: 40vh;
+  overflow: auto;
+  background: var(--bg, #151515);
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.approval-diff .diff-line {
+  display: flex;
+  white-space: pre-wrap;
+}
+
+.approval-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.approval-option + .approval-option {
+  margin-top: 6px;
+}
+
+.approval-option input {
+  margin-top: 2px;
+}
+
+.approval-option > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.resume-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  background: var(--panel, #1e1e1e);
+  font-size: 12px;
+}
+
+.resume-banner .resume-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resume-banner button {
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border, #333);
+  background: var(--panel-2, #2a2a2a);
+  color: inherit;
+  cursor: pointer;
+}
+
+.resume-banner button.ghost {
+  background: transparent;
+}
+

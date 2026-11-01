@@ -7,6 +7,7 @@ export interface CodeEditorHandle {
   applyStreamingEdit: (edit: FileEdit) => Promise<void>;
   focus: () => void;
   getValue: () => string;
+  getSelection: () => string;
 }
 
 interface CodeEditorProps {
@@ -308,6 +309,13 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
         applyStreamingEdit,
         focus: () => editorRef.current?.focus(),
         getValue: () => modelRef.current?.getValue() ?? '',
+        getSelection: () => {
+          const editor = editorRef.current;
+          const model = modelRef.current;
+          const selection = editor?.getSelection();
+          if (!editor || !model || !selection) return '';
+          return model.getValueInRange(selection);
+        },
       }),
       // eslint-disable-next-line react-hooks/exhaustive-deps
       [applyStreamingEdit],

@@ -335,6 +335,17 @@ describe('模型分层：降级判定', () => {
     expect(isDegradableError(null)).toBe(false);
   });
 
+  it('401/403/402 属于配置错误，不降级', () => {
+    expect(isDegradableError({ status: 401 })).toBe(false);
+    expect(isDegradableError({ status: 403 })).toBe(false);
+    expect(isDegradableError({ response: { status: 402 } })).toBe(false);
+  });
+
+  it('建连/流空闲超时仍然降级', () => {
+    expect(isDegradableError({ name: 'TimeoutError' })).toBe(true);
+    expect(isDegradableError({ code: 'ETIMEDOUT' })).toBe(true);
+  });
+
   it('状态码兼容裸 status 与 response.status', () => {
     expect(errorStatus({ status: 429 })).toBe(429);
     expect(errorStatus({ response: { status: 503 } })).toBe(503);

@@ -13,13 +13,14 @@ import { Observable } from 'rxjs';
 import type { Response } from 'express';
 import { randomUUID } from 'crypto';
 import { buildEditorSystemPrompt, createEditorAgent } from '@repo/editor-agent';
-import type { RegisteredTool } from '@repo/agent-orchestrator';
+import type { ContextStats, RegisteredTool } from '@repo/agent-orchestrator';
 import { AuthService } from '../auth/auth.service.js';
 import { CurrentDevice } from '../auth/current-device.decorator.js';
 import { AgentRunner } from './runner.js';
 import { getAgent, listAgents } from './registry.js';
 import { AgentSessionService } from './session.service.js';
 import { PendingToolService } from './pending-tool.service.js';
+import { RunStateService } from './run-state.service.js';
 
 /**
  * 通用 agent 路由：路径里的 agentId 决定用哪套工具集 + 系统提示，
@@ -35,6 +36,7 @@ export class AgentController {
     private readonly sessions: AgentSessionService,
     private readonly authService: AuthService,
     private readonly pending: PendingToolService,
+    private readonly runState: RunStateService,
   ) {}
 
   @Get('list')
@@ -75,6 +77,12 @@ export class AgentController {
       workspaceRoots?: string[];
       workspaceSummary?: string;
       localTools?: boolean;
+      context?: {
+        activeFile?: string;
+        activeContent?: string;
+        selection?: string;
+      };
+      resume?: boolean;
     },
     @Res({ passthrough: true }) res: Response,
   ): Promise<Observable<MessageEvent>> {
@@ -103,12 +111,24 @@ export class AgentController {
     });
 
     return new Observable<MessageEvent>((subscriber) => {
+      const runId = randomUUID();
+      if (localTools) this.pending.createRun(runId);
+
       void (async () => {
-          const runId = randomUUID();
-          if (localTools) this.pending.createRun(runId);
           try {
             const history = await this.sessions.getHistory(sessionId);
-            await this.sessions.saveMessage(sessionId, 'user', query);
+            // 运行态：暂停/取消/继续由宿主状态机管理
+            this.runState.start(
+              sessionId,
+              query,
+              body.context,
+              history as Array<{ role: 'user' | 'assistant'; content: string }>,
+              body.resume === true,
+            );
+            this.runState.setController(sessionId, abortController);
+            if (body.resume !== true) {
+              await this.sessions.saveMessage(sessionId, 'user', query);
+            }
 
             // 云端模式：用 editor agent 的「工具定义」，handler 换成把调用转给客户端
           let proxyTools: RegisteredTool[] | undefined;
@@ -118,13 +138,14 @@ export class AgentController {
             systemPromptOverride = buildEditorSystemPrompt(
               workspaceRoots,
               body.workspaceSummary,
+              body.context,
             );
             proxyTools = base.tools.map((tool) => ({
               definition: tool.definition,
               handler: (args) =>
-                new Promise<string>((resolve) => {
+                new Promise<string>((resolve, reject) => {
                   const id = randomUUID();
-                  this.pending.register(runId, id, resolve);
+                  this.pending.register(runId, id, resolve, reject);
                   subscriber.next({
                     data: {
                       type: 'tool_request',
@@ -141,6 +162,9 @@ export class AgentController {
           let fullReply = '';
           let usedTokens = 0;
           let usedModel = '';
+          let finishReason: string | undefined;
+          let truncated = false;
+          let contextStats: ContextStats | undefined;
 
           for await (const ev of this.runner.run(agent, {
             query,
@@ -149,6 +173,9 @@ export class AgentController {
             modelOverride,
             toolsOverride: proxyTools,
             systemPromptOverride,
+            // 云端代理模式：工具在客户端执行，自动验证也必须由客户端发起
+            disableAutoVerify: localTools,
+            context: body.context,
           })) {
             switch (ev.type) {
               case 'thought':
@@ -193,6 +220,9 @@ export class AgentController {
                 fullReply = ev.fullReply ?? '';
                 usedTokens = ev.tokens ?? 0;
                 usedModel = ev.model ?? '';
+                finishReason = ev.finishReason;
+                truncated = ev.truncated === true;
+                contextStats = ev.context;
                 break;
             }
           }
@@ -203,17 +233,33 @@ export class AgentController {
           await this.sessions.touchSession(sessionId);
           void this.authService.recordUsage(device?.id, usedTokens);
           subscriber.next({
-            data: { type: 'done', model: usedModel, tokens: usedTokens },
+            data: {
+              type: 'done',
+              model: usedModel,
+              tokens: usedTokens,
+              finishReason,
+              truncated,
+              context: contextStats,
+            },
           } as MessageEvent);
           subscriber.complete();
         } catch (err) {
           subscriber.error(err);
         } finally {
           if (localTools) this.pending.cleanup(runId);
+          this.runState.finish(
+            sessionId,
+            abortController.signal.aborted ? 'cancelled' : 'done',
+          );
         }
       })();
 
-      return () => abortController.abort();
+      return () => {
+        abortController.abort();
+        // 客户端断开时立即唤醒等待中的工具 Promise；只靠在 finally 里 cleanup
+        // 不够——run 正卡在 await handler 时，finally 根本不会执行。
+        if (localTools) this.pending.cleanup(runId);
+      };
     });
   }
 
@@ -228,6 +274,27 @@ export class AgentController {
     return {
       ok: this.pending.resolve(body.runId, body.id, String(body.result ?? '')),
     };
+  }
+
+  /** 暂停当前运行：中断模型请求，保存检查点 */
+  @Post(':agentId/session/:id/pause')
+  pause(@Param('agentId') agentId: string, @Param('id') sessionId: string) {
+    this.assertAgent(agentId);
+    return this.runState.pause(sessionId);
+  }
+
+  /** 取消当前运行：中断模型请求，检查点保留可继续 */
+  @Post(':agentId/session/:id/cancel')
+  cancel(@Param('agentId') agentId: string, @Param('id') sessionId: string) {
+    this.assertAgent(agentId);
+    return this.runState.cancel(sessionId);
+  }
+
+  /** 查询运行态与检查点 */
+  @Get(':agentId/session/:id/state')
+  state(@Param('agentId') agentId: string, @Param('id') sessionId: string) {
+    this.assertAgent(agentId);
+    return this.runState.get(sessionId);
   }
 
   private assertAgent(agentId: string) {

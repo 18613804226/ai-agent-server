@@ -12,9 +12,14 @@ import { join } from 'path';
 import {
   buildWorkspaceTree,
   createEditorTools,
+  previewApproval,
   readWorkspaceFile,
+  restoreChanges,
+  workspaceSummary,
 } from './tools.js';
 import { createEditorAgent } from './agent.js';
+import type { FileChange } from '@repo/agent-orchestrator';
+import { ArtifactStore } from '@repo/agent-orchestrator';
 
 let root: string;
 let tools: ReturnType<typeof createEditorTools>;
@@ -49,6 +54,7 @@ describe('createEditorTools', () => {
       'run_terminal',
       'git_status',
       'git_diff',
+      'read_artifact',
     ]);
   });
 
@@ -237,11 +243,205 @@ describe('多根工作区', () => {
   });
 });
 
+describe('previewApproval', () => {
+  it('write_file：新建/覆盖都能算出 before/after', () => {
+    const created = previewApproval(root, 'write_file', {
+      path: 'new.ts',
+      content: 'new',
+    });
+    expect(created[0]).toMatchObject({ kind: 'create', path: 'new.ts', after: 'new' });
+
+    writeFileSync(join(root, 'old.ts'), 'old', 'utf8');
+    const modified = previewApproval(root, 'write_file', {
+      path: 'old.ts',
+      content: 'updated',
+    });
+    expect(modified[0]).toMatchObject({
+      kind: 'modify',
+      path: 'old.ts',
+      before: 'old',
+      after: 'updated',
+    });
+  });
+
+  it('edit_file：按 old_string/new_string 计算', () => {
+    writeFileSync(join(root, 'e.ts'), 'const a = 1;', 'utf8');
+    const preview = previewApproval(root, 'edit_file', {
+      path: 'e.ts',
+      old_string: '1',
+      new_string: '2',
+    });
+    expect(preview[0]).toMatchObject({
+      kind: 'modify',
+      path: 'e.ts',
+      before: 'const a = 1;',
+      after: 'const a = 2;',
+    });
+  });
+
+  it('delete_file / move_file', () => {
+    writeFileSync(join(root, 'd.ts'), 'delete me', 'utf8');
+    expect(
+      previewApproval(root, 'delete_file', { path: 'd.ts' })[0],
+    ).toMatchObject({ kind: 'delete', path: 'd.ts', before: 'delete me', after: '' });
+
+    writeFileSync(join(root, 'from.ts'), 'content', 'utf8');
+    expect(
+      previewApproval(root, 'move_file', { from: 'from.ts', to: 'to.ts' })[0],
+    ).toMatchObject({ kind: 'rename', from: 'from.ts', path: 'to.ts' });
+  });
+
+  it('apply_patch：多个 edit 逐个预览', () => {
+    writeFileSync(join(root, 'p.ts'), 'a\nb', 'utf8');
+    const preview = previewApproval(root, 'apply_patch', {
+      edits: [
+        { path: 'p.ts', old_string: 'a', new_string: 'A' },
+        { path: 'new.ts', content: 'brand new' },
+      ],
+    });
+    expect(preview).toHaveLength(2);
+    expect(preview[0]).toMatchObject({ after: 'A\nb' });
+    expect(preview[1]).toMatchObject({ kind: 'create', after: 'brand new' });
+  });
+
+  it('run_terminal：只预览命令', () => {
+    expect(
+      previewApproval(root, 'run_terminal', { command: 'rm -rf /' })[0],
+    ).toMatchObject({ kind: 'command', command: 'rm -rf /' });
+  });
+
+  it('未知工具返回空', () => {
+    expect(previewApproval(root, 'read_file', { path: 'a.ts' })).toEqual([]);
+  });
+});
+
+describe('restoreChanges', () => {
+  const change = (
+    kind: FileChange['kind'],
+    path: string,
+    extra: Partial<FileChange> = {},
+  ): FileChange => ({ kind, path, ...extra } as FileChange);
+
+  it('撤销修改：恢复 before 内容', () => {
+    writeFileSync(join(root, 'a.ts'), '新内容', 'utf8');
+    const result = restoreChanges(root, [
+      change('modified', 'a.ts', { before: '旧内容', after: '新内容' }),
+    ]);
+    expect(result.failed).toEqual([]);
+    expect(readFileSync(join(root, 'a.ts'), 'utf8')).toBe('旧内容');
+  });
+
+  it('撤销新建：删除文件', () => {
+    writeFileSync(join(root, 'b.ts'), 'x', 'utf8');
+    restoreChanges(root, [change('created', 'b.ts')]);
+    expect(existsSync(join(root, 'b.ts'))).toBe(false);
+  });
+
+  it('撤销删除：恢复 before 内容', () => {
+    restoreChanges(root, [change('deleted', 'c.ts', { before: '恢复我' })]);
+    expect(readFileSync(join(root, 'c.ts'), 'utf8')).toBe('恢复我');
+  });
+
+  it('撤销重命名：移回原路径并删除新路径', () => {
+    writeFileSync(join(root, 'new.ts'), '内容', 'utf8');
+    restoreChanges(root, [
+      change('renamed', 'new.ts', {
+        from: 'old.ts',
+        before: '内容',
+        after: '内容',
+      }),
+    ]);
+    expect(readFileSync(join(root, 'old.ts'), 'utf8')).toBe('内容');
+    expect(existsSync(join(root, 'new.ts'))).toBe(false);
+  });
+
+  it('越界路径记入 failed，不影响其他恢复', () => {
+    writeFileSync(join(root, 'd.ts'), 'x', 'utf8');
+    const result = restoreChanges(root, [
+      change('modified', '../outside.ts', { before: 'x' }),
+      change('modified', 'd.ts', { before: 'y' }),
+    ]);
+    expect(result.failed).toHaveLength(1);
+    expect(readFileSync(join(root, 'd.ts'), 'utf8')).toBe('y');
+  });
+});
+
+describe('artifact', () => {
+  it('大文件转 artifact，read_artifact 取全文', async () => {
+    const big = 'x'.repeat(5000);
+    writeFileSync(join(root, 'big.ts'), big, 'utf8');
+    const tools = createEditorTools(root);
+    const readFile = tools.find(
+      (t) => t.definition.function.name === 'read_file',
+    )!;
+    const store = new ArtifactStore();
+    const preview = await readFile.handler(
+      { path: 'big.ts' },
+      { toolName: 'read_file', artifacts: store },
+    );
+    expect(preview).toContain('artifact:');
+    const match = preview.match(/artifact: ([\w-]+)/);
+    expect(match).toBeTruthy();
+
+    const readArtifact = tools.find(
+      (t) => t.definition.function.name === 'read_artifact',
+    )!;
+    const full = await readArtifact.handler(
+      { id: match![1] },
+      { toolName: 'read_artifact', artifacts: store },
+    );
+    expect(full).toBe(big);
+  });
+
+  it('小文件不转 artifact', async () => {
+    writeFileSync(join(root, 'small.ts'), 'hello', 'utf8');
+    const tools = createEditorTools(root);
+    const readFile = tools.find(
+      (t) => t.definition.function.name === 'read_file',
+    )!;
+    const result = await readFile.handler(
+      { path: 'small.ts' },
+      { toolName: 'read_file', artifacts: new ArtifactStore() },
+    );
+    expect(result).toBe('hello');
+  });
+
+  it('只读工具标记 readOnly，写工具不标记', () => {
+    const tools = createEditorTools(root);
+    const readOnlyNames = tools
+      .filter((t) => t.readOnly)
+      .map((t) => t.definition.function.name);
+    expect(readOnlyNames).toContain('read_file');
+    expect(readOnlyNames).toContain('read_artifact');
+    expect(readOnlyNames).toContain('search_files');
+    expect(
+      tools.find((t) => t.definition.function.name === 'write_file')?.readOnly,
+    ).toBeFalsy();
+  });
+});
+
+describe('workspaceSummary', () => {
+  it('包含文件列表（repo map）', () => {
+    mkdirSync(join(root, 'src'), { recursive: true });
+    writeFileSync(join(root, 'src/a.ts'), 'x', 'utf8');
+    expect(workspaceSummary(root)).toContain('src/a.ts');
+  });
+});
+
 describe('createEditorAgent', () => {
   it('返回绑定 root 的 editor 定义', () => {
     const agent = createEditorAgent(root);
     expect(agent.id).toBe('editor');
-    expect(agent.tools).toHaveLength(13);
+    expect(agent.tools).toHaveLength(15);
     expect(agent.buildSystemPrompt()).toContain(root);
+    const names = agent.tools.map((t) => t.definition.function.name);
+    expect(names).toContain('verify_workspace');
+  });
+
+  it('默认启用自动验证，可以显式关闭', () => {
+    expect(createEditorAgent(root).verifyAfterTools).toBeDefined();
+    expect(
+      createEditorAgent(root, undefined, { verifier: null }).verifyAfterTools,
+    ).toBeUndefined();
   });
 });

@@ -22,18 +22,26 @@
 `packages/agent-orchestrator` 是纯 TypeScript，只依赖 `openai`：
 
 - 不 import `@nestjs/*` / `@prisma/*`，不碰数据库、HTTP、文件系统
-- 对外是 `AsyncGenerator<AgentEvent>`（`thought | content | tool_call | tool_result | file_edit | error | done`），传输无关
-- 配置全部注入（`getClient` / `modelConfig` / `showRoutingThought` / `rateLimitRetries` / `zhipuLock`），编排器本身不读 `process.env`
+- 对外是 `AsyncGenerator<AgentEvent>`（`thought | content | tool_call | tool_result | file_edit | error | done`），`done` 额外带 `finishReason / truncated`，传输无关
+- 配置全部注入（`getClient` / `modelConfig` / `showRoutingThought` / `rateLimitRetries` / `zhipuLock` 及各超时参数），编排器本身不读 `process.env`
 - 同一个编排器既能跑在 NestJS 后端，也能跑在 Electron 主进程做本地编辑（本地模式已上线）
 - `@Global` 的 `AgentModule` 保证全进程唯一实例，智谱并发锁不会被多个宿主绕过
+- 策略层内置：模型建连/流空闲/智谱锁/工具执行超时、工具参数校验、结果截断、断连取消
+- 上下文治理：旧工具结果与旧 `tool_call` 参数压缩成预览，控制多轮工具调用的输入 token
+- 工具执行优化：只读工具并行执行；重复调用返回引用不重复执行；大文件转 artifact 句柄，`read_artifact` 按需取全文
+- 编辑器闭环：`verifyAfterTools` 自动跑 `typecheck/lint`，`verify_workspace` 工具可手动验证（支持 `scripts` 覆盖，如 `test`）；验证器把 tsc / ESLint 输出解析成结构化诊断（`file:line:col [severity] message`）回填给模型
+- 审批开关：设置里可切换「总是询问 / 自动放行」；审批弹窗显示 before/after diff，本轮改动可一键撤销
+- 断点续跑：本地和云端都支持暂停 / 继续 / 取消；状态机（`idle/running/paused/done/failed/cancelled`）在 `@repo/agent-orchestrator` 的 `run-state` 里，本地检查点持久化到 `userData/agent-run.json`，服务端按 sessionId 维护
+- 编辑器上下文：当前文件、选区、文件列表（repo map）注入 system prompt；云端模式 `done` 事件会带上客户端收集的本轮改动
 
 ### 3. 工具调用解耦：编排器不认识任何具体工具
 
 - 工具契约只有 `RegisteredTool = { definition, handler }`
 - 编排器按名字查找 handler，未知工具返回兜底文案，**零硬编码工具名**
-- 每个 agent 只注册自己的工具集：`editor`（文件/搜索/终端）、`general`（天气/计算/联网）、`chat`（天气/计算）
+- 每个 agent 只注册自己的工具集：`editor`（文件/搜索/终端）、`general`（天气/计算/联网/农历节日）、`chat`（复用 general 的天气/计算/农历节日）
 - 新增 agent 只需「工具集 + prompt + 注册」，循环、级联、流式工具调用全部复用
-- `packages/editor-agent` 把编辑器工具做成 `createEditorTools(root)` 工厂，后端和 Electron 主进程共用同一份实现
+- `packages/editor-agent` 把编辑器工具做成 `createEditorTools(roots)` 工厂，后端和 Electron 主进程共用同一份实现
+- `packages/general-agent` 把通用工具（`createGeneralTools` / `createChatTools`）、prompt 和 `festival_info` 收敛到一处，后端 `/chat` 与 `/agent/general` 不再各写一份
 
 ### 4. 多 agent 共用一个后端，前端可跨仓库
 
@@ -61,7 +69,7 @@
 
 - pnpm workspace + Turborepo，按依赖顺序构建（packages → apps）
 - 共享包独立构建、独立测试
-- **192 个后端单测 + 55 个编排器单测 + 15 个编辑器工具单测**，lint 0 errors
+- **188 个后端单测 + 93 个编排器单测 + 42 个编辑器工具单测 + 23 个通用工具单测**，lint 0 errors
 - Docker 按 workspace 分层构建：只装 `@repo/server` 子图，不拉 Electron/React
 - Electron + React 桌面 demo（Monaco 编辑器），SSE 流式渲染
 
@@ -74,15 +82,17 @@ apps/
 packages/
   agent-orchestrator/     # 纯 TS agent 编排器（模型级联 + 工具循环），无 Nest/Prisma 依赖
   editor-agent/           # 编辑器工具 + prompt，root 可注入（后端 / Electron 共用）
+  general-agent/          # 通用工具（天气/计算/联网/农历节日）+ prompt + generalAgent 定义
   agent-types/            # 跨仓库共享的事件 / 工具契约类型
 ```
 
 ### 后端（`apps/server`）
 
 - `src/agent/`：全局唯一的 `ModelClients` + `AgentOrchestrator`（`@Global` 模块）
-- `src/agents/`：各 agent 的工具集、系统提示与通用 SSE 路由
-  - `editor/`：`read_file` / `write_file` / `edit_file` / `apply_patch` / `delete_file` / `move_file` / `create_directory` / `list_dir` / `search_files` / `glob` / `run_terminal` / `git_status` / `git_diff`
-  - `general/`：`fetchWeatherInfo` / `calculator` / `web_search` / `festival_info`
+- `src/agents/`：agent 注册与通用 SSE 路由
+  - `editor/`：`read_file` / `write_file` / `edit_file` / `apply_patch` / `delete_file` / `move_file` / `create_directory` / `list_dir` / `search_files` / `glob` / `run_terminal` / `git_status` / `git_diff` / `read_artifact`
+  - `general`（来自 `@repo/general-agent`）：`fetchWeatherInfo` / `calculator` / `web_search` / `festival_info`
+  - `editor`（来自 `@repo/editor-agent`）：文件读写 / 搜索 / glob / 终端 / git / `verify_workspace` / `read_artifact`
 - `src/chat/`：聊天、RAG、附件、语音、知识库、Excel 检查（已按职责拆分，见上表）
 
 ### 编排器（`packages/agent-orchestrator`）
@@ -126,6 +136,13 @@ pnpm lint
 
 ```bash
 # 在 apps/server/.env 配置 DATABASE_URL / OPENAI_API_KEY / OPENAI_BASE_URL / TAVILY_API_KEY
+# 可选策略参数：
+#   CHAT_MODEL_CONNECT_TIMEOUT_MS / CHAT_MODEL_IDLE_TIMEOUT_MS
+#   CHAT_ZHIPU_LOCK_TIMEOUT_MS / CHAT_TOOL_TIMEOUT_MS / CHAT_TOOL_MAX_RESULT_CHARS
+#   CHAT_CONTEXT_MAX_INPUT_TOKENS / CHAT_CONTEXT_KEEP_RECENT_TOOLS
+#   CHAT_CONTEXT_KEEP_RECENT_TOOL_ROUNDS
+#   CHAT_CONTEXT_TOOL_PREVIEW_CHARS / CHAT_CONTEXT_OLD_MESSAGE_PREVIEW_CHARS
+#   AGENT_TOOL_WAIT_TIMEOUT_MS（云端模式等待客户端执行工具的上限）
 pnpm --filter @repo/server exec prisma db push   # 同步表结构（本项目无 migrations）
 pnpm --filter @repo/server start:dev             # http://localhost:3000
 ```
@@ -157,14 +174,19 @@ GET  /agent/list                              # 列出可用 agent
 POST /agent/:agentId/session                  # 建会话
 GET  /agent/:agentId/sessions                 # 会话列表
 POST /agent/:agentId/session/:id/stream       # SSE 流式对话
+POST /agent/:agentId/session/:id/pause        # 暂停当前运行（保存检查点）
+POST /agent/:agentId/session/:id/cancel       # 取消当前运行（检查点保留可继续）
+GET  /agent/:agentId/session/:id/state        # 查询运行态与检查点
+POST /agent/:agentId/session/:id/tool-result  # 云端模式：回传客户端工具执行结果
 
 GET  /agent/editor/workspace/tree             # 工作区目录树（桌面端用）
 GET  /agent/editor/workspace/file?path=...    # 工作区文件内容
 ```
 
 SSE 事件：`thought | content | error | done`（`/chat` 接口额外有 `sources`）。
-`/agent` 接口额外透传结构化的 `tool_call`（带 `args`）/ `tool_result` / `file_edit`，
-供前端展示工具操作块与编辑器逐行流式编辑；`/chat` 接口仍把工具调用映射成 `thought` 文案。
+`/agent` 接口额外透传结构化的 `tool_call`（带 `args` / `index`）/ `tool_result` / `file_edit`，
+供前端展示工具操作块与编辑器逐行流式编辑；云端模式还有 `tool_request`（后端请客户端执行工具）；
+`/chat` 接口仍把工具调用映射成 `thought` 文案。
 
 ## 部署
 
@@ -189,7 +211,13 @@ docker compose -f docker-compose.4001.yml --env-file apps/server/.env up -d --no
 - [x] Monaco 编辑器 + Cline 风格逐行流式编辑（AI 改代码时一行一行往下刷）
 - [x] 结构化工具操作块：读/写/编辑/搜索/终端等每个操作一张卡片，结果可折叠
 - [x] 客户端配置：本地/云端模型、Base URL、后端地址；模型可在顶栏随时切换
-- [ ] 写前 diff 预览与接受/拒绝
+- [x] 验证闭环：`verifyAfterTools` 自动跑 typecheck/lint，诊断结构化回填
+- [x] 审批 + 撤销：写/删/危险命令执行前审批，弹窗显示 before/after diff，本轮改动可一键撤销
+- [x] 断点续跑：本地 / 云端暂停、继续、取消；检查点持久化（本地 `userData`）
+- [x] 编辑器上下文：当前文件、选区、repo map 注入 system prompt
+- [x] 工具并行 + artifact：只读工具并行、重复调用引用、大文件 artifact 句柄
+- [x] 写前审批弹窗显示 before/after diff + 允许/拒绝
+- [ ] diff 逐段接受/拒绝
 - [ ] 本地模式的会话历史持久化
 
 ## 包管理器

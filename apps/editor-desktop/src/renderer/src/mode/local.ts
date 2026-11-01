@@ -2,6 +2,8 @@ import type {
   AgentTransport,
   ChatEvent,
   ChatHistoryItem,
+  AgentPromptContext,
+  RunStateInfo,
   WorkspaceNode,
   WorkspaceProvider,
   WorkspaceRootInfo,
@@ -15,7 +17,11 @@ export class LocalTransport implements AgentTransport {
     query: string,
     onEvent: (ev: ChatEvent) => void,
     signal?: AbortSignal,
-    options?: { model?: string; history?: ChatHistoryItem[] },
+    options?: {
+      model?: string;
+      history?: ChatHistoryItem[];
+      context?: AgentPromptContext;
+    },
   ): Promise<void> {
     this.unsubscribe?.();
     this.unsubscribe = window.electron.agent.onEvent((ev) =>
@@ -24,12 +30,47 @@ export class LocalTransport implements AgentTransport {
     const onAbort = () => void window.electron.agent.abort();
     signal?.addEventListener('abort', onAbort);
     try {
-      await window.electron.agent.run(query, options?.history);
+      await window.electron.agent.run(
+        query,
+        options?.history,
+        options?.context,
+      );
     } finally {
       signal?.removeEventListener('abort', onAbort);
       this.unsubscribe?.();
       this.unsubscribe = undefined;
     }
+  }
+
+  async resume(
+    onEvent: (ev: ChatEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    this.unsubscribe?.();
+    this.unsubscribe = window.electron.agent.onEvent((ev) =>
+      onEvent(ev as ChatEvent),
+    );
+    const onAbort = () => void window.electron.agent.abort();
+    signal?.addEventListener('abort', onAbort);
+    try {
+      await window.electron.agent.resume();
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+      this.unsubscribe?.();
+      this.unsubscribe = undefined;
+    }
+  }
+
+  async pause(): Promise<RunStateInfo> {
+    return await window.electron.agent.pause();
+  }
+
+  async cancel(): Promise<RunStateInfo> {
+    return await window.electron.agent.cancel();
+  }
+
+  async getRunState(): Promise<RunStateInfo> {
+    return await window.electron.agent.getRunState();
   }
 
   abort(): void {

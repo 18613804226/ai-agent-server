@@ -1,0 +1,72 @@
+import { describe, expect, it } from 'vitest';
+import {
+  buildFestivalContext,
+  festivalTool,
+  getFestivalDate,
+} from './festival.js';
+
+describe('getFestivalDate', () => {
+  it('返回春节的准确公历日期', () => {
+    expect(getFestivalDate('春节', 2026)).toBe('2026-02-17');
+    expect(getFestivalDate('春节', 2027)).toBe('2027-02-06');
+  });
+
+  it('支持别名与节气类节日', () => {
+    expect(getFestivalDate('中秋', 2026)).toBe('2026-09-25');
+    expect(getFestivalDate('端午', 2027)).toBe('2027-06-09');
+    expect(getFestivalDate('清明', 2026)).toBe('2026-04-05');
+  });
+
+  it('未知节日返回可读提示', () => {
+    expect(getFestivalDate('不存在的节日', 2026)).toContain('未找到');
+  });
+});
+
+describe('buildFestivalContext', () => {
+  const now = new Date('2026-11-01T03:07:00Z'); // 上海时间 2026-11-01
+
+  it('没写年份时取最近一次尚未到来的节日', () => {
+    const ctx = buildFestivalContext('几号是春节', now);
+    expect(ctx).toContain('2027年春节');
+    expect(ctx).toContain('2027-02-06');
+    expect(ctx).toContain('农历正月初一');
+  });
+
+  it('明确年份按用户说的算', () => {
+    expect(buildFestivalContext('2026年的春节是哪天', now)).toContain(
+      '2026-02-17',
+    );
+    expect(buildFestivalContext('27年的春节', now)).toContain('2027-02-06');
+  });
+
+  it('支持今年 / 明年', () => {
+    expect(buildFestivalContext('今年春节', now)).toContain('2026-02-17');
+    expect(buildFestivalContext('明年春节', now)).toContain('2027-02-06');
+  });
+
+  it('长别名不会重复输出（中秋节 ≠ 中秋 + 中秋节）', () => {
+    const ctx = buildFestivalContext('2026年中秋节', now);
+    expect(ctx.match(/2026年中秋/g)).toHaveLength(1);
+    expect(ctx).toContain('2026-09-25');
+  });
+
+  it('一次问多个节日时逐条计算', () => {
+    const ctx = buildFestivalContext('2027年春节和中秋', now);
+    expect(ctx).toContain('2027-02-06');
+    expect(ctx).toContain('2027-09-15');
+  });
+
+  it('没提到节日时不注入，避免污染 prompt', () => {
+    expect(buildFestivalContext('今天天气怎么样', now)).toBe('');
+    expect(buildFestivalContext('', now)).toBe('');
+  });
+});
+
+describe('festivalTool', () => {
+  it('工具定义和 handler 可用', async () => {
+    expect(festivalTool.definition.function.name).toBe('festival_info');
+    await expect(
+      festivalTool.handler({ name: '春节', year: 2027 }),
+    ).resolves.toBe('2027-02-06');
+  });
+});

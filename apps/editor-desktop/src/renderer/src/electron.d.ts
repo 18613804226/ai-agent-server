@@ -7,6 +7,31 @@ import type {
 
 export {};
 
+export interface RunCheckpointInfo {
+  id: string;
+  query: string;
+  history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  context?: {
+    activeFile?: string;
+    activeContent?: string;
+    selection?: string;
+  };
+  changes: Array<{
+    path: string;
+    kind: 'created' | 'modified' | 'deleted' | 'renamed';
+    before?: string;
+    after?: string;
+    from?: string;
+  }>;
+  state: string;
+  updatedAt: number;
+}
+
+export interface RunStateInfo {
+  state: string;
+  checkpoint: RunCheckpointInfo | null;
+}
+
 declare global {
   interface Window {
     electron: {
@@ -48,12 +73,33 @@ declare global {
         run(
           query: string,
           history?: Array<{ role: 'user' | 'assistant'; content: string }>,
+          context?: {
+            activeFile?: string;
+            activeContent?: string;
+            selection?: string;
+          },
         ): Promise<void>;
         execTool(
           name: string,
           args: Record<string, unknown>,
         ): Promise<string>;
         abort(): Promise<void>;
+        respondApproval(id: string, approved: boolean): Promise<boolean>;
+        undoAgent(): Promise<{ restored: string[]; failed: string[] }>;
+        getChanges(): Promise<
+          Array<{
+            path: string;
+            kind: 'created' | 'modified' | 'deleted' | 'renamed';
+            before?: string;
+            after?: string;
+            from?: string;
+          }>
+        >;
+        resetChanges(): Promise<boolean>;
+        getRunState(): Promise<RunStateInfo>;
+        pause(): Promise<RunStateInfo>;
+        cancel(): Promise<RunStateInfo>;
+        resume(): Promise<RunStateInfo>;
         onEvent(cb: (ev: ChatEvent) => void): () => void;
       };
     };

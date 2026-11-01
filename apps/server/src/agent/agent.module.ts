@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { AgentOrchestrator } from '@repo/agent-orchestrator';
 import { ModelClients, createDefaultModelClients } from './model-clients.js';
 import { createOrchestrator } from './orchestrator.factory.js';
+import { RunStateService } from '../agents/run-state.service.js';
 
 /**
  * 全局模块：提供全进程唯一的 ModelClients + AgentOrchestrator。
@@ -18,7 +19,8 @@ import { createOrchestrator } from './orchestrator.factory.js';
       useFactory: (clients: ModelClients) => createOrchestrator(clients),
       inject: [ModelClients],
     },
+    RunStateService,
   ],
-  exports: [ModelClients, AgentOrchestrator],
+  exports: [ModelClients, AgentOrchestrator, RunStateService],
 })
 export class AgentModule {}

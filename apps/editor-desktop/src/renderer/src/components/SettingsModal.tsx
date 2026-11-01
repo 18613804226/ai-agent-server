@@ -43,7 +43,7 @@ export function SettingsModal({
     setSaving(true);
     setError('');
     try {
-      await onSave(draft);
+      await onSave({ ...draft, approvalMode: draft.approvalMode ?? 'ask' });
       onClose();
     } catch (e: any) {
       setError(e?.message || String(e));
@@ -118,6 +118,42 @@ export function SettingsModal({
               默认只内置免费模型 <code>glm-4-flash</code>；通义/付费模型不预置，
               需要更好的模型请自行添加提供商。
             </p>
+          </section>
+
+          <section className="settings-section">
+            <div className="section-head">
+              <h4>工具审批</h4>
+            </div>
+            <label className="approval-option">
+              <input
+                type="radio"
+                checked={draft.approvalMode !== 'auto'}
+                onChange={() =>
+                  setDraft((d) => ({ ...d, approvalMode: 'ask' }))
+                }
+              />
+              <span>
+                <strong>总是询问</strong>
+                <span className="muted small">
+                  写文件、删文件、移动、危险命令都会弹 diff 确认
+                </span>
+              </span>
+            </label>
+            <label className="approval-option">
+              <input
+                type="radio"
+                checked={draft.approvalMode === 'auto'}
+                onChange={() =>
+                  setDraft((d) => ({ ...d, approvalMode: 'auto' }))
+                }
+              />
+              <span>
+                <strong>自动放行</strong>
+                <span className="muted small">
+                  不弹窗，所有工具直接执行（风险自负）
+                </span>
+              </span>
+            </label>
           </section>
 
           {error ? <div className="modal-error">⚠️ {error}</div> : null}

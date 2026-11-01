@@ -2,6 +2,33 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { AgentEvent } from '@repo/agent-orchestrator';
 import type { AppConfig, ProviderConfig } from '../main/config.js';
 
+interface AgentFileChange {
+  path: string;
+  kind: string;
+  before?: string;
+  after?: string;
+  from?: string;
+}
+
+export interface RunCheckpointInfo {
+  id: string;
+  query: string;
+  history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  context?: {
+    activeFile?: string;
+    activeContent?: string;
+    selection?: string;
+  };
+  changes: AgentFileChange[];
+  state: string;
+  updatedAt: number;
+}
+
+export interface RunStateInfo {
+  state: string;
+  checkpoint: RunCheckpointInfo | null;
+}
+
 /**
  * 预加载脚本：暴露最小能力。
  * - 本地模式：workspace + agent 通过 IPC 驱动 Electron 主进程
@@ -64,14 +91,35 @@ const api = {
     run: (
       query: string,
       history?: Array<{ role: 'user' | 'assistant'; content: string }>,
+      context?: {
+        activeFile?: string;
+        activeContent?: string;
+        selection?: string;
+      },
     ): Promise<void> =>
-      ipcRenderer.invoke('agent:run', { query, history }),
+      ipcRenderer.invoke('agent:run', { query, history, context }),
     execTool: (
       name: string,
       args: Record<string, unknown>,
     ): Promise<string> =>
       ipcRenderer.invoke('agent:execTool', { name, args }),
     abort: (): Promise<void> => ipcRenderer.invoke('agent:abort'),
+    respondApproval: (
+      id: string,
+      approved: boolean,
+    ): Promise<boolean> =>
+      ipcRenderer.invoke('agent:respondApproval', { id, approved }),
+    undoAgent: (): Promise<{ restored: string[]; failed: string[] }> =>
+      ipcRenderer.invoke('agent:undo'),
+    getChanges: (): Promise<AgentFileChange[]> =>
+      ipcRenderer.invoke('agent:getChanges'),
+    resetChanges: (): Promise<boolean> =>
+      ipcRenderer.invoke('agent:resetChanges'),
+    getRunState: (): Promise<RunStateInfo> =>
+      ipcRenderer.invoke('agent:getRunState'),
+    pause: (): Promise<RunStateInfo> => ipcRenderer.invoke('agent:pause'),
+    cancel: (): Promise<RunStateInfo> => ipcRenderer.invoke('agent:cancel'),
+    resume: (): Promise<RunStateInfo> => ipcRenderer.invoke('agent:resume'),
     onEvent: (callback: (ev: AgentEvent) => void): (() => void) => {
       const listener = (_event: unknown, ev: AgentEvent) => callback(ev);
       ipcRenderer.on('agent:event', listener);

@@ -26,7 +26,6 @@ const REQUIRED_MODULES = [
   'ffmpeg-static',
   'fluent-ffmpeg',
   'mammoth',
-  'mathjs',
   'multer',
   'openai',
   'pdf-parse',

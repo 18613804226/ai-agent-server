@@ -8,8 +8,6 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { VectorService } from '../vector/vector.service.js';
 import { createDefaultModelClients } from '../agent/model-clients.js';
 import { createOrchestrator } from '../agent/orchestrator.factory.js';
-import axios from 'axios';
-import { evaluate } from 'mathjs';
 import {
   AgentOrchestrator,
   classifyComplexity,
@@ -20,14 +18,16 @@ import {
   type RegisteredTool,
 } from '@repo/agent-orchestrator';
 import {
-  ATTACHMENT_TTL_MS,
-  type AttachmentKind,
-} from './attachment-store.js';
-import {
+  buildFestivalContext,
+  createChatTools,
   formatWebSearchContext,
   isLiveInfoQuery,
   searchTavily,
-} from './web-search.js';
+} from '@repo/general-agent';
+import {
+  ATTACHMENT_TTL_MS,
+  type AttachmentKind,
+} from './attachment-store.js';
 import { buildSystemPrompt, estimateTokens } from './chat-prompt.js';
 import { ImageService } from './image.service.js';
 import { AttachmentService } from './attachment.service.js';
@@ -48,59 +48,8 @@ export class ChatService {
   private readonly orchestrator: AgentOrchestrator;
   /** 图片上传/压缩/安全校验/孤儿清扫 */
   private readonly imageService: ImageService;
-  /** 本 agent 注册的工具集（定义 + 实现） */
-  private readonly tools: RegisteredTool[] = [
-    {
-      definition: {
-        type: 'function',
-        function: {
-          name: 'fetchWeatherInfo',
-          description:
-            '当用户明确询问某个城市或地区的实时天气、气温情况时调用。只在问天气时用。',
-          parameters: {
-            type: 'object',
-            properties: {
-              cityName: {
-                type: 'string',
-                description: '城市名称，如：北京、广州',
-              },
-            },
-            required: ['cityName'],
-          },
-        },
-      },
-      handler: (args) =>
-        this.fetchWeatherInfoByCity(String(args.cityName || '广州')),
-    },
-    {
-      definition: {
-        type: 'function',
-        function: {
-          name: 'calculator',
-          description:
-            '数学计算器。只要问题涉及任何数值计算（加减乘除、百分比、折扣、日期差、单位换算等）必须使用，禁止心算。',
-          parameters: {
-            type: 'object',
-            properties: {
-              expression: {
-                type: 'string',
-                description: '数学表达式，如 (100+20)*0.85、 365*24 ',
-              },
-            },
-            required: ['expression'],
-          },
-        },
-      },
-      handler: (args) => {
-        try {
-          const result = evaluate(String(args.expression || ''));
-          return `计算结果：${args.expression} = ${result}`;
-        } catch (e: any) {
-          return `表达式无法计算：${e.message}。请提醒用户检查算式。`;
-        }
-      },
-    },
-  ];
+  /** 本 agent 注册的工具集（与 general agent 共用同一份实现） */
+  private readonly tools: RegisteredTool[] = createChatTools();
 
   constructor(
     private prisma: PrismaService,
@@ -132,24 +81,6 @@ export class ChatService {
       console.log(
         '🧠 [模型分层] 未配置 GLM_API_KEY，全部请求走 qwen（未开启级联）',
       );
-    }
-  }
-
-  // 辅助函数：根据城市名获取天气
-  private async fetchWeatherInfoByCity(cityName: string): Promise<string> {
-    try {
-      const encodedCity = encodeURIComponent(cityName);
-      const res = await axios.get(`https://wttr.in/${encodedCity}?format=j1`, {
-        timeout: 4000,
-      });
-      const current = res.data.current_condition[0];
-      const tempC = current.temp_C;
-      const desc = current.weatherDesc[0].value;
-      const humidity = current.humidity;
-      return `【实时天气播报 - ${cityName}】：当前气温 ${tempC}℃，天气状况：${desc}，湿度：${humidity}%。`;
-    } catch (error) {
-      console.error('获取天气接口失败:', error);
-      return `【实时天气播报】：暂时无法获取 ${cityName} 的实时天气数据。`;
     }
   }
 
@@ -237,8 +168,12 @@ export class ChatService {
       if (liveInfoQuery) onChunk('thought', '🔧 调用 web_search');
 
       const parallelStartTime = Date.now();
-      const [, relevantDocs, historyMessages, webSearchResults] =
-        await Promise.all([
+      const [
+        createdUserMessage,
+        relevantDocs,
+        historyMessages,
+        webSearchResults,
+      ] = await Promise.all([
           this.prisma.message.create({
             data: {
               sessionId,
@@ -324,11 +259,22 @@ export class ChatService {
 
       // ✅ 反转回时间正序，再从最旧一条开始装上下文
       historyMessages.reverse();
+      // ✅ 历史查询与落库是并发的，可能已经把本轮 user 消息读回来；按 id 去掉，
+      //    避免同一条问题在上下文里出现两次（带附件时 content 不同，不能只比文本）。
       // ⚠️ 只传文件的用户消息 content 为空，glm 收到空 content 会直接 400。
       //    历史里这类空消息直接丢弃（它对应的助手回复仍有内容，上下文不受影响）。
-      const historyForModel = historyMessages.filter((m: any) =>
-        typeof m.content === 'string' ? m.content.trim() !== '' : true,
-      );
+      const createdMessageId = (createdUserMessage as any)?.id;
+      const historyForModel = historyMessages
+        .filter((m: any) => !createdMessageId || m.id !== createdMessageId)
+        .filter((m: any) =>
+          typeof m.content === 'string' ? m.content.trim() !== '' : true,
+        );
+
+      // ✅ 实时查询本轮已有联网结果，只带最近 3 轮对话：既保留「汇率越来越低啊」
+      //    这种追问上下文，又避免长历史把首字延迟拉长（之前是整段历史全塞进去）。
+      if (liveInfoQuery && historyForModel.length > 6) {
+        historyForModel.splice(0, historyForModel.length - 6);
+      }
 
       const MAX_CONTEXT_TOKENS = 800;
       const SIMILARITY_THRESHOLD = 0.45;
@@ -382,6 +328,23 @@ export class ChatService {
       const webSearchContext = liveInfoQuery
         ? formatWebSearchContext(webSearchResults)
         : '';
+      // ✅ 节日/农历日期不靠模型记忆：本轮直接算好，注入 system prompt。
+      //    小模型经常「知道有工具但不调用」，给权威结果比提示它调工具更可靠。
+      const festivalContext = buildFestivalContext(userQuery);
+      // ✅ 实时查询默认不发工具定义：少一轮工具往返、prompt 也更短，首字更快。
+      //    只有本轮确实需要天气/计算/农历日期时才开启工具。
+      const needsToolsForLiveQuery =
+        festivalContext !== '' ||
+        /天气|气温|温度|下雨|降雨|风力|湿度|计算|等于|折扣|换算|日期差/.test(
+          userQuery,
+        );
+      // ✅ 本轮已经算好节日日期时，直接把 festival_info 从工具表里拿掉：
+      //    模型即使想“再查一次”也没有机会，少一整轮模型往返。
+      const toolsForThisTurn = festivalContext
+        ? this.tools.filter(
+            (tool) => tool.definition.function.name !== 'festival_info',
+          )
+        : this.tools;
       const historySourceIds = [
         ...new Set(
           historyForModel.flatMap((message: any) =>
@@ -434,6 +397,7 @@ export class ChatService {
         context,
         historySourceSummary,
         webSearchContext,
+        festivalContext,
       });
 
       // ✅ 分配图片名额：当前轮优先，剩余名额从最新的历史消息往前补。
@@ -487,36 +451,32 @@ export class ChatService {
       const imageTokens = currentImageUrls.length * MODEL_IMAGE_TOKEN_COST;
       let budget = MAX_INPUT_TOKENS - systemTokens - queryTokens - imageTokens;
 
-      const formattedMessages = (liveInfoQuery ? [] : historyForModel).map(
-        (msg: any) => {
-          const role = ['user', 'assistant', 'system', 'tool'].includes(
-            msg.role,
-          )
-            ? (msg.role as 'user' | 'assistant' | 'system' | 'tool')
-            : 'user';
-          // ✅ 历史里带图且抢到名额的消息，还原成多模态，让模型记得之前看过的图
-          if (role === 'user' && Array.isArray(msg.images)) {
-            const urls = (msg.images as string[])
-              .filter((ref) => historyImageUrls.has(ref))
-              .map((ref) => historyImageUrls.get(ref)!);
-            if (urls.length) {
-              return {
-                role,
-                content: [
-                  { type: 'text', text: msg.content },
-                  ...imageParts(urls),
-                ],
-              } as any;
-            }
+      const formattedMessages = historyForModel.map((msg: any) => {
+        const role = ['user', 'assistant', 'system', 'tool'].includes(msg.role)
+          ? (msg.role as 'user' | 'assistant' | 'system' | 'tool')
+          : 'user';
+        // ✅ 历史里带图且抢到名额的消息，还原成多模态，让模型记得之前看过的图
+        if (role === 'user' && Array.isArray(msg.images)) {
+          const urls = (msg.images as string[])
+            .filter((ref) => historyImageUrls.has(ref))
+            .map((ref) => historyImageUrls.get(ref)!);
+          if (urls.length) {
+            return {
+              role,
+              content: [
+                { type: 'text', text: msg.content },
+                ...imageParts(urls),
+              ],
+            } as any;
           }
-          // ⚠️ 不要往历史消息正文里拼「历史回答来源」标注：模型会模仿该格式并原样输出，
-          //    污染聊天记录（线上已复现）。来源状态改由 system prompt 统一说明。
-          return {
-            role,
-            content: msg.content ?? '',
-          } as any;
-        },
-      );
+        }
+        // ⚠️ 不要往历史消息正文里拼「历史回答来源」标注：模型会模仿该格式并原样输出，
+        //    污染聊天记录（线上已复现）。来源状态改由 system prompt 统一说明。
+        return {
+          role,
+          content: msg.content ?? '',
+        } as any;
+      });
       // 从最新一条往前装，装不下就停（旧消息直接丢）
       const keptMessages: any[] = [];
       for (let i = formattedMessages.length - 1; i >= 0; i--) {
@@ -625,14 +585,17 @@ export class ChatService {
 
       let fullReply = '';
       let usedTokens = 0;
+      let truncated = false;
 
       for await (const ev of this.orchestrator.run(
         {
           messages,
-          tools: this.tools,
+          tools: toolsForThisTurn,
           candidates,
           maxToolRounds: 4,
-          includeTools: !liveInfoQuery,
+          // ✅ 实时搜索由后端做；实时查询默认不带工具，避免多一轮工具往返拖慢首字。
+          //    天气/计算/节日等确实需要工具的场景仍会开启（见 needsToolsForLiveQuery）。
+          includeTools: !liveInfoQuery || needsToolsForLiveQuery,
           signal,
         },
         gate,
@@ -661,8 +624,13 @@ export class ChatService {
             fullReply = ev.fullReply ?? '';
             usedModel = ev.model ?? '';
             usedTokens = ev.tokens ?? 0;
+            truncated = ev.truncated === true;
             break;
         }
+      }
+
+      if (truncated) {
+        onChunk('thought', '⚠️ 回答达到长度上限，内容可能被截断。');
       }
 
       if (fullReply) {
@@ -693,6 +661,7 @@ export class ChatService {
         sources: relevantAndPassingDocs,
         tokens: usedTokens,
         model: usedModel,
+        truncated,
       };
     } catch (error: any) {
       const totalDuration = Date.now() - overallStartTime;

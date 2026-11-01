@@ -7,12 +7,33 @@ import {
     SimpleLock,
     type AgentDefinition,
     type AgentEvent,
+    type AgentPromptContext,
+    type ApprovalHook,
+    type ApprovalPolicy,
     type FileChange,
     type FileEdit,
   } from '@repo/agent-orchestrator';
-import { createEditorAgent } from '@repo/editor-agent';
+import {
+  createEditorAgent,
+  previewApproval,
+  restoreChanges,
+} from '@repo/editor-agent';
+import { ArtifactStore } from '@repo/agent-orchestrator';
+import { randomUUID } from 'node:crypto';
 import { getConfig } from '../config.js';
 import { resolveModel } from './model.js';
+import { RunStore, type RunCheckpoint, type RunState } from './run-store.js';
+
+/** 写/删/移动/危险终端命令需要人工审批 */
+const APPROVAL_TOOLS = new Set([
+  'write_file',
+  'edit_file',
+  'apply_patch',
+  'delete_file',
+  'move_file',
+]);
+const RISKY_COMMAND =
+  /(^|\s)(rm|rd|del|format|mkfs|shutdown|reboot|dd|sudo|chmod|chown|git\s+push|git\s+reset|npm\s+publish|pnpm\s+publish|yarn\s+publish)\b/i;
 
 /**
  * 本地模式：编排器 + 工具都跑在 Electron 主进程，直接编辑用户打开的本地项目。
@@ -26,6 +47,20 @@ export class LocalAgent {
   private agent: AgentDefinition | null = null;
   /** 本轮工具产生的文件改动 */
   private changes: FileChange[] = [];
+  /** 等待渲染层响应的审批请求 */
+  private readonly pendingApprovals = new Map<string, (approved: boolean) => void>();
+  /** 审批事件出口；未设置时自动放行（避免无 UI 场景挂起） */
+  private eventSink: ((ev: unknown) => void) | null = null;
+  /** 断点续跑状态机 */
+  private readonly store = new RunStore();
+  private runState: RunState = 'idle';
+  private pausing = false;
+  private cancelling = false;
+  private currentAbort: AbortController | null = null;
+  private resumeFrom: RunCheckpoint | null = null;
+  private checkpointId: string = randomUUID();
+  /** 云端代理执行（execTool）用的 artifact 存储 */
+  private readonly execArtifacts = new ArtifactStore();
 
   constructor(initialRoots: string[]) {
     this.workspaceRoots = [...initialRoots];
@@ -71,6 +106,110 @@ export class LocalAgent {
     this.orchestrator = null;
   }
 
+  /** 设置审批事件出口（主进程 IPC 调用） */
+  setEventSink(sink: ((ev: unknown) => void) | null): void {
+    this.eventSink = sink;
+  }
+
+  /** 渲染层响应审批 */
+  respondApproval(id: string, approved: boolean): void {
+    this.pendingApprovals.get(id)?.(approved);
+    this.pendingApprovals.delete(id);
+  }
+
+  /** 撤销最近一轮的文件改动 */
+  undoLastRun(): { restored: string[]; failed: string[] } {
+    const result = restoreChanges(this.workspaceRoots, this.changes);
+    this.changes = [];
+    return result;
+  }
+
+  /** 云端模式：把客户端收集的本轮改动回传给渲染层 */
+  getChanges(): FileChange[] {
+    return [...this.changes];
+  }
+
+  /** 新一轮开始前清空改动收集 */
+  resetChanges(): void {
+    this.changes = [];
+  }
+
+  getState(): { state: RunState; checkpoint: RunCheckpoint | null } {
+    return { state: this.runState, checkpoint: this.store.get() };
+  }
+
+  /** 暂停当前运行：中断模型请求，保存检查点 */
+  pause(): { state: RunState; checkpoint: RunCheckpoint | null } {
+    if (this.runState === 'running') {
+      this.pausing = true;
+      this.currentAbort?.abort();
+    }
+    return this.getState();
+  }
+
+  /** 取消当前运行：中断模型请求，检查点保留可继续 */
+  cancel(): { state: RunState; checkpoint: RunCheckpoint | null } {
+    if (this.runState === 'running') {
+      this.cancelling = true;
+      this.currentAbort?.abort();
+    }
+    return this.getState();
+  }
+
+  /** 从检查点继续：用保存的历史和原始任务重跑 */
+  async *resume(): AsyncGenerator<AgentEvent> {
+    const checkpoint = this.store.get();
+    if (!checkpoint || this.runState !== 'paused') return;
+    this.resumeFrom = checkpoint;
+    this.checkpointId = checkpoint.id;
+    yield* this.run(
+      '继续执行之前的任务。',
+      new AbortController().signal,
+      checkpoint.history,
+      checkpoint.context,
+    );
+  }
+
+  private needsApproval(name: string, args: Record<string, unknown>): boolean {
+    if (getConfig().approvalMode === 'auto') return false;
+    if (APPROVAL_TOOLS.has(name)) return true;
+    if (name === 'run_terminal') {
+      return RISKY_COMMAND.test(String(args.command ?? ''));
+    }
+    return false;
+  }
+
+  private async requestApproval(context: {
+    toolName: string;
+    args: Record<string, unknown>;
+  }): Promise<boolean> {
+    if (!this.eventSink) return true; // 没有 UI：保持旧行为，自动放行
+    const id = randomUUID();
+    const approved = await new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (value: boolean) => {
+        if (timer) clearTimeout(timer);
+        this.pendingApprovals.delete(id);
+        resolve(value);
+      };
+      timer = setTimeout(() => settle(false), 60_000); // 用户不响应则超时拒绝
+      timer.unref?.();
+      this.pendingApprovals.set(id, settle);
+      this.eventSink!({
+        type: 'approval_request',
+        id,
+        toolName: context.toolName,
+        args: context.args,
+        preview: previewApproval(
+          this.workspaceRoots,
+          context.toolName,
+          context.args,
+        ),
+      });
+    });
+    return approved;
+  }
+
   /** 云端模式：后端把工具调用转回来，由主进程在本地执行 */
   async execTool(
     name: string,
@@ -81,15 +220,38 @@ export class LocalAgent {
       (t) => t.definition.function.name === name,
     );
     if (!tool) return `未知工具：${name}`;
-    return await tool.handler(args);
+
+    // 云端代理执行也走同一套审批策略
+    const policy = agent.approvalPolicy?.(name, args) ?? 'allow';
+    if (policy === 'deny') return `工具被策略拒绝：${name}`;
+    if (policy === 'ask') {
+      const approved = await this.requestApproval({ toolName: name, args });
+      if (!approved) return `用户拒绝执行：${name}`;
+    }
+
+    return await tool.handler(args, {
+      toolName: name,
+      artifacts: this.execArtifacts,
+    });
   }
 
   private rebuildAgent(): void {
-    this.agent = this.workspaceRoots.length
-      ? createEditorAgent(this.workspaceRoots, (change) =>
-          this.changes.push(change),
-        )
-      : null;
+    if (!this.workspaceRoots.length) {
+      this.agent = null;
+      return;
+    }
+    const base = createEditorAgent(this.workspaceRoots, (change) =>
+      this.changes.push(change),
+    );
+    const approvalPolicy: ApprovalPolicy = (name, args) =>
+      this.needsApproval(name, args) ? 'ask' : 'allow';
+    const requestApproval: ApprovalHook = (context) =>
+      this.requestApproval(context);
+    this.agent = {
+      ...base,
+      approvalPolicy,
+      requestApproval,
+    };
   }
 
   private ensureAgent(): AgentDefinition {
@@ -128,11 +290,12 @@ export class LocalAgent {
   async *run(
     query: string,
     signal: AbortSignal,
-    history: Array<{ role: string; content: string }> = [],
+    history: Array<{ role: 'user' | 'assistant'; content: string }> = [],
+    context?: AgentPromptContext,
   ): AsyncGenerator<AgentEvent> {
     const agent = this.ensureAgent();
     const orchestrator = this.ensureOrchestrator();
-    this.changes = [];
+    if (!this.resumeFrom) this.changes = [];
 
     const complexity = classifyComplexity({
       userQuery: query,
@@ -156,29 +319,72 @@ export class LocalAgent {
     }
 
     const messages: Array<Record<string, unknown>> = [
-      { role: 'system', content: agent.buildSystemPrompt() },
+      {
+        role: 'system',
+        content: agent.buildSystemPrompt({ query, context }),
+      },
       ...history
         .filter((m) => typeof m.content === 'string' && m.content.trim())
         .slice(-20),
       { role: 'user', content: query },
     ];
 
-for await (const ev of orchestrator.run({
+    this.currentAbort = new AbortController();
+    const runSignal = signal
+      ? AbortSignal.any([signal, this.currentAbort.signal])
+      : this.currentAbort.signal;
+    this.runState = 'running';
+
+    try {
+      for await (const ev of orchestrator.run({
         messages,
         tools: agent.tools,
         candidates,
         complexity,
-        signal,
+        verifyAfterTools: agent.verifyAfterTools,
+        editToolNames: agent.editToolNames,
+        approvalPolicy: agent.approvalPolicy,
+        requestApproval: agent.requestApproval,
+        signal: runSignal,
       })) {
         // 把本轮文件改动挂到 done 事件上，渲染层据此展示 diff；
         // file_edit 事件原样透传，供编辑器做流式动画
         if (ev.type === 'done') {
           yield { ...ev, changes: this.changes };
-        } else if (ev.type === 'file_edit') {
-          yield ev;
         } else {
           yield ev;
         }
       }
+
+      if (this.pausing) {
+        this.runState = 'paused';
+        const checkpointHistory = this.resumeFrom
+          ? history
+          : [...history, { role: 'user' as const, content: query }];
+        this.store.set({
+          id: this.checkpointId,
+          query: this.resumeFrom?.query ?? query,
+          history: checkpointHistory,
+          context,
+          changes: this.changes,
+          state: 'paused',
+          updatedAt: Date.now(),
+        });
+      } else if (this.cancelling) {
+        this.runState = 'cancelled';
+      } else if (runSignal.aborted) {
+        this.runState = 'cancelled';
+      } else {
+        this.runState = 'done';
+      }
+    } catch (error) {
+      this.runState = 'failed';
+      throw error;
+    } finally {
+      this.pausing = false;
+      this.cancelling = false;
+      this.currentAbort = null;
+      this.resumeFrom = null;
+    }
   }
 }

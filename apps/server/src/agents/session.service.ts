@@ -30,10 +30,12 @@ export class AgentSessionService {
   ): Promise<Array<Record<string, unknown>>> {
     const rows = await this.prisma.message.findMany({
       where: { sessionId },
-      orderBy: { createdAt: 'asc' },
+      // ✅ 取最近 N 条（asc + take 拿的是最旧 N 条，长会话会把最近上下文全丢掉）
+      orderBy: { createdAt: 'desc' },
       take: limit,
     });
     return rows
+      .reverse()
       .filter((r) => typeof r.content === 'string' && r.content.trim())
       .map((r) => ({ role: r.role, content: r.content }));
   }

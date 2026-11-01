@@ -1,4 +1,3 @@
-import { HttpException, HttpStatus } from '@nestjs/common';
 import axios from 'axios';
 
 export interface WebSearchResult {
@@ -28,10 +27,7 @@ export async function searchTavily(
 ): Promise<WebSearchResult[]> {
   const apiKey = process.env.TAVILY_API_KEY;
   if (!apiKey) {
-    throw new HttpException(
-      '实时搜索未配置：请在后端环境变量中设置 TAVILY_API_KEY。',
-      HttpStatus.SERVICE_UNAVAILABLE,
-    );
+    throw new Error('实时搜索未配置：请在后端环境变量中设置 TAVILY_API_KEY。');
   }
 
   const date = new Date().toISOString().slice(0, 10);
@@ -58,10 +54,7 @@ export async function searchTavily(
       : undefined;
     const code = axios.isAxiosError(error) ? error.code : undefined;
     console.error('Tavily 联网搜索请求失败:', { status, code });
-    throw new HttpException(
-      '实时搜索服务暂时不可用，请稍后重试。',
-      HttpStatus.BAD_GATEWAY,
-    );
+    throw new Error('实时搜索服务暂时不可用，请稍后重试。');
   }
 
   return (Array.isArray(data.results) ? data.results : [])

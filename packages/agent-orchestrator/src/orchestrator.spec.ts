@@ -123,7 +123,10 @@ describe('AgentOrchestrator.run', () => {
     const result = events.find((e) => e.type === 'tool_result');
     expect(result?.name).toBe('calculator');
     expect(result?.result).toBe('计算结果：1+1');
-    expect(handler).toHaveBeenCalledWith({ expression: '1+1' });
+    expect(handler).toHaveBeenCalledWith(
+      { expression: '1+1' },
+      { signal: undefined, toolName: 'calculator', artifacts: expect.anything() },
+    );
 
     const done = events.at(-1);
     expect(done?.fullReply).toBe('结果是 2');
@@ -200,6 +203,642 @@ describe('AgentOrchestrator.run', () => {
     const orch = new AgentOrchestrator(config());
     const events = await collect(orch, { messages: [], candidates: [] });
     expect(events[0]?.type).toBe('error');
+  });
+
+  it('候选存在但 provider 未配置：抛出明确错误而不是 null', async () => {
+    const orch = new AgentOrchestrator(config({ getClient: () => null }));
+    await expect(
+      collect(orch, { messages: [], candidates: [dashscope('qwen')] }),
+    ).rejects.toThrow('没有可用的模型客户端');
+  });
+
+  it('finish_reason=length：done 标记回答被截断', async () => {
+    const { client } = fakeClient([
+      [
+        { choices: [{ delta: { content: '半截回答' } }] },
+        { choices: [{ delta: {}, finish_reason: 'length' }] },
+      ],
+    ]);
+    const orch = new AgentOrchestrator(config({ getClient: () => client }));
+
+    const events = await collect(orch, {
+      messages: [],
+      candidates: [dashscope('qwen')],
+    });
+    const done = events.at(-1);
+
+    expect(done?.finishReason).toBe('length');
+    expect(done?.truncated).toBe(true);
+    expect(done?.fullReply).toBe('半截回答');
+  });
+
+  it('建连超时：降级到下一个候选', async () => {
+    let calls = 0;
+    const create = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return new Promise(() => {});
+      return (async function* () {
+        yield { choices: [{ delta: { content: '超时后降级成功' } }] };
+      })();
+    });
+    const client = { chat: { completions: { create } } } as unknown as OpenAI;
+    const orch = new AgentOrchestrator(
+      config({ getClient: () => client, connectTimeoutMs: 20 }),
+    );
+
+    const events = await collect(orch, {
+      messages: [],
+      candidates: [dashscope('qwen-a'), dashscope('qwen-b')],
+    });
+
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(events.at(-1)?.fullReply).toBe('超时后降级成功');
+  });
+
+  it('流空闲超时：中断而不是永久挂起', async () => {
+    const create = vi.fn(async () => {
+      return (async function* () {
+        yield { choices: [{ delta: { content: '部分' } }] };
+        await new Promise(() => {});
+      })();
+    });
+    const client = { chat: { completions: { create } } } as unknown as OpenAI;
+    const orch = new AgentOrchestrator(
+      config({ getClient: () => client, streamIdleTimeoutMs: 20 }),
+    );
+
+    await expect(
+      collect(orch, { messages: [], candidates: [dashscope('qwen')] }),
+    ).rejects.toThrow('空闲超时');
+  });
+
+  it('智谱锁等待超时：降级到下一个候选', async () => {
+    const lock = new SimpleLock();
+    const release = await lock.acquire();
+    const { client: qwen } = fakeClient([
+      [{ choices: [{ delta: { content: '锁超时后走 qwen' } }] }],
+    ]);
+    const orch = new AgentOrchestrator(
+      config({
+        getClient: (provider) => (provider === 'zhipu' ? qwen : qwen),
+        zhipuLock: lock,
+        lockAcquireTimeoutMs: 20,
+      }),
+    );
+
+    try {
+      const events = await collect(orch, {
+        messages: [],
+        candidates: [
+          { provider: 'zhipu', model: 'glm-4-flash' },
+          dashscope('qwen'),
+        ],
+      });
+      expect(events.at(-1)?.fullReply).toBe('锁超时后走 qwen');
+    } finally {
+      release();
+    }
+  });
+
+  it('401 属于配置错误：不降级，直接失败', async () => {
+    const create = vi.fn(async () => {
+      throw Object.assign(new Error('unauthorized'), { status: 401 });
+    });
+    const client = { chat: { completions: { create } } } as unknown as OpenAI;
+    const orch = new AgentOrchestrator(
+      config({ getClient: () => client }),
+    );
+
+    await expect(
+      collect(orch, {
+        messages: [],
+        candidates: [dashscope('qwen-a'), dashscope('qwen-b')],
+      }),
+    ).rejects.toThrow('unauthorized');
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('工具执行超时：返回超时文本并继续下一轮', async () => {
+    const toolDelta = {
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_1',
+                type: 'function',
+                function: {
+                  name: 'slow_tool',
+                  arguments: '{"value":"x"}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const { client } = fakeClient([
+      [toolDelta],
+      [{ choices: [{ delta: { content: '已跳过慢工具' } }] }],
+    ]);
+    const tools: RegisteredTool[] = [
+      {
+        definition: {
+          type: 'function',
+          function: {
+            name: 'slow_tool',
+            description: '慢工具',
+            parameters: {
+              type: 'object',
+              properties: { value: { type: 'string' } },
+              required: ['value'],
+            },
+          },
+        },
+        handler: () => new Promise(() => {}),
+      },
+    ];
+    const orch = new AgentOrchestrator(
+      config({ getClient: () => client, toolTimeoutMs: 20 }),
+    );
+
+    const events = await collect(orch, {
+      messages: [],
+      tools,
+      candidates: [dashscope('qwen')],
+    });
+
+    const result = events.find((e) => e.type === 'tool_result');
+    expect(result?.result).toContain('执行超时');
+    expect(events.at(-1)?.fullReply).toBe('已跳过慢工具');
+  });
+
+  it('多轮工具调用会压缩旧工具结果，避免全文反复重发', async () => {
+    const toolDelta = (id: string) => ({
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id,
+                type: 'function',
+                function: {
+                  name: 'read_file',
+                  arguments: '{"path":"a.ts"}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    const seen: any[][] = [];
+    const create = vi.fn(async (body: any) => {
+      seen.push(body.messages.map((m: any) => ({ ...m })));
+      const round = seen.length;
+      const chunks =
+        round === 1
+          ? [toolDelta('call_1')]
+          : round === 2
+            ? [toolDelta('call_2')]
+            : [{ choices: [{ delta: { content: '完成' } }] }];
+      return (async function* () {
+        for (const chunk of chunks) yield chunk;
+      })();
+    });
+    const client = { chat: { completions: { create } } } as unknown as OpenAI;
+    const tools: RegisteredTool[] = [
+      {
+        definition: {
+          type: 'function',
+          function: {
+            name: 'read_file',
+            description: '读文件',
+            parameters: {
+              type: 'object',
+              properties: { path: { type: 'string' } },
+              required: ['path'],
+            },
+          },
+        },
+        handler: () => 'x'.repeat(2000),
+      },
+    ];
+    const orch = new AgentOrchestrator(
+      config({
+        getClient: () => client,
+        contextOptions: { keepRecentToolResults: 1 },
+      }),
+    );
+
+    const events = await collect(orch, {
+      messages: [],
+      tools,
+      candidates: [dashscope('qwen')],
+      maxToolRounds: 2,
+    });
+
+    const lastMessages = seen.at(-1)!;
+    const toolMessages = lastMessages.filter((m) => m.role === 'tool');
+    expect(toolMessages).toHaveLength(2);
+    // 第一轮的工具结果已被压缩，第二轮仍保留全文
+    expect(toolMessages[0].content).toContain('【已压缩】');
+    expect(toolMessages[1].content).toBe('x'.repeat(2000));
+
+    const done = events.at(-1);
+    expect(done?.context?.compactedToolResults).toBeGreaterThanOrEqual(1);
+  });
+
+  it('自动验证：编辑工具执行后回填验证结果，驱动修复', async () => {
+    const toolDelta = {
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_1',
+                type: 'function',
+                function: {
+                  name: 'edit_file',
+                  arguments: '{"path":"a.ts","old_string":"x","new_string":"y"}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const seen: any[][] = [];
+    const create = vi.fn(async (body: any) => {
+      seen.push(body.messages.map((m: any) => ({ ...m })));
+      const chunks =
+        seen.length === 1
+          ? [toolDelta]
+          : [{ choices: [{ delta: { content: '已根据验证修复' } }] }];
+      return (async function* () {
+        for (const chunk of chunks) yield chunk;
+      })();
+    });
+    const client = { chat: { completions: { create } } } as unknown as OpenAI;
+    const tools: RegisteredTool[] = [
+      {
+        definition: {
+          type: 'function',
+          function: {
+            name: 'edit_file',
+            description: '编辑文件',
+            parameters: {
+              type: 'object',
+              properties: { path: { type: 'string' } },
+              required: ['path'],
+            },
+          },
+        },
+        handler: () => '已修改',
+      },
+    ];
+    const verify = vi.fn(async () => '❌ lint 失败：a.ts(1,1)');
+
+    const orch = new AgentOrchestrator(config({ getClient: () => client }));
+    const events = await collect(orch, {
+      messages: [],
+      tools,
+      candidates: [dashscope('qwen')],
+      maxToolRounds: 2,
+      verifyAfterTools: verify,
+    });
+
+    expect(verify).toHaveBeenCalledWith({
+      toolNames: ['edit_file'],
+      signal: undefined,
+    });
+    const lastMessages = seen.at(-1)!;
+    const verifyMsg = lastMessages.find((m) =>
+      String(m.content ?? '').includes('【自动验证】'),
+    );
+    expect(verifyMsg).toBeDefined();
+    expect(verifyMsg.content).toContain('lint 失败');
+    expect(events.at(-1)?.fullReply).toBe('已根据验证修复');
+  });
+
+  it('自动验证：只读工具不触发验证，返回 null 也不回填', async () => {
+    const toolDelta = {
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_1',
+                type: 'function',
+                function: {
+                  name: 'read_file',
+                  arguments: '{"path":"a.ts"}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const { client } = fakeClient([
+      [toolDelta],
+      [{ choices: [{ delta: { content: '读完了' } }] }],
+    ]);
+    const tools: RegisteredTool[] = [
+      {
+        definition: {
+          type: 'function',
+          function: {
+            name: 'read_file',
+            description: '读文件',
+            parameters: {
+              type: 'object',
+              properties: { path: { type: 'string' } },
+              required: ['path'],
+            },
+          },
+        },
+        handler: () => '内容',
+      },
+    ];
+    const verify = vi.fn(async () => null);
+    const orch = new AgentOrchestrator(config({ getClient: () => client }));
+
+    await collect(orch, {
+      messages: [],
+      tools,
+      candidates: [dashscope('qwen')],
+      verifyAfterTools: verify,
+    });
+
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  it('审批策略：deny 直接拒绝且不执行 handler', async () => {
+    const toolDelta = {
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_1',
+                type: 'function',
+                function: {
+                  name: 'write_file',
+                  arguments: '{"path":"a.ts","content":"x"}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const { client } = fakeClient([
+      [toolDelta],
+      [{ choices: [{ delta: { content: '完成' } }] }],
+    ]);
+    const handler = vi.fn(() => '写入成功');
+    const tools: RegisteredTool[] = [
+      {
+        definition: {
+          type: 'function',
+          function: {
+            name: 'write_file',
+            description: '写文件',
+            parameters: {
+              type: 'object',
+              properties: { path: { type: 'string' } },
+              required: ['path'],
+            },
+          },
+        },
+        handler,
+      },
+    ];
+    const orch = new AgentOrchestrator(config({ getClient: () => client }));
+
+    const events = await collect(orch, {
+      messages: [],
+      tools,
+      candidates: [dashscope('qwen')],
+      approvalPolicy: () => 'deny',
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    const result = events.find((e) => e.type === 'tool_result');
+    expect(result?.result).toContain('策略拒绝');
+  });
+
+  it('审批策略：ask + 拒绝时不执行；ask + 允许时执行', async () => {
+    const toolDelta = (id: string) => ({
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id,
+                type: 'function',
+                function: {
+                  name: 'run_terminal',
+                  arguments: '{"command":"ls"}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    const runCase = async (approved: boolean) => {
+      const { client } = fakeClient([
+        [toolDelta('c1')],
+        [{ choices: [{ delta: { content: 'ok' } }] }],
+      ]);
+      const handler = vi.fn(() => '命令输出');
+      const tools: RegisteredTool[] = [
+        {
+          definition: {
+            type: 'function',
+            function: {
+              name: 'run_terminal',
+              description: '终端',
+              parameters: {
+                type: 'object',
+                properties: { command: { type: 'string' } },
+                required: ['command'],
+              },
+            },
+          },
+          handler,
+        },
+      ];
+      const approve = vi.fn(async () => approved);
+      const orch = new AgentOrchestrator(config({ getClient: () => client }));
+      const events = await collect(orch, {
+        messages: [],
+        tools,
+        candidates: [dashscope('qwen')],
+        approvalPolicy: () => 'ask',
+        requestApproval: approve,
+      });
+      return { handler, approve, events };
+    };
+
+    const denied = await runCase(false);
+    expect(denied.approve).toHaveBeenCalledTimes(1);
+    expect(denied.handler).not.toHaveBeenCalled();
+    expect(denied.events.find((e) => e.type === 'tool_result')?.result).toContain(
+      '用户拒绝执行',
+    );
+
+    const allowed = await runCase(true);
+    expect(allowed.handler).toHaveBeenCalledTimes(1);
+    expect(
+      allowed.events.find((e) => e.type === 'tool_result')?.result,
+    ).toBe('命令输出');
+  });
+
+  it('只读工具并行执行', async () => {
+    const delta = {
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'c1',
+                type: 'function',
+                function: {
+                  name: 'read_file',
+                  arguments: '{"path":"a.ts"}',
+                },
+              },
+              {
+                index: 1,
+                id: 'c2',
+                type: 'function',
+                function: {
+                  name: 'read_file',
+                  arguments: '{"path":"b.ts"}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const { client } = fakeClient([
+      [delta],
+      [{ choices: [{ delta: { content: 'ok' } }] }],
+    ]);
+    let secondStarted = false;
+    const handler = vi.fn(async (args: any) => {
+      if (args.path === 'a.ts') {
+        // 串行执行时第二个不会启动，这里会一直等 → 测试超时
+        while (!secondStarted) await new Promise((r) => setTimeout(r, 5));
+        return 'a';
+      }
+      secondStarted = true;
+      return 'b';
+    });
+    const tools: RegisteredTool[] = [
+      {
+        definition: {
+          type: 'function',
+          function: {
+            name: 'read_file',
+            description: '读文件',
+            parameters: {
+              type: 'object',
+              properties: { path: { type: 'string' } },
+              required: ['path'],
+            },
+          },
+        },
+        handler,
+        readOnly: true,
+      },
+    ];
+    const orch = new AgentOrchestrator(config({ getClient: () => client }));
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('只读工具未并行执行')), 1000),
+    );
+    await expect(
+      Promise.race([
+        collect(orch, {
+          messages: [],
+          tools,
+          candidates: [dashscope('qwen')],
+          maxToolRounds: 1,
+        }),
+        timeout,
+      ]),
+    ).resolves.toBeDefined();
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it('只读工具重复调用返回引用，不重复执行', async () => {
+    const toolDelta = (id: string) => ({
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id,
+                type: 'function',
+                function: {
+                  name: 'read_file',
+                  arguments: '{"path":"a.ts"}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    const { client } = fakeClient([
+      [toolDelta('c1')],
+      [toolDelta('c2')],
+      [{ choices: [{ delta: { content: 'done' } }] }],
+    ]);
+    const handler = vi.fn(async () => 'file content');
+    const tools: RegisteredTool[] = [
+      {
+        definition: {
+          type: 'function',
+          function: {
+            name: 'read_file',
+            description: '读文件',
+            parameters: {
+              type: 'object',
+              properties: { path: { type: 'string' } },
+              required: ['path'],
+            },
+          },
+        },
+        handler,
+        readOnly: true,
+      },
+    ];
+    const orch = new AgentOrchestrator(config({ getClient: () => client }));
+    const events = await collect(orch, {
+      messages: [],
+      tools,
+      candidates: [dashscope('qwen')],
+      maxToolRounds: 2,
+    });
+    const results = events
+      .filter((e) => e.type === 'tool_result')
+      .map((e) => e.result);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(results[1]).toContain('重复调用');
   });
 
   it('客户端中断：收到信号后停止产出', async () => {
