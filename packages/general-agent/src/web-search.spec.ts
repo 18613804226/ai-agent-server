@@ -18,16 +18,28 @@ describe('isLiveInfoQuery', () => {
     '今天的新闻',
     '最新美元汇率',
     '现在的股价',
+    '搜索李二毛',
+    '查一下这个人',
+    '帮我查一下',
+    '李二毛',
+    '特朗普',
+    'iPhone 16',
   ])('识别实时查询：%s', (query) => {
     expect(isLiveInfoQuery(query)).toBe(true);
   });
 
-  it.each(['你好', '解释一下向量数据库', '帮我总结这段文字'])(
-    '不将一般查询识别为实时查询：%s',
-    (query) => {
-      expect(isLiveInfoQuery(query)).toBe(false);
-    },
-  );
+  it.each([
+    '你好',
+    '解释一下向量数据库',
+    '帮我总结这段文字',
+    '你是谁',
+    '谢谢',
+    '再见',
+    '帮我写一首诗',
+    '今天天气怎么样',
+  ])('不将一般查询识别为实时查询：%s', (query) => {
+    expect(isLiveInfoQuery(query)).toBe(false);
+  });
 });
 
 describe('formatWebSearchContext', () => {

@@ -107,9 +107,12 @@ export function createGeneralTools(): RegisteredTool[] {
 }
 
 /**
- * 聊天主链路（后端已自己跑 web_search，把结果注入 prompt）只需要
- * 天气/计算/节日，不需要模型再调一次 web_search。
+ * 聊天主链路的工具集。
+ *
+ * 后端对「实时查询」会自己跑 web_search 并把结果注入 prompt（省一轮模型往返），
+ * 但关键词识别覆盖不到的说法（如「查一下某人」「搜索一下」「帮我查」）后端不会搜，
+ * 所以这里仍暴露 `web_search`，让模型在需要时自己搜。
  */
 export function createChatTools(): RegisteredTool[] {
-  return [weatherTool, calculatorTool, festivalTool];
+  return [weatherTool, calculatorTool, webSearchTool, festivalTool];
 }

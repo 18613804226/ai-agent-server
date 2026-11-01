@@ -15,10 +15,11 @@ describe('general-agent 工具集', () => {
     ]);
   });
 
-  it('chat 由后端自己执行 web_search，工具集不重复暴露搜索工具', () => {
+  it('chat 也暴露 web_search：后端关键词没命中时模型可自己搜', () => {
     expect(names(createChatTools())).toEqual([
       'fetchWeatherInfo',
       'calculator',
+      'web_search',
       'festival_info',
     ]);
   });
