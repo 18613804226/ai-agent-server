@@ -15,6 +15,8 @@ import type { RegisteredTool } from '@repo/agent-orchestrator';
 /** 常见别名 → lunar 库返回的节日名 */
 const FESTIVAL_ALIASES: Record<string, string[]> = {
   春节: ['春节'],
+  过年: ['春节'],
+  新春: ['春节'],
   元宵: ['元宵节'],
   元宵节: ['元宵节'],
   小年: ['小年'],
@@ -67,19 +69,60 @@ function findFestival(name: string, year: number): FestivalHit | null {
   return null;
 }
 
+interface ResolvedFestival {
+  year: number;
+  hit: FestivalHit;
+}
+
+/**
+ * 解析节日年份并返回命中结果，buildFestivalContext 与 festival_info 工具共用。
+ *
+ * - 指定年份 → 用该年（即使用户问的是已过去的年份，也如实返回）
+ * - 未指定 → 取最近一次尚未到来的年份（今年已过则顺延到明年）
+ *
+ * 不传年份时顺延很关键：「距离过年还有几天」默认指**下一次**春节，
+ * 若直接返回今年的（可能已过），模型会把「已过去 N 天」错当成「还有 N 天」。
+ */
+function resolveFestival(
+  name: string,
+  year: number | null | undefined,
+  now: Date,
+): ResolvedFestival | null {
+  const target = (name ?? '').trim();
+  if (!target) return null;
+
+  if (year !== undefined && year !== null) {
+    const hit = findFestival(target, year);
+    return hit ? { year, hit } : null;
+  }
+
+  const today = todayInShanghai(now);
+  const thisYear = now.getFullYear();
+  const hitThisYear = findFestival(target, thisYear);
+  if (hitThisYear && hitThisYear.date >= today) {
+    return { year: thisYear, hit: hitThisYear };
+  }
+  const hitNextYear = findFestival(target, thisYear + 1);
+  return hitNextYear ? { year: thisYear + 1, hit: hitNextYear } : null;
+}
+
 /**
  * 查询某节日在指定年份的公历日期。
  * @param name 节日名（如「春节」「中秋」）
- * @param year 年份，默认今年
+ * @param year 年份；不传则取最近一次尚未到来的年份
+ * @param now 当前时间，便于测试注入
  */
-export function getFestivalDate(name: string, year?: number): string {
+export function getFestivalDate(
+  name: string,
+  year?: number,
+  now: Date = new Date(),
+): string {
   const target = (name ?? '').trim();
   if (!target) return '请提供节日名称，如：春节、中秋、端午';
 
-  const y = year ?? new Date().getFullYear();
-  const hit = findFestival(target, y);
-  if (hit) return hit.date;
-  return `未找到「${target}」在 ${y} 年的公历日期`;
+  const resolved = resolveFestival(target, year, now);
+  if (resolved) return resolved.hit.date;
+  return `未找到「${target}」在 ${year ?? now.getFullYear()} 年的公历日期`;
 }
 
 /** 上海时区的今天，YYYY-MM-DD（与 system prompt 的当前时间保持一致） */
@@ -102,17 +145,21 @@ function daysBetween(fromYmd: string, toYmd: string): number {
 }
 
 /**
- * 给日期补上「相对今天还有多少天」的自然语言说明。
+ * 把天数差翻译成自然语言（不含日期本身）。
  *
  * calculator 只能算纯数字表达式、算不了日期差，模型自己把日期换算成
  * 「一年中的第几天」再相减时必然出错（如 90-40=50）。这里在服务端直接
  * 把天数算好，模型和工具两侧都能拿到权威值。
  */
+function describeOffset(days: number, today: string): string {
+  if (days > 0) return `距离今天（${today}）还有 ${days} 天`;
+  if (days === 0) return `就是今天（${today}）`;
+  return `已过去 ${-days} 天`;
+}
+
+/** 给日期补上「相对今天还有多少天」的说明 */
 function appendOffset(date: string, today: string): string {
-  const days = daysBetween(today, date);
-  if (days > 0) return `${date}，距离今天（${today}）还有 ${days} 天`;
-  if (days === 0) return `${date}，就是今天（${today}）`;
-  return `${date}，已过去 ${-days} 天`;
+  return `${date}，${describeOffset(daysBetween(today, date), today)}`;
 }
 
 /** 从提问里解析明确年份；没有明确年份返回 null */
@@ -165,26 +212,12 @@ export function buildFestivalContext(
   const lines: string[] = [];
 
   for (const name of matched) {
-    let year = explicitYear;
-    let hit: FestivalHit | null = null;
-    if (year !== null) {
-      hit = findFestival(name, year);
-    } else {
-      // 没写年份：先看今年，已过就顺延到明年
-      hit = findFestival(name, now.getFullYear());
-      if (!hit || hit.date < today) {
-        const next = findFestival(name, now.getFullYear() + 1);
-        if (next) {
-          hit = next;
-          year = now.getFullYear() + 1;
-        }
-      } else {
-        year = now.getFullYear();
-      }
-    }
-    if (!hit || year === null) continue;
+    const resolved = resolveFestival(name, explicitYear, now);
+    if (!resolved) continue;
+    // 用规范名展示：「过年」显示成「春节」，避免用户看到的名称和问法不一致
+    const canonical = FESTIVAL_ALIASES[name][0];
     lines.push(
-      `${year}年${name}：公历 ${appendOffset(hit.date, today)}（农历${hit.lunarLabel}）`,
+      `${resolved.year}年${canonical}：公历 ${appendOffset(resolved.hit.date, today)}（农历${resolved.hit.lunarLabel}）`,
     );
   }
 
@@ -212,19 +245,29 @@ export const festivalTool: RegisteredTool = {
         type: 'object',
         properties: {
           name: { type: 'string', description: '节日名，如：春节、中秋、端午' },
-          year: { type: 'number', description: '年份，默认今年' },
+          year: {
+            type: 'number',
+            description:
+              '年份；不传则取最近一次即将到来的年份（今年已过则自动顺延到明年）',
+          },
         },
         required: ['name'],
       },
     },
   },
   handler: async (args) => {
-    const date = getFestivalDate(
-      typeof args.name === 'string' ? args.name : '',
-      args.year ? Number(args.year) : undefined,
-    );
+    const now = new Date();
+    const name = typeof args.name === 'string' ? args.name : '';
+    const year = args.year ? Number(args.year) : undefined;
+    const today = todayInShanghai(now);
+
+    const resolved = resolveFestival(name, year, now);
     // 查询失败时（未找到/缺参数）原样返回提示，不要拼天数
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
-    return appendOffset(date, todayInShanghai(new Date()));
+    if (!resolved) return getFestivalDate(name, year, now);
+
+    return `${resolved.year}年${name}：公历 ${resolved.hit.date}，${describeOffset(
+      daysBetween(today, resolved.hit.date),
+      today,
+    )}`;
   },
 };

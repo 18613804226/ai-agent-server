@@ -75,7 +75,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     label: '智谱 GLM',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
     apiKeyEnv: 'GLM_API_KEY',
-    models: [{ id: 'glm-4-flash', name: 'GLM-4-Flash（免费）' }],
+    models: [
+      { id: 'glm-4.5-flash', name: 'GLM-4.5-Flash（免费）' },
+      { id: 'glm-4-flash', name: 'GLM-4-Flash（免费）' },
+      { id: 'glm-4-flash-250414', name: 'GLM-4-Flash-250414（免费）' },
+    ],
   },
   {
     id: 'ollama',

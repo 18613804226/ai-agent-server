@@ -47,13 +47,17 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
     api: 'zhipu',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
     apiKeyEnv: 'GLM_API_KEY',
-    models: [{ id: 'glm-4-flash', name: 'GLM-4-Flash（免费）' }],
+    models: [
+      { id: 'glm-4.5-flash', name: 'GLM-4.5-Flash（免费）' },
+      { id: 'glm-4-flash', name: 'GLM-4-Flash（免费）' },
+      { id: 'glm-4-flash-250414', name: 'GLM-4-Flash-250414（免费）' },
+    ],
   },
 ];
 
 const DEFAULTS: AppConfig = {
   providers: DEFAULT_PROVIDERS,
-  selectedModel: 'glm-4-flash',
+  selectedModel: 'glm-4.5-flash',
   approvalMode: 'ask',
   local: { workspaceRoots: [] },
   remote: { model: '' },

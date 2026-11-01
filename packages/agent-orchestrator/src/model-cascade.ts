@@ -64,7 +64,7 @@ function envNumber(name: string, fallback: number): number {
  */
 export const DEFAULT_MODELS = {
   visionPrimary: 'qwen3.7-flash',
-  textSimple: 'glm-4-flash',
+  textSimple: 'glm-4.5-flash',
   textComplex: 'qwen3.7-flash',
   textExpert: 'qwen3.8-max-0902',
   fallback: 'qwen3.7-flash',
@@ -83,7 +83,8 @@ export function loadModelCascadeConfig(
     // ⚠️ GLM-4.6V-Flash（免费视觉款）实测指令遵循弱：会把图片问题
     //    胡编成不存在的工具调用（如 fetchImageContent），回答质量不可用，
     //    因此视觉与复杂文本默认都走 qwen3.7-flash（全模态，付费但稳定）。
-    //    免费层只留给 glm-4-flash 这种够用的简单文本场景。
+    //    免费文本层用 GLM-4.5-Flash：智谱免费额度里 4.7 之外最强的文本模型
+    //    （4.7 免费额度被用得厉害、限流明显，所以退到 4.5）。
     visionPrimary:
       overrides.visionPrimary ??
       env('CHAT_MODEL_VISION', DEFAULT_MODELS.visionPrimary),
@@ -310,7 +311,7 @@ export function classifyComplexity(input: {
 }
 
 /**
- * 附件「拒答」识别：免费层 glm-4-flash 会把「用户上传的附件」当成它没权限访问的东西而拒答
+ * 附件「拒答」识别：免费层（GLM Flash 系列）会把「用户上传的附件」当成它没权限访问的东西而拒答
  * （实测：用户问句里出现「我上传的附件/文件」就触发，与系统提示无关）。
  * 命中后由调用方换到下一个候选（qwen）重试，而不是把这句拒答丢给用户。
  */
