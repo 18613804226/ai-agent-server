@@ -9,9 +9,7 @@
   --text-dim: #9aa0a6;
   --accent: #3b82f6;
   --accent-strong: #2563eb;
-  --font-ui: 'Segoe UI Variable Text', 'Segoe UI', -apple-system,
-    BlinkMacSystemFont, 'Inter', 'PingFang SC', 'Microsoft YaHei UI',
-    'Microsoft YaHei', sans-serif;
+  --font-ui: PingFang SC, 'Microsoft Yahei', '微软雅黑', Arial, sans-serif;
   --font-mono: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Consolas,
     'Courier New', monospace;
 }

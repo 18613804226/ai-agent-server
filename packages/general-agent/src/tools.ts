@@ -58,7 +58,7 @@ export const calculatorTool: RegisteredTool = {
     function: {
       name: 'calculator',
       description:
-        '数学计算器。只要问题涉及任何数值计算（加减乘除、百分比、折扣、日期差、单位换算等）必须使用，禁止心算。',
+        '数学计算器，用于加减乘除、百分比、折扣、单位换算等纯数值计算。只要涉及数值计算就必须使用，禁止心算。注意：日期差/剩余天数不是数值表达式，本工具算不了，请直接使用 prompt 或 festival_info 已给出的天数。',
       parameters: {
         type: 'object',
         properties: {

@@ -92,6 +92,29 @@ function todayInShanghai(now: Date): string {
   }).format(now);
 }
 
+/** 两个 YYYY-MM-DD 之间的天数差（to - from），用 UTC 避免时区干扰 */
+function daysBetween(fromYmd: string, toYmd: string): number {
+  const [fy, fm, fd] = fromYmd.split('-').map(Number);
+  const [ty, tm, td] = toYmd.split('-').map(Number);
+  return Math.round(
+    (Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86_400_000,
+  );
+}
+
+/**
+ * 给日期补上「相对今天还有多少天」的自然语言说明。
+ *
+ * calculator 只能算纯数字表达式、算不了日期差，模型自己把日期换算成
+ * 「一年中的第几天」再相减时必然出错（如 90-40=50）。这里在服务端直接
+ * 把天数算好，模型和工具两侧都能拿到权威值。
+ */
+function appendOffset(date: string, today: string): string {
+  const days = daysBetween(today, date);
+  if (days > 0) return `${date}，距离今天（${today}）还有 ${days} 天`;
+  if (days === 0) return `${date}，就是今天（${today}）`;
+  return `${date}，已过去 ${-days} 天`;
+}
+
 /** 从提问里解析明确年份；没有明确年份返回 null */
 function parseExplicitYear(query: string, now: Date): number | null {
   const full = query.match(/(20\d{2})\s*年/);
@@ -160,7 +183,9 @@ export function buildFestivalContext(
       }
     }
     if (!hit || year === null) continue;
-    lines.push(`${year}年${name}：公历 ${hit.date}（农历${hit.lunarLabel}）`);
+    lines.push(
+      `${year}年${name}：公历 ${appendOffset(hit.date, today)}（农历${hit.lunarLabel}）`,
+    );
   }
 
   if (!lines.length) return '';
@@ -170,8 +195,9 @@ export function buildFestivalContext(
       ? '用户未指定年份，已按最近一次即将到来的日期计算。'
       : '';
   return `【权威农历日期】
+今天：${today}
 ${lines.join('\n')}
-${hint}本轮已算好节日日期：回答这些节日的日期时直接使用上面的结果，不要重复调用 festival_info，禁止凭记忆猜测或编造其他日期。`;
+${hint}本轮已算好节日日期与剩余天数：回答节日日期或「还有多少天」时直接使用上面的结果，不要重复调用 festival_info，也不要用 calculator 自行推算日期差，禁止凭记忆猜测或编造其他日期。`;
 }
 
 /** festival_info 工具：查询传统节日/农历节日对应的公历日期 */
@@ -181,7 +207,7 @@ export const festivalTool: RegisteredTool = {
     function: {
       name: 'festival_info',
       description:
-        '查询传统节日/农历节日的公历日期（春节、中秋、端午、清明、七夕、重阳、腊八、除夕等）。问「春节是哪天」「中秋几号」时使用。',
+        '查询传统节日/农历节日的公历日期（春节、中秋、端午、清明、七夕、重阳、腊八、除夕等）。问「春节是哪天」「中秋几号」「春节还有多少天」时使用。返回结果已附带相对今天的剩余天数，直接采用即可。',
       parameters: {
         type: 'object',
         properties: {
@@ -192,9 +218,13 @@ export const festivalTool: RegisteredTool = {
       },
     },
   },
-  handler: async (args) =>
-    getFestivalDate(
+  handler: async (args) => {
+    const date = getFestivalDate(
       typeof args.name === 'string' ? args.name : '',
       args.year ? Number(args.year) : undefined,
-    ),
+    );
+    // 查询失败时（未找到/缺参数）原样返回提示，不要拼天数
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
+    return appendOffset(date, todayInShanghai(new Date()));
+  },
 };

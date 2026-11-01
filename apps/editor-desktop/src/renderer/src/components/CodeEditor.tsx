@@ -85,6 +85,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
         model,
         theme: 'vs-dark',
         automaticLayout: true,
+        fontFamily: "'Cascadia Code', 'JetBrains Mono', 'Fira Code', Consolas, monospace",
         fontSize: 13,
         minimap: { enabled: false },
         scrollbar: { vertical: 'visible', horizontal: 'visible' },

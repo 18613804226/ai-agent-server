@@ -406,10 +406,11 @@ export class ChatService {
       // ✅ 分配图片名额：当前轮优先，剩余名额从最新的历史消息往前补。
       //   这样「刚才那张红图再帮我看看」能接上，又不会让 token 随对话轮数无限膨胀。
       const currentRefs = (hasImages ? images! : []).slice(0, MAX_MODEL_IMAGES);
-      const slotsForHistory = Math.max(
-        0,
-        MAX_MODEL_IMAGES - currentRefs.length,
-      );
+      // ✅ 只有本轮也带图（走视觉模型 qwen）时才还原历史图；
+      //    纯文本请求会路由到 glm-4-flash（仅支持 text），带上 image_url 会 400。
+      const slotsForHistory = hasImages
+        ? Math.max(0, MAX_MODEL_IMAGES - currentRefs.length)
+        : 0;
       const historyImageRefs: string[] = [];
       for (let i = historyForModel.length - 1; i >= 0; i--) {
         if (historyImageRefs.length >= slotsForHistory) break;
