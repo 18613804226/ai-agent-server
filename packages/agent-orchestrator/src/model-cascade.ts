@@ -328,8 +328,10 @@ export function resolveModelCandidates(
     add(config.textComplexFallback);
     add(config.fallback);
   } else if (complexity.complexity === 'complex') {
+    // 复杂档：主模型 → 免费兜底 → 付费全局兜底（免费额度耗尽后仍能答）
     add(config.textComplex);
     add(config.textComplexFallback);
+    add(config.fallback);
   } else {
     add(config.textSimple);
     add(config.fallback);
@@ -369,7 +371,8 @@ export function errorMessage(err: unknown): string {
 /**
  * 判断错误是否值得降级到下一个候选。
  *
- * 401/403/402 属于配置/权限问题，换模型也没用，直接失败，避免白试整条候选链；
+ * 401/403 属于配置/权限问题，换模型也没用，直接失败，避免白试整条候选链；
+ * 402（额度/欠费）也降级——免费额度用完后应该退到付费兜底模型，而不是直接失败；
  * 其余错误（限流、5xx、模型不存在、连不上、超时）都降级——
  * 实际踩过「模型名不存在 404」和「建连超时」靠降级自救的坑。
  */
@@ -385,7 +388,8 @@ export function isDegradableError(err: unknown): boolean {
   if (e.name === 'AbortError' || e.name === 'APIUserAbortError') return false;
 
   const status = e.status ?? e.response?.status;
-  if (status === 401 || status === 403 || status === 402) return false;
+  if (status === 401 || status === 403) return false;
+
 
   if (e.code === 'ECONNRESET' || e.code === 'ETIMEDOUT') return true;
   if (e.name === 'TimeoutError') return true;

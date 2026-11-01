@@ -176,6 +176,22 @@ describe('模型分层：档位与平台匹配', () => {
     expect(list.every((c) => c.provider === 'dashscope')).toBe(true);
   });
 
+  it('复杂档包含主模型 + 免费兜底 + 付费全局兜底', () => {
+    clearModelEnv();
+    process.env.CHAT_MODEL_TEXT_COMPLEX = 'deepseek-v4.1-flash';
+    process.env.CHAT_MODEL_COMPLEX_FALLBACK = 'qwen3.8-max-0902';
+    const list = resolveModelCandidates(
+      { tier: 'text', complexity: 'complex', score: 4, reasons: [] },
+      loadModelCascadeConfig(),
+      { zhipuAvailable: true },
+    );
+    expect(list.map((c) => c.model)).toEqual([
+      'deepseek-v4.1-flash',
+      'qwen3.8-max-0902',
+      'qwen3.7-flash',
+    ]);
+  });
+
   it('expert 档默认模型也在阿里云，且与复杂档是不同模型', () => {
     clearModelEnv();
     const cfg = loadModelCascadeConfig();
@@ -335,10 +351,10 @@ describe('模型分层：降级判定', () => {
     expect(isDegradableError(null)).toBe(false);
   });
 
-  it('401/403/402 属于配置错误，不降级', () => {
+  it('401/403 属于配置错误，不降级；402 额度耗尽要降级到兜底', () => {
     expect(isDegradableError({ status: 401 })).toBe(false);
     expect(isDegradableError({ status: 403 })).toBe(false);
-    expect(isDegradableError({ response: { status: 402 } })).toBe(false);
+    expect(isDegradableError({ response: { status: 402 } })).toBe(true);
   });
 
   it('建连/流空闲超时仍然降级', () => {

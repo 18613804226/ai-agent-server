@@ -143,6 +143,9 @@ pnpm lint
 #   CHAT_CONTEXT_KEEP_RECENT_TOOL_ROUNDS
 #   CHAT_CONTEXT_TOOL_PREVIEW_CHARS / CHAT_CONTEXT_OLD_MESSAGE_PREVIEW_CHARS
 #   AGENT_TOOL_WAIT_TIMEOUT_MS（云端模式等待客户端执行工具的上限）
+#   模型覆盖（.env.example 默认走免费额度 + 付费兜底）：
+#   CHAT_MODEL_TEXT_COMPLEX / CHAT_MODEL_COMPLEX_FALLBACK / CHAT_MODEL_FALLBACK
+#   CHAT_MODEL_TEXT_SIMPLE / CHAT_MODEL_TEXT_EXPERT / CHAT_MODEL_VISION
 pnpm --filter @repo/server exec prisma db push   # 同步表结构（本项目无 migrations）
 pnpm --filter @repo/server start:dev             # http://localhost:3000
 ```
