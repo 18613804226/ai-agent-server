@@ -53,14 +53,14 @@ describe('AgentOrchestrator.run', () => {
       candidates: [dashscope('qwen')],
     });
 
-    // 流式 content 保留原始文本（含 think 标签），与旧实现一致
+    // 流式 content 也剥掉 think 标签，用户看不到推理伪工具块
     const contents = events
       .filter((e) => e.type === 'content')
       .map((e) => e.content)
       .join('');
-    expect(contents).toBe('<think>想一下</think>你好');
+    expect(contents).toBe('你好');
 
-    // 最终回答才清理标签
+    // 最终回答同样不含标签
     const done = events.at(-1);
     expect(done?.type).toBe('done');
     expect(done?.fullReply).toBe('你好');

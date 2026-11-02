@@ -128,6 +128,8 @@ export function SettingsModal({
             <label className="approval-option">
               <input
                 type="radio"
+                name="approvalMode"
+                value="ask"
                 checked={draft.approvalMode !== 'auto'}
                 onChange={() =>
                   setDraft((d) => ({ ...d, approvalMode: 'ask' }))
@@ -143,6 +145,8 @@ export function SettingsModal({
             <label className="approval-option">
               <input
                 type="radio"
+                name="approvalMode"
+                value="auto"
                 checked={draft.approvalMode === 'auto'}
                 onChange={() =>
                   setDraft((d) => ({ ...d, approvalMode: 'auto' }))

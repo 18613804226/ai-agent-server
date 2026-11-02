@@ -54,9 +54,43 @@ export function Terminal({ onClose }: { onClose: () => void }) {
   return (
     <div className="terminal">
       <div className="terminal-header">
-        <span>终端</span>
-        <button className="ghost small" onClick={onClose}>
-          关闭
+        <span className="terminal-title">
+          <svg
+            className="terminal-icon"
+            viewBox="0 0 16 16"
+            width="15"
+            height="15"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+            <path d="m4 6 2 2-2 2m4 0h3" />
+          </svg>
+          终端
+        </span>
+        <button
+          type="button"
+          className="terminal-close"
+          onClick={onClose}
+          title="关闭终端"
+          aria-label="关闭终端"
+        >
+          <svg
+            viewBox="0 0 16 16"
+            width="14"
+            height="14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            aria-hidden="true"
+          >
+            <path d="m4 4 8 8m0-8-8 8" />
+          </svg>
         </button>
       </div>
       <div className="terminal-body" ref={bodyRef}>
@@ -68,6 +102,7 @@ export function Terminal({ onClose }: { onClose: () => void }) {
         <div className="term-prompt">
           <span className="term-ps">{prompt}</span>
           <input
+            aria-label="终端命令"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -79,7 +114,7 @@ export function Terminal({ onClose }: { onClose: () => void }) {
             autoFocus
             spellCheck={false}
           />
-          {running ? <span className="muted small">运行中…</span> : null}
+          {running ? <span className="terminal-running">运行中…</span> : null}
         </div>
       </div>
     </div>

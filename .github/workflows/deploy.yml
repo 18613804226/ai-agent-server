@@ -3,6 +3,8 @@ name: Deploy to Aliyun ECS
 on:
   push:
     branches: [main] # 当你往 main 分支 push 代码时自动触发
+    paths-ignore:
+      - 'packages/editor-agent/**'
 
 jobs:
   deploy:

@@ -168,8 +168,6 @@ export class ChatService {
 //         console.log(`📎 附件已注入本轮上下文: ${attachmentContext.length} 字`);
       }
 
-      if (liveInfoQuery) onChunk('thought', '🔧 调用 web_search');
-
       const parallelStartTime = Date.now();
       const [
         createdUserMessage,
@@ -565,6 +563,9 @@ export class ChatService {
           ),
         );
       }
+
+      // 实时查询的「正在搜索」反馈放在路由决策之后，保证模型选择始终在最前
+      if (liveInfoQuery) onChunk('thought', '🔧 调用 web_search');
 
       // ✅ 免费层 GLM 对「上传的附件」有拒答反射（见 isAttachmentRefusal）：
       //    含附件时先把开头一小段内容"扣住"，命中拒答就换 qwen 重试本轮。

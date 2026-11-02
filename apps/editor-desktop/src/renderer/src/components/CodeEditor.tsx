@@ -14,6 +14,7 @@ interface CodeEditorProps {
   path: string;
   value: string;
   onChange?: (value: string) => void;
+  onAskAI?: (path: string, selection?: string) => void;
 }
 
 function languageFor(path: string): string {
@@ -61,11 +62,12 @@ const normalizeEol = (s: string): string => s.replace(/\r\n/g, '\n');
  * - 并发编辑通过 promise 队列串行化
  */
 export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
-  ({ path, value, onChange }, ref) => {
+  ({ path, value, onChange, onAskAI }, ref) => {
     const host = useRef<HTMLDivElement>(null);
     const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
     const modelRef = useRef<monaco.editor.ITextModel | null>(null);
     const onChangeRef = useRef(onChange);
+    const onAskAIRef = useRef(onAskAI);
     const valueRef = useRef(value);
     const streamingRef = useRef(false);
     /** 流式编辑队列：保证多个 file_edit 串行执行，不互相覆盖 */
@@ -73,6 +75,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
     const [streaming, setStreaming] = useState(false);
 
     onChangeRef.current = onChange;
+    onAskAIRef.current = onAskAI;
     valueRef.current = value;
 
     useEffect(() => {
@@ -88,7 +91,13 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
         fontFamily: "'Cascadia Code', 'JetBrains Mono', 'Fira Code', Consolas, monospace",
         fontSize: 13,
         minimap: { enabled: false },
-        scrollbar: { vertical: 'visible', horizontal: 'visible' },
+        scrollbar: {
+          vertical: 'visible',
+          horizontal: 'visible',
+          verticalScrollbarSize: 8,
+          horizontalScrollbarSize: 8,
+          useShadows: false,
+        },
         wordWrap: 'on',
         renderWhitespace: 'boundary',
         padding: { top: 12 },
@@ -104,6 +113,21 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
         // 动画期间不向外报变更，避免父组件刷新覆盖
         if (streamingRef.current) return;
         onChangeRef.current?.(model.getValue());
+      });
+
+      editor.addAction({
+        id: 'editor.askAI',
+        label: '问 AI',
+        contextMenuGroupId: 'navigation',
+        contextMenuOrder: 1.5,
+        run: (instance) => {
+          const selection = instance.getSelection();
+          const selectedText =
+            selection && !selection.isEmpty()
+              ? instance.getModel()?.getValueInRange(selection)
+              : undefined;
+          onAskAIRef.current?.(path, selectedText);
+        },
       });
 
       return () => {

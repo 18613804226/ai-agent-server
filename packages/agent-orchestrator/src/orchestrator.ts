@@ -34,6 +34,89 @@ import type {
   RegisteredTool,
 } from './types.js';
 
+/**
+ * 流式内容清洗：剥掉模型偶尔吐出的 XML 风格「伪工具」标签
+ * （`<think>…</think>`、`<tool_call>…</tool_call>`、`<web_search>…</web_search>`）。
+ *
+ * 这些标签是模型把「推理/调用」误写进正文的产物，用户不需要看到。
+ * 用有状态的扫描器按 chunk 增量处理：进入已知标签区间就抑制输出，
+ * 直到看到对应闭合标签为止；标签本身（开/闭）也一并吞掉。
+ */
+const SUPPRESSED_TAGS = new Set(['think', 'tool_call', 'web_search']);
+
+export function createContentSanitizer() {
+  /** 当前被抑制的标签名（小写），null 表示不在任何标签内 */
+  let inside: string | null = null;
+  /** 跨 chunk 的未闭合标签缓冲（如 `<thi` + `nk>`） */
+  let pending = '';
+
+  return (chunk: string): string => {
+    let buffer = pending + chunk;
+    pending = '';
+    let out = '';
+
+    while (buffer.length > 0) {
+      if (inside) {
+        // 在抑制区内：找闭合标签
+        const closeIdx = buffer.toLowerCase().indexOf(`</${inside}`);
+        if (closeIdx === -1) {
+          // 还没找到闭合 → 整段丢弃，但保留可能是闭合前缀的尾巴
+          const tail = Math.max(0, buffer.length - inside.length - 3);
+          buffer = buffer.slice(tail);
+          pending = buffer;
+          break;
+        }
+        // 跳过闭合标签本身
+        const afterClose = buffer.indexOf('>', closeIdx);
+        if (afterClose === -1) {
+          pending = buffer.slice(closeIdx);
+          break;
+        }
+        buffer = buffer.slice(afterClose + 1);
+        inside = null;
+        continue;
+      }
+
+      // 不在抑制区：找下一个 '<'
+      const lt = buffer.indexOf('<');
+      if (lt === -1) {
+        out += buffer;
+        buffer = '';
+        break;
+      }
+      out += buffer.slice(0, lt);
+
+      // 解析标签名
+      const rest = buffer.slice(lt);
+      const m = /^<\s*(\/?)\s*([A-Za-z_][\w-]*)/.exec(rest);
+      if (!m) {
+        // 不是合法标签（比如数学式 1 < 2），原样输出 '<'
+        out += '<';
+        buffer = rest.slice(1);
+        continue;
+      }
+      const [, slash, name] = m;
+      const lower = name.toLowerCase();
+      if (!SUPPRESSED_TAGS.has(lower)) {
+        // 非目标标签：原样吐出，继续扫描
+        out += rest.slice(0, m[0].length);
+        buffer = rest.slice(m[0].length);
+        continue;
+      }
+      if (slash) {
+        // 闭合标签但不处于抑制区 → 直接吞掉
+        buffer = rest.slice(m[0].length);
+        continue;
+      }
+      // 进入抑制区
+      inside = lower;
+      buffer = rest.slice(m[0].length);
+    }
+
+    return out;
+  };
+}
+
 /** 编排器配置：全部由宿主注入，编排器自身不读 process.env */
 export interface OrchestratorConfig {
   /**
@@ -271,6 +354,7 @@ export class AgentOrchestrator {
       tools: RegisteredTool[];
       artifacts?: ArtifactStore;
       resultCache: Map<string, string>;
+      preApproved?: boolean;
     },
   ): Promise<string> {
     const tool = context.tools.find(
@@ -279,8 +363,11 @@ export class AgentOrchestrator {
     const policy = context.approvalPolicy?.(call.function.name, args) ?? 'allow';
     let approved = policy !== 'deny';
     if (approved && policy === 'ask') {
-      if (context.signal?.aborted) approved = false;
-      else if (context.requestApproval) {
+      if (context.preApproved) {
+        approved = true; // 已在 file_edit 之前审批过，跳过重复审批
+      } else if (context.signal?.aborted) {
+        approved = false;
+      } else if (context.requestApproval) {
         approved = await context.requestApproval({
           toolName: call.function.name,
           args,
@@ -340,6 +427,8 @@ export class AgentOrchestrator {
     // 本轮 artifact 存储 + 只读工具重复调用缓存
     const artifacts = new ArtifactStore();
     const resultCache = new Map<string, string>();
+    /** 每轮新建清洗器：标签抑制状态不跨轮复用，避免上一轮的未闭合标签吞掉下一轮正文 */
+    let sanitizeContent = createContentSanitizer();
 
     if (!chain.length) {
       yield { type: 'error', content: '没有可用的模型候选' };
@@ -448,12 +537,15 @@ export class AgentOrchestrator {
           }
 
           if (textContent) {
-            roundReply += textContent;
+            // 剥掉模型误写进正文的 XML 风格标签（<think>/<tool_call>/<web_search>）
+            const clean = sanitizeContent(textContent);
+            if (!clean) continue;
+            roundReply += clean;
             if (gateOpen) {
-              rawFullReply += textContent;
-              yield { type: 'content', content: textContent };
+              rawFullReply += clean;
+              yield { type: 'content', content: clean };
             } else {
-              gateBuf += textContent;
+              gateBuf += clean;
               // 攒够阈值仍未见拒答 → 放行已攒内容，之后正常流式。
               // 拒答识别依赖「无法」，所以只要 32 字内没出现「无法」就可以提前放行，
               // 不必死等 120 字——否则短回答要等整条流结束才显示，体感像“不吐字”。
@@ -549,7 +641,7 @@ export class AgentOrchestrator {
         };
       }
 
-      // 2. 写工具：先吐 file_edit 动画，再串行执行（审批/副作用）
+      // 2. 写工具：审批通过后再吐 file_edit 动画，避免用户未确认就已开始改文件
       for (let index = 0; index < toolCalls.length; index++) {
         const call = toolCalls[index];
         if (isReadOnly(call)) continue;
@@ -564,7 +656,31 @@ export class AgentOrchestrator {
         const edit = invalid
           ? undefined
           : parseFileEdit(call.function.name, args);
-        if (edit) yield { type: 'file_edit', edit };
+
+        // 审批检查：需要审批的工具，先等用户确认，通过后再吐 file_edit 动画
+        const policy = approvalPolicy?.(call.function.name, args) ?? 'allow';
+        let preApproved = false;
+        if (policy === 'ask' && edit) {
+          if (signal?.aborted) {
+            // aborted, skip
+          } else if (requestApproval) {
+            preApproved = await requestApproval({
+              toolName: call.function.name,
+              args,
+              signal,
+            });
+            if (!preApproved) {
+              results.set(call.id, `用户拒绝执行：${call.function.name}`);
+              continue;
+            }
+          } else {
+            // 配置为 ask 但没有审批钩子：安全起见拒绝
+            results.set(call.id, `用户拒绝执行：${call.function.name}`);
+            continue;
+          }
+        }
+
+        if ((policy !== 'deny') && edit) yield { type: 'file_edit', edit };
         results.set(
           call.id,
           await this.executeToolCall(call, args, {
@@ -574,6 +690,7 @@ export class AgentOrchestrator {
             tools,
             artifacts,
             resultCache,
+            preApproved,
           }),
         );
       }

@@ -53,6 +53,22 @@ interface ChatMsg {
   thought?: string;
   /** 流式工具操作块：每个工具调用一条 */
   tools?: ToolActivity[];
+  /** 本轮消耗的 token 数 */
+  tokens?: number;
+  /** 本轮耗时（毫秒） */
+  durationMs?: number;
+}
+
+interface EditorTab {
+  path: string;
+  content: string;
+  savedContent: string;
+}
+
+interface TabClosePrompt {
+  paths: string[];
+  dirtyPaths: string[];
+  index: number;
 }
 
 function createBackend(mode: AgentMode): {
@@ -73,6 +89,43 @@ function formatElapsed(ms: number): string {
   const min = Math.floor(sec / 60);
   const remainder = Math.floor(sec % 60);
   return `${min}:${remainder.toString().padStart(2, '0')}`;
+}
+
+function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+function fileIconKind(path: string): string {
+  const extension = fileName(path).split('.').pop()?.toLowerCase();
+  if (['tsx', 'jsx'].includes(extension ?? '')) return 'react';
+  if (['ts', 'mts', 'cts'].includes(extension ?? '')) return 'typescript';
+  if (['js', 'mjs', 'cjs'].includes(extension ?? '')) return 'javascript';
+  if (['json', 'jsonc'].includes(extension ?? '')) return 'json';
+  if (['css', 'scss', 'less'].includes(extension ?? '')) return 'style';
+  if (['md', 'mdx'].includes(extension ?? '')) return 'markdown';
+  if (['html', 'htm'].includes(extension ?? '')) return 'html';
+  return 'default';
+}
+
+function fileIconLabel(path: string): string {
+  switch (fileIconKind(path)) {
+    case 'react':
+      return '<>';
+    case 'typescript':
+      return 'TS';
+    case 'javascript':
+      return 'JS';
+    case 'json':
+      return '{}';
+    case 'style':
+      return '#';
+    case 'markdown':
+      return 'M';
+    case 'html':
+      return '5';
+    default:
+      return '·';
+  }
 }
 
 /** 规范化文件路径：去掉前导斜杠/反斜杠，统一正斜杠（AI 入参常带 /） */
@@ -154,8 +207,19 @@ export function App() {
   const [workspaceRoot, setWorkspaceRoot] = useState('');
   const [roots, setRoots] = useState<WorkspaceRootInfo[]>([]);
   const [nodes, setNodes] = useState<WorkspaceNode[]>([]);
+  const [editorTabs, setEditorTabs] = useState<EditorTab[]>([]);
+  const [tabContextMenu, setTabContextMenu] = useState<{
+    x: number;
+    y: number;
+    path: string;
+  } | null>(null);
+  const [tabClosePrompt, setTabClosePrompt] = useState<TabClosePrompt | null>(
+    null,
+  );
+  const [tabCloseSaving, setTabCloseSaving] = useState(false);
+  const [tabCloseError, setTabCloseError] = useState('');
   const [activeFile, setActiveFile] = useState('');
-  const [fileContent, setFileContent] = useState('');
+  const [fileContent, setFileContentState] = useState('');
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [mention, setMention] = useState<{
@@ -178,7 +242,7 @@ export function App() {
   } | null>(null);
   const [runState, setRunState] = useState<string>('idle');
   const [checkpoint, setCheckpoint] = useState<RunCheckpointInfo | null>(null);
-  const [savedContent, setSavedContent] = useState('');
+  const [savedContent, setSavedContentState] = useState('');
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -195,12 +259,38 @@ export function App() {
   const chatRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const editorRef = useRef<CodeEditorHandle | null>(null);
+  const editorTabsRef = useRef(editorTabs);
+  editorTabsRef.current = editorTabs;
+  const tabClosePromptBusyRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   /** 始终指向最新 activeFile，避免事件回调里拿到闭包旧值 */
   const activeFileRef = useRef(activeFile);
   activeFileRef.current = activeFile;
   const genStartRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const openFileRequestRef = useRef(0);
+
+  const setFileContent = (content: string) => {
+    setFileContentState(content);
+    if (activeFile) {
+      setEditorTabs((tabs) =>
+        tabs.map((tab) =>
+          tab.path === activeFile ? { ...tab, content } : tab,
+        ),
+      );
+    }
+  };
+
+  const setSavedContent = (content: string) => {
+    setSavedContentState(content);
+    if (activeFile) {
+      setEditorTabs((tabs) =>
+        tabs.map((tab) =>
+          tab.path === activeFile ? { ...tab, savedContent: content } : tab,
+        ),
+      );
+    }
+  };
 
   // 生成计时：streaming 期间每 100ms 更新一次耗时
   useEffect(() => {
@@ -245,7 +335,9 @@ export function App() {
     backend.transport.abort();
     setMessages([]);
     setActiveFile('');
-    setFileContent('');
+    setFileContentState('');
+    setSavedContentState('');
+    setEditorTabs([]);
     setError('');
     setChanges([]);
     setActiveDiff(null);
@@ -255,6 +347,28 @@ export function App() {
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
   }, [messages, changes]);
+
+  useEffect(() => {
+    if (!tabContextMenu) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest('.editor-tab-context-menu')
+      ) {
+        return;
+      }
+      setTabContextMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setTabContextMenu(null);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [tabContextMenu]);
 
   useEffect(() => {
     localStorage.setItem('editor_sidebar_width', String(sidebarWidth));
@@ -480,8 +594,15 @@ export function App() {
     }
   };
 
-  const askAI = (path: string) => {
-    setInput((v) => `${v}${v && !v.endsWith(' ') ? ' ' : ''}@${path} `);
+  const askAI = (path: string, selection?: string) => {
+    const selectedCode = selection?.trim();
+    const context = selectedCode
+      ? `请帮我分析这段代码：\n${selectedCode}\n\n`
+      : '';
+    setInput((v) => {
+      const separator = v && !v.endsWith('\n') ? '\n' : '';
+      return `${v}${separator}${context}@${path} `;
+    });
     requestAnimationFrame(() => inputRef.current?.focus());
   };
 
@@ -496,8 +617,9 @@ export function App() {
     setRoots([]);
     setNodes([]);
     setActiveFile('');
-    setFileContent('');
-    setSavedContent('');
+    setFileContentState('');
+    setSavedContentState('');
+    setEditorTabs([]);
     setActiveDiff(null);
     setChanges([]);
     setMessages([]);
@@ -505,15 +627,125 @@ export function App() {
   };
 
   const openFile = async (path: string) => {
+    const requestId = ++openFileRequestRef.current;
     try {
       setActiveDiff(null);
-      setActiveFile(path);
+      const existing = editorTabs.find((tab) => tab.path === path);
+      if (existing) {
+        setActiveFile(path);
+        setFileContentState(existing.content);
+        setSavedContentState(existing.savedContent);
+        return;
+      }
+
       const content = await backend.workspace.readFile(path);
-      setFileContent(content);
-      setSavedContent(content);
+      setEditorTabs((tabs) =>
+        tabs.some((tab) => tab.path === path)
+          ? tabs
+          : [...tabs, { path, content, savedContent: content }],
+      );
+      if (requestId === openFileRequestRef.current) {
+        setActiveFile(path);
+        setFileContentState(content);
+        setSavedContentState(content);
+      }
     } catch (e: any) {
       setError(e?.message || String(e));
     }
+  };
+
+  const removeEditorTabs = (paths: string[]) => {
+    const pathsToClose = new Set(paths);
+    const nextTabs = editorTabs.filter((tab) => !pathsToClose.has(tab.path));
+    setEditorTabs(nextTabs);
+    if (!pathsToClose.has(activeFile)) return;
+
+    const closedIndex = editorTabs.findIndex((tab) => tab.path === activeFile);
+    const nextTab = nextTabs[Math.max(0, closedIndex - 1)];
+    setActiveDiff(null);
+    setActiveFile(nextTab?.path ?? '');
+    setFileContentState(nextTab?.content ?? '');
+    setSavedContentState(nextTab?.savedContent ?? '');
+  };
+
+  const requestCloseEditorTabs = (paths: string[]) => {
+    const tabsToClose = editorTabs.filter((tab) => paths.includes(tab.path));
+    if (!tabsToClose.length) return;
+
+    const dirtyPaths = tabsToClose
+      .filter((tab) => tab.content !== tab.savedContent)
+      .map((tab) => tab.path);
+    if (!dirtyPaths.length) {
+      removeEditorTabs(tabsToClose.map((tab) => tab.path));
+      return;
+    }
+
+    setTabCloseError('');
+    setTabClosePrompt({
+      paths: tabsToClose.map((tab) => tab.path),
+      dirtyPaths,
+      index: 0,
+    });
+  };
+
+  const respondToTabClosePrompt = async (
+    choice: 'save' | 'discard' | 'cancel',
+  ) => {
+    const prompt = tabClosePrompt;
+    if (!prompt || tabClosePromptBusyRef.current) return;
+    if (choice === 'cancel') {
+      setTabClosePrompt(null);
+      setTabCloseError('');
+      return;
+    }
+
+    tabClosePromptBusyRef.current = true;
+    setTabCloseSaving(true);
+    try {
+      const path = prompt.dirtyPaths[prompt.index];
+      if (choice === 'save') {
+        const tab = editorTabs.find((item) => item.path === path);
+        if (tab) {
+          if (!backend.workspace.writeFile) {
+            setTabCloseError(`当前工作区不支持保存文件：${path}`);
+            return;
+          }
+          await backend.workspace.writeFile(path, tab.content);
+          setEditorTabs((tabs) =>
+            tabs.map((item) =>
+              item.path === path
+                ? { ...item, savedContent: item.content }
+                : item,
+            ),
+          );
+          if (activeFile === path) setSavedContentState(tab.content);
+        }
+      }
+
+      if (prompt.index + 1 < prompt.dirtyPaths.length) {
+        setTabClosePrompt({ ...prompt, index: prompt.index + 1 });
+      } else {
+        setTabClosePrompt(null);
+        removeEditorTabs(prompt.paths);
+      }
+      setTabCloseError('');
+      setError('');
+    } catch (e: unknown) {
+      setTabCloseError(e instanceof Error ? e.message : String(e));
+    } finally {
+      tabClosePromptBusyRef.current = false;
+      setTabCloseSaving(false);
+    }
+  };
+
+  const selectEditorTab = (path: string) => {
+    openFileRequestRef.current += 1;
+    const tab = editorTabs.find((item) => item.path === path);
+    if (!tab) return;
+    setActiveDiff(null);
+    setActiveFile(path);
+    setFileContentState(tab.content);
+    setSavedContentState(tab.savedContent);
   };
 
   const dirty = Boolean(activeFile) && fileContent !== savedContent;
@@ -569,6 +801,16 @@ export function App() {
     if (ev.type === 'done' && ev.changes) {
       setChanges(ev.changes);
     }
+    if (ev.type === 'done') {
+      const dur = Date.now() - genStartRef.current;
+      setMessages((m) =>
+        m.map((msg) =>
+          msg.id === assistantId
+            ? { ...msg, tokens: ev.tokens, durationMs: dur }
+            : msg,
+        ),
+      );
+    }
     // file_edit：在编辑器里一行一行往下刷（Cline 风格）
     if (ev.type === 'file_edit' && ev.edit) {
       const edit = ev.edit;
@@ -580,11 +822,36 @@ export function App() {
           if (editPath && editPath !== activeFileRef.current) {
             setActiveFile(editPath);
             try {
-              const content = await backend.workspace.readFile(editPath);
-              setFileContent(content);
-              setSavedContent(content);
+              const cachedTab = editorTabsRef.current.find(
+                (tab) => tab.path === editPath,
+              );
+              const content =
+                cachedTab?.content ??
+                (await backend.workspace.readFile(editPath));
+              const saved = cachedTab?.savedContent ?? content;
+              setFileContentState(content);
+              setSavedContentState(saved);
+              setEditorTabs((tabs) => {
+                const existing = tabs.find((tab) => tab.path === editPath);
+                return existing
+                  ? tabs.map((tab) =>
+                      tab.path === editPath
+                        ? { ...tab, content, savedContent: saved }
+                        : tab,
+                    )
+                  : [...tabs, { path: editPath, content, savedContent: saved }];
+              });
             } catch {
-              // 文件可能不存在（新建文件场景）
+              setFileContentState('');
+              setSavedContentState('');
+              setEditorTabs((tabs) =>
+                tabs.some((tab) => tab.path === editPath)
+                  ? tabs
+                  : [
+                      ...tabs,
+                      { path: editPath, content: '', savedContent: '' },
+                    ],
+              );
             }
             // 等 React 重渲染 + Monaco 编辑器重建完成
             await new Promise((r) => setTimeout(r, 250));
@@ -593,7 +860,18 @@ export function App() {
           // 动画结束后同步内容到状态
           if (editPath) {
             const latest = editorRef.current?.getValue() ?? '';
-            setFileContent(latest);
+            setFileContentState(latest);
+            setEditorTabs((tabs) => {
+              const existing = tabs.find((tab) => tab.path === editPath);
+              return existing
+                ? tabs.map((tab) =>
+                    tab.path === editPath ? { ...tab, content: latest } : tab,
+                  )
+                : [
+                    ...tabs,
+                    { path: editPath, content: latest, savedContent: '' },
+                  ];
+            });
           }
         } finally {
           setStreamingEditPath(null);
@@ -944,13 +1222,18 @@ export function App() {
             onAskAI={askAI}
             onRefresh={() => void reload()}
             onDeleted={(path) => {
+              const remainingTabs = editorTabs.filter(
+                (tab) => tab.path !== path && !tab.path.startsWith(path + '/'),
+              );
+              setEditorTabs(remainingTabs);
               if (
                 activeFile === path ||
                 activeFile.startsWith(path + '/')
               ) {
-                setActiveFile('');
-                setFileContent('');
-                setSavedContent('');
+                const nextTab = remainingTabs[0];
+                setActiveFile(nextTab?.path ?? '');
+                setFileContentState(nextTab?.content ?? '');
+                setSavedContentState(nextTab?.savedContent ?? '');
                 setActiveDiff(null);
               }
             }}
@@ -968,32 +1251,158 @@ export function App() {
         ) : null}
 
         <main className="editor">
-          <div className="editor-tab">
-            <span className="editor-tab-label">
-              {activeDiff
-                ? `diff: ${activeDiff.path}`
-                : activeFile || '欢迎'}
-              {dirty ? <span className="dirty-dot"> ●</span> : null}
-            </span>
-            <div className="editor-actions">
-              {activeFile && !activeDiff ? (
-                <button
-                  className="ghost small"
-                  onClick={() => void saveCurrent()}
-                  disabled={!dirty}
-                >
-                  保存
-                </button>
+          <div className="editor-tabbar">
+            <div className="editor-tabs" role="tablist" aria-label="打开的文件">
+              {editorTabs.length ? (
+                editorTabs.map((tab) => {
+                  const isActive = activeFile === tab.path && !activeDiff;
+                  const isDirty = tab.content !== tab.savedContent;
+                  return (
+                    <div
+                      key={tab.path}
+                      className={`editor-tab-item ${isActive ? 'active' : ''}`}
+                      role="presentation"
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        setTabContextMenu({
+                          x: Math.min(event.clientX, window.innerWidth - 180),
+                          y: Math.min(event.clientY, window.innerHeight - 150),
+                          path: tab.path,
+                        });
+                      }}
+                    >
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={isActive}
+                        className="editor-tab-button"
+                        title={tab.path}
+                        onClick={() => selectEditorTab(tab.path)}
+                      >
+                        <span
+                          className={`editor-file-icon editor-file-icon-${fileIconKind(
+                            tab.path,
+                          )}`}
+                          aria-hidden="true"
+                        >
+                          {fileIconLabel(tab.path)}
+                        </span>
+                        <span className="editor-tab-label">
+                          {fileName(tab.path)}
+                        </span>
+                        {isDirty ? (
+                          <span className="editor-tab-dirty" aria-label="未保存">
+                            ●
+                          </span>
+                        ) : null}
+                      </button>
+                      <button
+                        type="button"
+                        className="editor-tab-close"
+                        title={`关闭 ${fileName(tab.path)}`}
+                        aria-label={`关闭 ${tab.path}`}
+                        onClick={() => requestCloseEditorTabs([tab.path])}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                })
+              ) : activeDiff ? (
+                <div className="editor-tab-item active">
+                  <span className="editor-tab-button editor-tab-label">
+                    diff: {fileName(activeDiff.path)}
+                  </span>
+                  <button
+                    type="button"
+                    className="editor-tab-close"
+                    title="关闭对比"
+                    aria-label="关闭对比"
+                    onClick={() => setActiveDiff(null)}
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : (
+                <div className="editor-tab-item active">
+                  <span className="editor-tab-button editor-tab-label">
+                    欢迎
+                  </span>
+                </div>
+              )}
+              {editorTabs.length > 0 && activeDiff ? (
+                <div className="editor-tab-item active">
+                  <span className="editor-tab-button editor-tab-label">
+                    diff: {fileName(activeDiff.path)}
+                  </span>
+                  <button
+                    type="button"
+                    className="editor-tab-close"
+                    title="关闭对比"
+                    aria-label="关闭对比"
+                    onClick={() => setActiveDiff(null)}
+                  >
+                    ×
+                  </button>
+                </div>
               ) : null}
-              {activeDiff ? (
+            </div>
+            {tabContextMenu ? (
+              <div
+                className="context-menu editor-tab-context-menu"
+                style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
+                onMouseDown={(event) => event.stopPropagation()}
+                onContextMenu={(event) => event.preventDefault()}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTabContextMenu(null);
+                    requestCloseEditorTabs([tabContextMenu.path]);
+                  }}
+                >
+                  关闭当前
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTabContextMenu(null);
+                    requestCloseEditorTabs(editorTabs.map((tab) => tab.path));
+                  }}
+                >
+                  关闭所有
+                </button>
+                <div className="context-menu-separator" />
+                <button
+                  type="button"
+                  disabled={
+                    !editorTabs.some(
+                      (tab) => tab.content === tab.savedContent,
+                    )
+                  }
+                  onClick={() => {
+                    setTabContextMenu(null);
+                    requestCloseEditorTabs(
+                      editorTabs
+                        .filter((tab) => tab.content === tab.savedContent)
+                        .map((tab) => tab.path),
+                    );
+                  }}
+                >
+                  关闭已保存
+                </button>
+              </div>
+            ) : null}
+            {activeDiff ? (
+              <div className="editor-actions">
                 <button
                   className="ghost small"
                   onClick={() => setActiveDiff(null)}
                 >
                   关闭对比
                 </button>
-              ) : null}
-            </div>
+              </div>
+            ) : null}
           </div>
           <div className="editor-content">
             {streamingEditPath ? (
@@ -1010,6 +1419,7 @@ export function App() {
                 path={activeFile}
                 value={fileContent}
                 onChange={setFileContent}
+                onAskAI={askAI}
               />
             ) : (
               <Welcome />
@@ -1039,6 +1449,11 @@ export function App() {
             )}
             {messages.map((m) => (
               <div key={m.id} className={`msg msg-${m.role}`}>
+                {m.role === 'assistant' && m.durationMs != null && !streaming ? (
+                  <div className="msg-meta msg-meta-top">
+                    耗时 {formatElapsed(m.durationMs)}
+                  </div>
+                ) : null}
                 {m.thought ? <pre className="thought">{m.thought}</pre> : null}
                 {m.tools?.map((t, i) => (
                   <div key={i} className="tool-activity">
@@ -1064,6 +1479,14 @@ export function App() {
                   </div>
                 ))}
                 <div className="content">{m.content}</div>
+                {m.role === 'assistant' && m.tokens != null && !streaming ? (
+                  <div className="msg-meta msg-meta-bottom">
+                    {m.tokens} tokens
+                    {m.durationMs && m.durationMs > 0
+                      ? ` · ${(m.tokens / (m.durationMs / 1000)).toFixed(0)} tokens/s`
+                      : ''}
+                  </div>
+                ) : null}
               </div>
             ))}
             {streaming ? (
@@ -1202,9 +1625,11 @@ export function App() {
                   >
                     +
                   </button>
-                  <span className="chip">
+                  <span className="chip agent-chip">
                     <span className="chip-dot" />
-                    {mode === 'local' ? '本地 Agent' : '云端 Agent'}
+                    <span className="agent-chip-label">
+                      {mode === 'local' ? '本地 Agent' : '云端 Agent'}
+                    </span>
                   </span>
                   <ModelSelect
                     value={currentModel}
@@ -1213,6 +1638,55 @@ export function App() {
                     onChange={(id) => void updateModel(id)}
                     title="切换模型"
                   />
+                  <button
+                    type="button"
+                    className={`icon-btn approval-toggle ${
+                      config?.approvalMode === 'auto' ? 'is-auto' : 'is-ask'
+                    }`}
+                    title={
+                      config?.approvalMode === 'auto'
+                        ? '当前：自动放行所有工具（点击切换为询问）'
+                        : '当前：写/删/危险命令需确认（点击切换为自动放行）'
+                    }
+                    aria-label={
+                      config?.approvalMode === 'auto'
+                        ? '自动放行审批，点击切换为询问审批'
+                        : '询问审批，点击切换为自动放行'
+                    }
+                    aria-pressed={config?.approvalMode === 'auto'}
+                    onClick={() => {
+                      if (!config) return;
+                      const next: AppConfig = {
+                        ...config,
+                        approvalMode:
+                          config.approvalMode === 'auto' ? 'ask' : 'auto',
+                      };
+                      void saveConfig(next);
+                    }}
+                  >
+                    <svg
+                      className="approval-icon"
+                      viewBox="0 0 20 20"
+                      width="16"
+                      height="16"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M10 2.5 16 5v4.7c0 3.5-2.4 6.1-6 7.8-3.6-1.7-6-4.3-6-7.8V5l6-2.5Z" />
+                      {config?.approvalMode === 'auto' ? (
+                        <path d="m7.2 9.8 1.8 1.8 3.8-4" />
+                      ) : (
+                        <>
+                          <path d="M8.2 7.6a1.9 1.9 0 1 1 3.3 1.3c-.9.9-1.5 1.1-1.5 2.2" />
+                          <path d="M10 13.7h.01" />
+                        </>
+                      )}
+                    </svg>
+                  </button>
                 </div>
                 <div className="composer-right">
                   {streaming ? (
@@ -1246,23 +1720,27 @@ export function App() {
               </div>
             </div>
             <div className="composer-status">
-              <span className="status-brand">AI Editor</span>
-              <span className="status-sep">·</span>
-              <span>{mode === 'local' ? '本地' : '云端'}</span>
-              <span className="status-sep">·</span>
-              <span>
-                {roots.length ? `${roots.length} 个文件夹` : '未选择工作区'}
-              </span>
-              {streaming ? (
-                <>
+              <div className="composer-status-meta">
+                <span className="status-brand">AI Editor</span>
+                <span className="status-sep">·</span>
+                <span>{mode === 'local' ? '本地' : '云端'}</span>
+                <span className="status-sep">·</span>
+                <span>
+                  {roots.length ? `${roots.length} 个文件夹` : '未选择工作区'}
+                </span>
+                {streaming ? (
                   <span className="status-sep">·</span>
+                ) : null}
+                {streaming ? (
                   <span className="status-timer">
                     ⏱ {formatElapsed(elapsedMs)}
                   </span>
-                </>
-              ) : null}
-              <span className="status-spacer" />
-              <span className="muted composer-hint">
+                ) : null}
+              </div>
+              <span
+                className="muted composer-hint"
+                title="Enter 发送 · Shift+Enter 换行 · @ 引用文件"
+              >
                 Enter 发送 · Shift+Enter 换行 · @ 引用文件
               </span>
             </div>
@@ -1285,6 +1763,53 @@ export function App() {
           onClose={() => setSettingsOpen(false)}
           onSave={saveConfig}
         />
+      ) : null}
+
+      {tabClosePrompt ? (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (!tabCloseSaving) void respondToTabClosePrompt('cancel');
+          }}
+        >
+          <div
+            className="modal small"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-title">保存更改？</div>
+            <div className="modal-body">
+              <p className="confirm-message">
+                “{tabClosePrompt.dirtyPaths[tabClosePrompt.index]}”有未保存的更改。
+                要在关闭前保存吗？
+              </p>
+              {tabCloseError ? (
+                <div className="modal-error">⚠️ {tabCloseError}</div>
+              ) : null}
+            </div>
+            <div className="modal-actions">
+              <button
+                className="ghost"
+                disabled={tabCloseSaving}
+                onClick={() => void respondToTabClosePrompt('cancel')}
+              >
+                取消
+              </button>
+              <button
+                className="ghost"
+                disabled={tabCloseSaving}
+                onClick={() => void respondToTabClosePrompt('discard')}
+              >
+                不保存
+              </button>
+              <button
+                disabled={tabCloseSaving}
+                onClick={() => void respondToTabClosePrompt('save')}
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {pendingApproval ? (
