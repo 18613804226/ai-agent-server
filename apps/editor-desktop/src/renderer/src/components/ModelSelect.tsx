@@ -106,7 +106,21 @@ export function ModelSelect({
         title={title}
       >
         <span className="chip-label">{label}</span>
-        <span className="chip-caret">▾</span>
+        <span className="chip-caret">
+          <svg
+            viewBox="0 0 16 16"
+            width="11"
+            height="11"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+          >
+            <path d="m4 6 4 4 4-4" />
+          </svg>
+        </span>
       </button>
       {open && pos
         ? createPortal(

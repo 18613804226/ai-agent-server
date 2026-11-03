@@ -25,6 +25,8 @@ export interface ProviderConfig {
   api: string;
   baseUrl: string;
   apiKeyEnv: string;
+  /** 直接配置的 API Key；优先于 apiKeyEnv 对应的环境变量 */
+  apiKey?: string;
   requiresKey?: boolean;
   models: ModelConfig[];
 }
@@ -83,7 +85,10 @@ export interface ChatEvent {
   result?: string;
   sources?: unknown[];
   model?: string;
+  /** done 事件携带的累计 token（total_tokens，含输入） */
   tokens?: number;
+  /** done 事件携带的生成 token（completion_tokens） */
+  completionTokens?: number;
   /** done 事件携带的本轮文件改动 */
   changes?: FileChange[];
   /** file_edit 事件携带的编辑意图（流式动画用） */
@@ -170,6 +175,8 @@ export interface AgentTransport {
       model?: string;
       history?: ChatHistoryItem[];
       context?: AgentPromptContext;
+      /** 本轮附带的图片（base64 data URL） */
+      images?: string[];
     },
   ): Promise<void>;
   /** 断点续跑：从检查点继续（本地/云端都支持） */

@@ -1,7 +1,6 @@
 import {
     AgentOrchestrator,
     classifyComplexity,
-    formatRoutingThought,
     loadModelCascadeConfig,
     resolveModelCandidates,
     SimpleLock,
@@ -292,6 +291,7 @@ export class LocalAgent {
     signal: AbortSignal,
     history: Array<{ role: 'user' | 'assistant'; content: string }> = [],
     context?: AgentPromptContext,
+    images: string[] = [],
   ): AsyncGenerator<AgentEvent> {
     const agent = this.ensureAgent();
     const orchestrator = this.ensureOrchestrator();
@@ -299,7 +299,7 @@ export class LocalAgent {
 
     const complexity = classifyComplexity({
       userQuery: query,
-      hasImages: false,
+      hasImages: images.length > 0,
     });
     const candidates = resolveModelCandidates(
       complexity,
@@ -307,16 +307,31 @@ export class LocalAgent {
       { zhipuAvailable: orchestrator.zhipuAvailable },
     );
 
-    if (orchestrator.showRoutingThought && candidates.length) {
+    // 编辑器是固定模型（用户在设置里选的），只提示当前使用的模型与循环上限；
+    // 编排器内部的降级提示仍会照常输出。
+    if (candidates.length) {
+      const rounds = agent.maxToolRounds;
       yield {
         type: 'thought',
-        content: formatRoutingThought(
-          complexity,
-          candidates,
-          orchestrator.modelConfig,
-        ),
+        content: `当前模型：${candidates[0].model}${
+          rounds ? ` · 循环上限：${rounds} 轮` : ''
+        }`,
       };
     }
+
+    // 图片以多模态内容随本轮 user 消息发送（历史消息只保留文本）
+    const userMessage: Record<string, unknown> = images.length
+      ? {
+          role: 'user',
+          content: [
+            { type: 'text', text: query },
+            ...images.map((url) => ({
+              type: 'image_url',
+              image_url: { url },
+            })),
+          ],
+        }
+      : { role: 'user', content: query };
 
     const messages: Array<Record<string, unknown>> = [
       {
@@ -326,7 +341,7 @@ export class LocalAgent {
       ...history
         .filter((m) => typeof m.content === 'string' && m.content.trim())
         .slice(-20),
-      { role: 'user', content: query },
+      userMessage,
     ];
 
     this.currentAbort = new AbortController();
@@ -343,6 +358,8 @@ export class LocalAgent {
         complexity,
         verifyAfterTools: agent.verifyAfterTools,
         editToolNames: agent.editToolNames,
+        // 编辑器任务链路长，用 agent 自带的分级循环上限（15 轮）
+        maxToolRounds: agent.maxToolRounds,
         approvalPolicy: agent.approvalPolicy,
         requestApproval: agent.requestApproval,
         signal: runSignal,

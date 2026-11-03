@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { PROVIDER_PRESETS } from '../../../shared/providers';
 import type { ModelConfig, ProviderConfig } from '../mode/types';
+import { SelectMenu } from './SelectMenu';
 
 const EMPTY: ProviderConfig = {
   id: '',
@@ -8,6 +9,7 @@ const EMPTY: ProviderConfig = {
   api: 'openai-compatible',
   baseUrl: '',
   apiKeyEnv: '',
+  apiKey: '',
   models: [],
 };
 
@@ -78,7 +80,12 @@ export function ProviderModal({
         models: ids.map((id) => ({ id, name: id })),
       }));
     } catch (e: any) {
-      setError(e?.message || String(e));
+      // Electron IPC 错误会带 "Error invoking remote method 'xxx': " 前缀，去掉更直观
+      const msg = String(e?.message || e).replace(
+        /^Error invoking remote method '[^']+':\s*/,
+        '',
+      );
+      setError(`获取模型失败：${msg}`);
     } finally {
       setFetching(false);
     }
@@ -98,8 +105,9 @@ export function ProviderModal({
       setError('基础 URL 不能为空');
       return;
     }
-    if (!draft.apiKeyEnv.trim()) {
-      setError('API Key 环境变量不能为空');
+    const directKey = (draft.apiKey ?? '').trim();
+    if (!directKey && !draft.apiKeyEnv.trim()) {
+      setError('请填写 API Key 或 API Key 环境变量');
       return;
     }
     const models = draft.models
@@ -122,6 +130,7 @@ export function ProviderModal({
         name: draft.name.trim(),
         baseUrl: draft.baseUrl.trim(),
         apiKeyEnv: draft.apiKeyEnv.trim(),
+        apiKey: directKey || undefined,
         models,
       });
       onClose();
@@ -133,10 +142,30 @@ export function ProviderModal({
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop">
       <div className="modal wide" onClick={(e) => e.stopPropagation()}>
         <div className="modal-title">
-          {provider ? '编辑提供商' : '添加提供商'}
+          <span>{provider ? '编辑提供商' : '添加提供商'}</span>
+          <button
+            type="button"
+            className="modal-close"
+            onClick={onClose}
+            aria-label="关闭"
+            title="关闭"
+          >
+            <svg
+              viewBox="0 0 16 16"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              aria-hidden
+            >
+              <path d="m4 4 8 8m0-8-8 8" />
+            </svg>
+          </button>
         </div>
         <div className="modal-body">
           <label className="field">
@@ -158,19 +187,17 @@ export function ProviderModal({
           </label>
           <label className="field">
             Provider API
-            <select
+            <SelectMenu
               value={draft.api}
-              onChange={(e) => applyPreset(e.target.value)}
-            >
-              {!PROVIDER_PRESETS.some((p) => p.id === draft.api) ? (
-                <option value={draft.api}>{draft.api || '选择预设'}</option>
-              ) : null}
-              {PROVIDER_PRESETS.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
+              options={[
+                ...(!PROVIDER_PRESETS.some((p) => p.id === draft.api) && draft.api
+                  ? [{ value: draft.api, label: draft.api }]
+                  : []),
+                ...PROVIDER_PRESETS.map((p) => ({ value: p.id, label: p.label })),
+              ]}
+              onChange={applyPreset}
+              placeholder="选择预设"
+            />
           </label>
           <label className="field">
             基础 URL
@@ -181,14 +208,29 @@ export function ProviderModal({
             />
           </label>
           <label className="field">
-            API Key 环境变量
+            API Key
+            <input
+              value={draft.apiKey ?? ''}
+              onChange={(e) => update({ apiKey: e.target.value })}
+              placeholder="直接填 key（会保存到本地配置）"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <span className="hint">
+              填了这里就直接用；留空则从下方环境变量读取
+            </span>
+          </label>
+          <label className="field">
+            API Key 环境变量（可选）
             <input
               value={draft.apiKeyEnv}
               onChange={(e) => update({ apiKeyEnv: e.target.value })}
               placeholder="OPENAI_API_KEY"
             />
             <span className="hint">
-              key 不写入配置，运行时从该环境变量读取
+              环境变量名（如 <code>OPENAI_API_KEY</code>）；上面填了 API Key
+              时可留空，也可在 <code> apps/editor-desktop/.env </code>{' '}
+              里配置（修改后需重启应用）
               {draft.requiresKey === false ? '（本地服务可留空）' : ''}
             </span>
           </label>

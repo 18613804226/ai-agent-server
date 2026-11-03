@@ -54,6 +54,7 @@ export class RemoteTransport implements AgentTransport {
         activeContent?: string;
         selection?: string;
       };
+      images?: string[];
     },
   ): Promise<void> {
     const sessionId = await this.ensureSession();
@@ -113,6 +114,7 @@ export class RemoteTransport implements AgentTransport {
         workspaceRoots: roots.map((r) => r.path),
         workspaceSummary,
         context: options?.context,
+        images: options?.images,
       },
     );
   }

@@ -420,6 +420,8 @@ export class AgentOrchestrator {
     let chain = input.candidates ?? this.deriveCandidates(input);
     let usedModel = '';
     let usedTokens = 0;
+    // 生成 token（completion_tokens），用于计算真实生成速度
+    let usedCompletionTokens = 0;
     // tool_call / tool_result 的序号：跨轮递增，保证 UI 能唯一匹配
     //（每轮都从 0 开始的话，下一轮的 result 会覆盖上一轮同序号的工具）
     let toolCallSeq = 0;
@@ -502,6 +504,7 @@ export class AgentOrchestrator {
           const chunkUsage = (chunk as any).usage;
           if (chunkUsage?.total_tokens) {
             usedTokens += chunkUsage.total_tokens;
+            usedCompletionTokens += chunkUsage.completion_tokens ?? 0;
           }
 
           const chunkFinishReason = (chunk as any).choices?.[0]?.finish_reason;
@@ -780,6 +783,7 @@ export class AgentOrchestrator {
       type: 'done',
       model: usedModel,
       tokens: usedTokens,
+      completionTokens: usedCompletionTokens,
       fullReply,
       finishReason: lastFinishReason,
       truncated: lastFinishReason === 'length',

@@ -447,8 +447,10 @@ export function formatRoutingThought(
   complexity: Complexity,
   candidates: ModelCandidate[],
   config: ModelCascadeConfig,
+  /** 场景标签：编辑器传「Agent 任务」，替代默认的「常规任务」（仅简单档） */
+  sceneLabel?: string,
 ): string {
-  const tierText =
+  const defaultTierText =
     complexity.tier === 'vision'
       ? '多模态输入'
       : complexity.complexity === 'expert'
@@ -456,6 +458,12 @@ export function formatRoutingThought(
         : complexity.complexity === 'complex'
           ? '复杂任务'
           : '常规任务';
+  const tierText =
+    sceneLabel &&
+    complexity.tier !== 'vision' &&
+    complexity.complexity === 'simple'
+      ? sceneLabel
+      : defaultTierText;
   const backups = candidates
     .slice(1)
     .map((c) => c.model)

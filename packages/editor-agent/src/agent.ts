@@ -84,5 +84,8 @@ export function createEditorAgent(
       buildEditorSystemPrompt(roots, undefined, input?.context),
     verifyAfterTools: verifier ?? undefined,
     editToolNames: DEFAULT_EDIT_TOOL_NAMES,
+    // 编辑器任务（读文件 → 改 → 验证 → 再改…）链路长，给足循环轮数；
+    // 问答 demo 不走 agent 定义，仍由 chat.service 显式限制为 4 轮。
+    maxToolRounds: 15,
   };
 }

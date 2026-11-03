@@ -25,6 +25,8 @@ export interface AgentRunInput {
   disableAutoVerify?: boolean;
   /** 编辑器上下文（active file / 选区） */
   context?: AgentPromptContext;
+  /** 本轮附带的图片（base64 data URL） */
+  images?: string[];
 }
 
 /**
@@ -40,6 +42,20 @@ export class AgentRunner {
     agent: AgentDefinition,
     input: AgentRunInput,
   ): AsyncGenerator<AgentEvent> {
+    // 图片以多模态内容随本轮 user 消息发送（历史消息只保留文本）
+    const userMessage: Record<string, unknown> = input.images?.length
+      ? {
+          role: 'user',
+          content: [
+            { type: 'text', text: input.query },
+            ...input.images.map((url) => ({
+              type: 'image_url',
+              image_url: { url },
+            })),
+          ],
+        }
+      : { role: 'user', content: input.query };
+
     const messages: Array<Record<string, unknown>> = [
       {
         role: 'system',
@@ -51,12 +67,12 @@ export class AgentRunner {
           }),
       },
       ...(input.history ?? []),
-      { role: 'user', content: input.query },
+      userMessage,
     ];
 
     const complexity = classifyComplexity({
       userQuery: input.query,
-      hasImages: false,
+      hasImages: Boolean(input.images?.length),
     });
     const candidates = input.modelOverride
       ? [
@@ -69,7 +85,17 @@ export class AgentRunner {
           zhipuAvailable: this.orchestrator.zhipuAvailable,
         });
 
-    if (this.orchestrator.showRoutingThought && candidates.length) {
+    // 编辑器是固定模型（用户选定），只提示当前使用的模型与循环上限；
+    // 其他 agent（如问答）保留完整的模型选择路由思考。
+    if (candidates.length && agent.id === 'editor') {
+      const rounds = agent.maxToolRounds;
+      yield {
+        type: 'thought',
+        content: `当前模型：${candidates[0].model}${
+          rounds ? ` · 循环上限：${rounds} 轮` : ''
+        }`,
+      };
+    } else if (this.orchestrator.showRoutingThought && candidates.length) {
       yield {
         type: 'thought',
         content: formatRoutingThought(
@@ -90,6 +116,8 @@ export class AgentRunner {
         ? undefined
         : agent.verifyAfterTools,
       editToolNames: agent.editToolNames,
+      // agent 自带有分级循环上限（编辑器 15 轮），未配置时用编排器默认值
+      maxToolRounds: agent.maxToolRounds,
       approvalPolicy: agent.approvalPolicy,
       requestApproval: agent.requestApproval,
       signal: input.signal,

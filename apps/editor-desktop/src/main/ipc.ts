@@ -1,5 +1,6 @@
-import { BrowserWindow, dialog, ipcMain } from 'electron';
-import { basename, resolve } from 'path';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { basename, dirname, join, resolve } from 'path';
 import {
   buildWorkspaceTree,
   createWorkspaceDirectory,
@@ -62,7 +63,9 @@ export function registerIpc(): void {
         name: p.name,
         apiKeyEnv: p.apiKeyEnv,
         hasKey:
-          p.requiresKey === false || Boolean(process.env[p.apiKeyEnv]),
+          p.requiresKey === false ||
+          Boolean(p.apiKey?.trim()) ||
+          Boolean(process.env[p.apiKeyEnv]),
         models: p.models,
       })),
     };
@@ -71,9 +74,10 @@ export function registerIpc(): void {
   ipcMain.handle(
     'providers:fetchModels',
     async (_event, provider: ProviderConfig) => {
-      const apiKey = process.env[provider.apiKeyEnv] || '';
+      const apiKey =
+        provider.apiKey?.trim() || process.env[provider.apiKeyEnv] || '';
       if (!apiKey) {
-        throw new Error(`未配置环境变量 ${provider.apiKeyEnv}`);
+        throw new Error('请填写 API Key 或配置对应环境变量');
       }
       const res = await fetch(
         `${provider.baseUrl.replace(/\/+$/, '')}/models`,
@@ -176,45 +180,59 @@ export function registerIpc(): void {
 
   ipcMain.handle('terminal:cwd', () => terminalCwd || getAgent().root || '');
 
-  ipcMain.handle('terminal:run', async (_event, command: string) => {
-    const root = getAgent().root;
-    if (!root) throw new Error('请先打开文件夹');
-    if (!terminalCwd) terminalCwd = root;
-    const cmd = String(command ?? '').trim();
-    if (!cmd) return { output: '', cwd: terminalCwd };
-    if (cmd === 'clear' || cmd === 'cls') {
-      return { output: '', cwd: terminalCwd, clear: true };
-    }
-    if (cmd === 'cd' || cmd.startsWith('cd ')) {
-      const arg =
-        cmd.slice(2).trim().replace(/^["']|["']$/g, '') || root;
-      const target = resolve(terminalCwd, arg);
-      const roots = getAgent().roots;
-      if (!roots.some((r) => target === r || target.startsWith(r))) {
-        return { output: '拒绝：不能离开工作区', cwd: terminalCwd };
+  ipcMain.handle(
+    'terminal:run',
+    async (
+      _event,
+      payload: { cmd: string; cwd?: string; profile?: string },
+    ) => {
+      const root = getAgent().root;
+      if (!root) throw new Error('请先打开文件夹');
+      // 每个终端标签自带 cwd；未传时回退到全局最后目录
+      const cwd = payload.cwd || terminalCwd || root;
+      const cmd = String(payload.cmd ?? '').trim();
+      if (!cmd) return { output: '', cwd };
+      if (cmd === 'clear' || cmd === 'cls') {
+        return { output: '', cwd, clear: true };
       }
-      terminalCwd = target;
-      return { output: '', cwd: terminalCwd };
-    }
-    try {
-      const { stdout, stderr } = await execAsync(cmd, {
-        cwd: terminalCwd,
-        timeout: 60000,
-        maxBuffer: 2 * 1024 * 1024,
-        windowsHide: true,
-        encoding: 'buffer',
-      });
-      return {
-        output: decodeProcOutput(stdout, stderr),
-        cwd: terminalCwd,
-      };
-    } catch (e: any) {
-      return {
-        output: `${decodeProcOutput(e.stdout, e.stderr)}${e.message || ''}`,
-        cwd: terminalCwd,
-      };
-    }
-  });
+      if (cmd === 'cd' || cmd.startsWith('cd ')) {
+        const arg =
+          cmd.slice(2).trim().replace(/^["']|["']$/g, '') || root;
+        const target = resolve(cwd, arg);
+        const roots = getAgent().roots;
+        if (!roots.some((r) => target === r || target.startsWith(r))) {
+          return { output: '拒绝：不能离开工作区', cwd };
+        }
+        return { output: '', cwd: target };
+      }
+      // 根据终端类型选择 shell 执行
+      const profile = payload.profile || 'cmd';
+      let execCmd = cmd;
+      if (profile === 'powershell') {
+        execCmd = `powershell.exe -NoProfile -Command "${cmd.replace(/"/g, '\\"')}"`;
+      } else if (profile === 'gitbash') {
+        execCmd = `bash.exe -c "${cmd.replace(/"/g, '\\"')}"`;
+      }
+      try {
+        const { stdout, stderr } = await execAsync(execCmd, {
+          cwd,
+          timeout: 60000,
+          maxBuffer: 2 * 1024 * 1024,
+          windowsHide: true,
+          encoding: 'buffer',
+        });
+        return {
+          output: decodeProcOutput(stdout, stderr),
+          cwd,
+        };
+      } catch (e: any) {
+        return {
+          output: `${decodeProcOutput(e.stdout, e.stderr)}${e.message || ''}`,
+          cwd,
+        };
+      }
+    },
+  );
 
   ipcMain.handle(
     'agent:run',
@@ -228,6 +246,7 @@ export function registerIpc(): void {
           activeContent?: string;
           selection?: string;
         };
+        images?: string[];
       },
     ) => {
     controller?.abort();
@@ -244,6 +263,7 @@ export function registerIpc(): void {
         signal,
         payload.history,
         payload.context,
+        payload.images,
       )) {
         if (event.sender.isDestroyed()) break;
         event.sender.send('agent:event', ev);
@@ -318,5 +338,22 @@ export function registerIpc(): void {
       agent.setEventSink(null);
     }
     return agent.getState();
+  });
+
+  // 聊天会话持久化：写入 userData/chat-sessions.json
+  ipcMain.handle('chat:getSessions', () => {
+    const file = join(app.getPath('userData'), 'chat-sessions.json');
+    if (!existsSync(file)) return null;
+    try {
+      return JSON.parse(readFileSync(file, 'utf8'));
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle('chat:saveSessions', (_event, sessions: unknown) => {
+    const file = join(app.getPath('userData'), 'chat-sessions.json');
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(sessions), 'utf8');
   });
 }

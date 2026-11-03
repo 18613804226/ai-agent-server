@@ -84,8 +84,10 @@ const api = {
     cwd: (): Promise<string> => ipcRenderer.invoke('terminal:cwd'),
     run: (
       command: string,
+      cwd?: string,
+      profile?: string,
     ): Promise<{ output: string; cwd: string; clear?: boolean }> =>
-      ipcRenderer.invoke('terminal:run', command),
+      ipcRenderer.invoke('terminal:run', { cmd: command, cwd, profile }),
   },
   agent: {
     run: (
@@ -96,8 +98,9 @@ const api = {
         activeContent?: string;
         selection?: string;
       },
+      images?: string[],
     ): Promise<void> =>
-      ipcRenderer.invoke('agent:run', { query, history, context }),
+      ipcRenderer.invoke('agent:run', { query, history, context, images }),
     execTool: (
       name: string,
       args: Record<string, unknown>,
@@ -125,6 +128,12 @@ const api = {
       ipcRenderer.on('agent:event', listener);
       return () => ipcRenderer.removeListener('agent:event', listener);
     },
+  },
+  chat: {
+    getSessions: (): Promise<unknown> =>
+      ipcRenderer.invoke('chat:getSessions'),
+    saveSessions: (sessions: unknown): Promise<void> =>
+      ipcRenderer.invoke('chat:saveSessions', sessions),
   },
 };
 

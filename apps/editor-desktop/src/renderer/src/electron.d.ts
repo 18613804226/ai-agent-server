@@ -67,6 +67,8 @@ declare global {
         cwd(): Promise<string>;
         run(
           command: string,
+          cwd?: string,
+          profile?: string,
         ): Promise<{ output: string; cwd: string; clear?: boolean }>;
       };
       agent: {
@@ -78,6 +80,7 @@ declare global {
             activeContent?: string;
             selection?: string;
           },
+          images?: string[],
         ): Promise<void>;
         execTool(
           name: string,
@@ -101,6 +104,10 @@ declare global {
         cancel(): Promise<RunStateInfo>;
         resume(): Promise<RunStateInfo>;
         onEvent(cb: (ev: ChatEvent) => void): () => void;
+      };
+      chat: {
+        getSessions(): Promise<unknown>;
+        saveSessions(sessions: unknown): Promise<void>;
       };
     };
   }

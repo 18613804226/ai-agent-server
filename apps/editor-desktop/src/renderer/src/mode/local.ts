@@ -21,6 +21,7 @@ export class LocalTransport implements AgentTransport {
       model?: string;
       history?: ChatHistoryItem[];
       context?: AgentPromptContext;
+      images?: string[];
     },
   ): Promise<void> {
     this.unsubscribe?.();
@@ -34,6 +35,7 @@ export class LocalTransport implements AgentTransport {
         query,
         options?.history,
         options?.context,
+        options?.images,
       );
     } finally {
       signal?.removeEventListener('abort', onAbort);

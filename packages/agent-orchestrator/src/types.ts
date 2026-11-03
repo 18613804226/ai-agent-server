@@ -123,6 +123,12 @@ export interface AgentDefinition {
   verifyAfterTools?: VerifyHook;
   /** 触发自动验证的编辑类工具名 */
   editToolNames?: string[];
+  /**
+   * 该 agent 的工具循环轮数上限（含最终回答轮）。
+   * 不传则用编排器默认值。编辑器任务链路长，通常要 15 轮左右；
+   * 问答类场景轮数应更小，由调用方显式传 maxToolRounds 覆盖。
+   */
+  maxToolRounds?: number;
   /** 工具审批策略；未配置默认 allow */
   approvalPolicy?: ApprovalPolicy;
   /** 审批钩子；policy 为 ask 但未配置时按拒绝处理 */
@@ -194,8 +200,10 @@ export interface AgentEvent {
   index?: number;
   /** done 事件携带的实际模型 */
   model?: string;
-  /** done 事件携带的累计 token */
+  /** done 事件携带的累计 token（total_tokens，含输入） */
   tokens?: number;
+  /** done 事件携带的生成 token（completion_tokens），用于计算真实生成速度 */
+  completionTokens?: number;
   /** done 事件携带的最终回答（已清理 <think>/<tool_call> 标签） */
   fullReply?: string;
   /** 最后一轮的 finish_reason（stop / length / tool_calls / content_filter 等） */

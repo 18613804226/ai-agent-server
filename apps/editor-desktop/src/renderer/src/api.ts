@@ -136,6 +136,8 @@ export async function streamChatWithTools(
       selection?: string;
     };
     resume?: boolean;
+    /** 本轮附带的图片（base64 data URL） */
+    images?: string[];
   } = {},
 ): Promise<void> {
   const res = await fetch(
@@ -157,6 +159,7 @@ export async function streamChatWithTools(
           ? { context: options.context }
           : {}),
         ...(options.resume ? { resume: true } : {}),
+        ...(options.images?.length ? { images: options.images } : {}),
       }),
       signal: options.signal,
     },

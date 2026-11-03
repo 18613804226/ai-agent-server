@@ -16,8 +16,10 @@ export interface ProviderConfig {
   /** 预设 id（openai / deepseek / zhipu / ollama ...），仅作标识 */
   api: string;
   baseUrl: string;
-  /** 从哪个环境变量读 API Key（不把 key 存进配置文件） */
+  /** 从哪个环境变量读 API Key（apiKey 为空时回退） */
   apiKeyEnv: string;
+  /** 直接配置的 API Key，优先于环境变量；会保存到本地配置文件 */
+  apiKey?: string;
   /** false = 本地服务，不需要 key（如 Ollama） */
   requiresKey?: boolean;
   models: ModelConfig[];

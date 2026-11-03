@@ -10,7 +10,9 @@ export interface ResolvedModel {
 /** 判断某个提供商是否配置了 key（本地服务可不需要 key） */
 export function providerHasKey(provider: ProviderConfig): boolean {
   return (
-    provider.requiresKey === false || Boolean(process.env[provider.apiKeyEnv])
+    provider.requiresKey === false ||
+    Boolean(provider.apiKey?.trim()) ||
+    Boolean(process.env[provider.apiKeyEnv])
   );
 }
 
@@ -30,11 +32,12 @@ export function resolveModel(
   }
   const model = provider.models.find((m) => m.id === modelId)!;
   const apiKey =
+    provider.apiKey?.trim() ||
     process.env[provider.apiKeyEnv] ||
     (provider.requiresKey === false ? 'no-key' : '');
   if (!apiKey) {
     throw new Error(
-      `提供商「${provider.name}」未配置环境变量 ${provider.apiKeyEnv}`,
+      `未配置环境变量 ${provider.apiKeyEnv}，请在 apps/editor-desktop/.env 中配置后重启应用`,
     );
   }
   return {

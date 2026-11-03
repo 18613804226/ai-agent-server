@@ -54,9 +54,31 @@ export function SettingsModal({
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop">
       <div className="modal wide" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-title">设置</div>
+        <div className="modal-title">
+          <span>设置</span>
+          <button
+            type="button"
+            className="modal-close"
+            onClick={onClose}
+            aria-label="关闭"
+            title="关闭"
+          >
+            <svg
+              viewBox="0 0 16 16"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              aria-hidden
+            >
+              <path d="m4 4 8 8m0-8-8 8" />
+            </svg>
+          </button>
+        </div>
         <div className="modal-body">
           <section className="settings-section">
             <div className="section-head">
@@ -109,11 +131,9 @@ export function SettingsModal({
             )}
 
             <p className="hint">
-              API Key 从环境变量读取，不写进配置文件。在
+              API Key 可直接填在提供商里（会保存到本地配置文件），也可只填环境变量名，从
               <code> apps/editor-desktop/.env </code>
-              里配置（参考 <code>.env.example</code>），或启动 Electron
-              前设置环境变量；修改后需重启应用。未配置 key 的提供商不会出现在模型
-              选择里。
+              读取（修改后需重启应用）。未配置 key 的提供商不会出现在模型选择里。
             </p>
             <p className="hint">
               默认只内置免费模型 <code>{DEFAULT_MODEL_ID}</code>；通义/付费模型不预置，

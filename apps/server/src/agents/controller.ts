@@ -83,6 +83,8 @@ export class AgentController {
         selection?: string;
       };
       resume?: boolean;
+      /** 本轮附带的图片（base64 data URL） */
+      images?: string[];
     },
     @Res({ passthrough: true }) res: Response,
   ): Promise<Observable<MessageEvent>> {
@@ -176,6 +178,7 @@ export class AgentController {
             // 云端代理模式：工具在客户端执行，自动验证也必须由客户端发起
             disableAutoVerify: localTools,
             context: body.context,
+            images: body.images,
           })) {
             switch (ev.type) {
               case 'thought':
