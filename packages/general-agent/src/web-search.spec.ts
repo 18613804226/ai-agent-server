@@ -24,6 +24,7 @@ describe('isLiveInfoQuery', () => {
     '李二毛',
     '特朗普',
     'iPhone 16',
+    '《三体》',
   ])('识别实时查询：%s', (query) => {
     expect(isLiveInfoQuery(query)).toBe(true);
   });
@@ -37,6 +38,12 @@ describe('isLiveInfoQuery', () => {
     '再见',
     '帮我写一首诗',
     '今天天气怎么样',
+    '好吧',
+    '好吧。',
+    '行吧',
+    '嗯嗯',
+    '好嘞',
+    '哈哈哈',
   ])('不将一般查询识别为实时查询：%s', (query) => {
     expect(isLiveInfoQuery(query)).toBe(false);
   });

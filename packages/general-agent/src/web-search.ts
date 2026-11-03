@@ -28,16 +28,27 @@ export const isLiveInfoQuery = (query: string): boolean => {
   ) {
     return true;
   }
-  // 短查询兜底：≤ 20 字且不是常见闲聊/身份/疑问句，按「搜某人/某事」处理
+  // 短查询兜底：默认不搜，只有「像实体/术语」的短输入才按实时查询处理。
+  // 正向信号：含数字/字母/书名号（型号、榜单、作品名），或 2-6 个汉字。
+  // 反向过滤：命中问候/确认/请求句式，或含句法成分（语气词、代词、疑问词、能愿动词等），
+  //          说明它是一句话而不是一个词，交给普通对话/工具链处理。
+  // 这样「好吧」「行吧」「哈哈哈」不会被当成搜索，而「特朗普」「李二毛」「iPhone 16」仍会命中。
   if (trimmed.length > 0 && trimmed.length <= 20) {
-  const nonSearch =
-    /^(你好|您好|hi|hello|早上好|晚上好|下午好|谢谢|再见|拜拜|好的|是的|不是|嗯|啊|哦|你是)/i.test(
-      trimmed,
-    ) ||
-    /怎么|为什么|如何|是什么|什么是|解释|吗$|呢$|？|\?|天气/.test(trimmed) ||
-    /^(帮我|请|麻烦|能否|可以|给我|帮我写|帮我做|帮我总结)/.test(trimmed) ||
-    /的|了|一个|一下|等|们|在|是|有|个/.test(trimmed);
-    if (!nonSearch) return true;
+    const looksLikeEntity =
+      /[0-9A-Za-z]/.test(trimmed) ||
+      /[《「『“《]/.test(trimmed) ||
+      /^[\u4e00-\u9fa5]{2,6}[。.!！?？]?$/.test(trimmed);
+    if (!looksLikeEntity) return false;
+    const isUtterance =
+      /^(你好|您好|hi|hello|早上好|晚上好|下午好|谢谢|再见|拜拜|好的|好吧|好嘞|好滴|行吧|行啊|嗯嗯|嗯啊|是的|不是|嗯|啊|哦|你是)/i.test(
+        trimmed,
+      ) ||
+      /怎么|为什么|如何|是什么|什么是|解释|吗$|呢$|？|\?|天气/.test(trimmed) ||
+      /^(帮我|请|麻烦|能否|可以|给我|帮我写|帮我做|帮我总结)/.test(trimmed) ||
+      /的|了|吗|呢|吧|啊|嗯|哦|啦|呀|嘛|呗|哇|哈|嘞|咯|是|在|有|我|你|他|她|它|们|这|那|哪|谁|什么|怎么|为什么|如何|多少|几|个|一下|请问|告诉|介绍|认为|觉得|知道|想|要|会|能|可以|帮|请/.test(
+        trimmed,
+      );
+    if (!isUtterance) return true;
   }
   return false;
 };

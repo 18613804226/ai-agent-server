@@ -1,11 +1,11 @@
 import { BrowserWindow, dialog, ipcMain } from 'electron';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import { basename, resolve } from 'path';
 import {
   buildWorkspaceTree,
   createWorkspaceDirectory,
+  decodeProcOutput,
   deleteWorkspacePath,
+  execAsync,
   readWorkspaceFile,
   renameWorkspacePath,
   writeWorkspaceFile,
@@ -17,8 +17,6 @@ import {
   type AppConfig,
   type ProviderConfig,
 } from './config.js';
-
-const execAsync = promisify(exec);
 
 let localAgent: LocalAgent | null = null;
 let controller: AbortController | null = null;
@@ -204,11 +202,15 @@ export function registerIpc(): void {
         timeout: 60000,
         maxBuffer: 2 * 1024 * 1024,
         windowsHide: true,
+        encoding: 'buffer',
       });
-      return { output: `${stdout || ''}${stderr || ''}`, cwd: terminalCwd };
+      return {
+        output: decodeProcOutput(stdout, stderr),
+        cwd: terminalCwd,
+      };
     } catch (e: any) {
       return {
-        output: `${e.stdout || ''}${e.stderr || ''}${e.message || ''}`,
+        output: `${decodeProcOutput(e.stdout, e.stderr)}${e.message || ''}`,
         cwd: terminalCwd,
       };
     }

@@ -136,6 +136,64 @@ describe('AgentOrchestrator.run', () => {
     expect(create).toHaveBeenCalledTimes(2);
   });
 
+  it('多轮工具调用：tool_call / tool_result 序号跨轮唯一', async () => {
+    const toolDelta = (id: string) => ({
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id,
+                type: 'function',
+                function: { name: 'calculator', arguments: '{}' },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    // 两轮各调一次工具（模型侧 delta.index 都从 0 开始），最后一轮出答案
+    const { client, create } = fakeClient([
+      [toolDelta('call_1')],
+      [toolDelta('call_2')],
+      [{ choices: [{ delta: { content: '完成' } }] }],
+    ]);
+    const tools: RegisteredTool[] = [
+      {
+        definition: {
+          type: 'function',
+          function: {
+            name: 'calculator',
+            description: '计算器',
+            parameters: { type: 'object', properties: {} },
+          },
+        },
+        handler: () => 'ok',
+      },
+    ];
+    const orch = new AgentOrchestrator(
+      config({ getClient: () => client }),
+    );
+
+    const events = await collect(orch, {
+      messages: [],
+      tools,
+      candidates: [dashscope('qwen')],
+    });
+
+    const calls = events.filter((e) => e.type === 'tool_call');
+    const results = events.filter((e) => e.type === 'tool_result');
+    // 序号跨轮递增，而不是每轮都从 0 重来
+    expect(calls.map((e) => e.index)).toEqual([0, 1]);
+    expect(results.map((e) => e.index)).toEqual([0, 1]);
+    // 每个 result 都唯一对应一个 call，UI 才不会互相覆盖
+    for (const r of results) {
+      expect(calls.filter((c) => c.index === r.index)).toHaveLength(1);
+    }
+    expect(create).toHaveBeenCalledTimes(3);
+  });
+
   it('拒答守卫：glm 拒答 → 换 qwen 重试，用户看不到拒答', async () => {
     const { client: zhipu } = fakeClient([
       [{ choices: [{ delta: { content: '很抱歉，我无法直接访问或阅读您上传的附件内容。' } }] }],

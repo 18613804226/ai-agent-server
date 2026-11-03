@@ -1,11 +1,8 @@
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { VerifyHook } from '@repo/agent-orchestrator';
+import { decodeProcOutput, execAsync } from './exec.js';
 import { normalizeRoots, type WorkspaceRootsInput } from './tools.js';
-
-const execAsync = promisify(exec);
 
 export const DEFAULT_VERIFY_SCRIPTS = ['typecheck', 'lint'];
 
@@ -234,11 +231,12 @@ export function createVerifier(
             timeout: timeoutMs,
             maxBuffer: 4 * 1024 * 1024,
             windowsHide: true,
+            encoding: 'buffer',
             signal: signal as any,
           });
           results.push(`✅ ${root.name} npm run ${script} 通过`);
         } catch (error: any) {
-          const output = `${error.stdout || ''}${error.stderr || ''}`.trim();
+          const output = decodeProcOutput(error.stdout, error.stderr).trim();
           const diagnostics = parseDiagnostics(output, script);
           if (diagnostics.length) {
             results.push(

@@ -420,6 +420,9 @@ export class AgentOrchestrator {
     let chain = input.candidates ?? this.deriveCandidates(input);
     let usedModel = '';
     let usedTokens = 0;
+    // tool_call / tool_result 的序号：跨轮递增，保证 UI 能唯一匹配
+    //（每轮都从 0 开始的话，下一轮的 result 会覆盖上一轮同序号的工具）
+    let toolCallSeq = 0;
     let rawFullReply = '';
     let refusalRetried = false;
     let lastFinishReason: string | undefined;
@@ -631,13 +634,14 @@ export class AgentOrchestrator {
         )?.readOnly === true;
 
       // 1. 先吐所有 tool_call，UI 立刻展示本轮要调哪些工具
+      const roundToolStartIndex = toolCallSeq;
       for (let index = 0; index < toolCalls.length; index++) {
         const call = toolCalls[index];
         yield {
           type: 'tool_call',
           name: call.function.name,
           args: parseArgs(call),
-          index,
+          index: toolCallSeq++,
         };
       }
 
@@ -714,7 +718,7 @@ export class AgentOrchestrator {
         }),
       );
 
-      // 4. 按原始顺序回填 tool_result 与消息
+      // 4. 按原始顺序回填 tool_result 与消息（序号与步骤 1 的 tool_call 一一对应）
       for (let index = 0; index < toolCalls.length; index++) {
         const call = toolCalls[index];
         const result = results.get(call.id) ?? '工具未执行';
@@ -722,7 +726,7 @@ export class AgentOrchestrator {
           type: 'tool_result',
           name: call.function.name,
           result,
-          index,
+          index: roundToolStartIndex + index,
         };
         messages.push({
           tool_call_id: call.id,

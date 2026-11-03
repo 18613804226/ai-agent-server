@@ -194,6 +194,9 @@ export class AgentController {
                     type: 'tool_call',
                     name: ev.name,
                     args: ev.args,
+                    // ⚠️ 必须带上序号：UI 按 index 匹配 tool_result，
+                    //    丢掉后所有工具结果会互相覆盖（多轮调用时尤其明显）
+                    index: ev.index,
                   },
                 } as MessageEvent);
                 break;
@@ -203,6 +206,7 @@ export class AgentController {
                     type: 'tool_result',
                     name: ev.name,
                     result: ev.result,
+                    index: ev.index,
                   },
                 } as MessageEvent);
                 break;

@@ -226,7 +226,7 @@ export class ChatService {
           }),
           liveInfoQuery
             ? searchTavily(userQuery, signal).then((r) => {
-                onChunk('thought', `↩️ web_search：${r.length} 条结果。`);
+                onChunk('thought', `🔎 已联网检索：${r.length} 条结果。`);
                 return r;
               })
             : Promise.resolve([]),
@@ -245,18 +245,9 @@ export class ChatService {
         throw new NotFoundException(`ChatSession not found: ${sessionId}`);
       }
 
-      if (liveInfoQuery && webSearchResults.length === 0) {
-        const reply = '没有获取到实时结果，暂时无法可靠回答这个问题。';
-        await this.prisma.message.create({
-          data: { sessionId, role: 'assistant', content: reply, sources: [] },
-        });
-        await this.prisma.chatSession.update({
-          where: { id: sessionId },
-          data: { updatedAt: new Date() },
-        });
-        onChunk('content', reply);
-        return { fullReply: reply, sources: [] };
-      }
+      // ✅ 后端预检索为空时不再硬拒答：本轮照常走模型，并打开工具让它自己再搜一次或如实说明。
+      //    硬拒答会把「好吧」这类误判和真实的搜索失败一起挡在门外，体验比让模型收尾更差。
+      const liveSearchEmpty = liveInfoQuery && webSearchResults.length === 0;
 
       // ✅ 反转回时间正序，再从最旧一条开始装上下文
       historyMessages.reverse();
@@ -564,8 +555,8 @@ export class ChatService {
         );
       }
 
-      // 实时查询的「正在搜索」反馈放在路由决策之后，保证模型选择始终在最前
-      if (liveInfoQuery) onChunk('thought', '🔧 调用 web_search');
+      // 实时检索的提示已挪到实际搜索的并行阶段（见上方 searchTavily），
+      // 这里不再补一条「调用 web_search」——那是后端预检索，不是模型的工具调用。
 
       // ✅ 免费层 GLM 对「上传的附件」有拒答反射（见 isAttachmentRefusal）：
       //    含附件时先把开头一小段内容"扣住"，命中拒答就换 qwen 重试本轮。
@@ -599,8 +590,10 @@ export class ChatService {
           candidates,
           maxToolRounds: 4,
           // ✅ 实时搜索由后端做；实时查询默认不带工具，避免多一轮工具往返拖慢首字。
-          //    天气/计算/节日等确实需要工具的场景仍会开启（见 needsToolsForLiveQuery）。
-          includeTools: !liveInfoQuery || needsToolsForLiveQuery,
+          //    天气/计算/节日等确实需要工具的场景仍会开启（见 needsToolsForLiveQuery）；
+          //    后端预检索为空时也开启，让模型自己再搜一次或如实说明（见 liveSearchEmpty）。
+          includeTools:
+            !liveInfoQuery || needsToolsForLiveQuery || liveSearchEmpty,
           signal,
         },
         gate,

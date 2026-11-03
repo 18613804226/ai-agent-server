@@ -1,6 +1,4 @@
-﻿import { exec, execFile } from 'child_process';
-import { promisify } from 'util';
-import {
+﻿import {
   existsSync,
   mkdirSync,
   readdirSync,
@@ -27,9 +25,7 @@ import type {
   ToolHandler,
 } from '@repo/agent-orchestrator';
 import type { ChangeListener } from './types.js';
-
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
+import { decodeProcOutput, execAsync, execFileAsync } from './exec.js';
 
 const MAX_RESULT_CHARS = 4000;
 const MAX_WALK_FILES = 2000;
@@ -681,7 +677,7 @@ export function createEditorTools(
         function: {
           name: 'run_terminal',
           description:
-            '在工作区目录执行一条终端命令并返回输出。仅用于构建、测试、git 状态等只读/安全操作。',
+            '在工作区目录执行一条终端命令并返回输出。仅用于构建、测试、git 状态等只读/安全操作。启动 Web 项目前先读 package.json 的 scripts，优先用项目自带命令（npm run dev / serve / vite）。如果没有 package.json 或 scripts 里没有 dev/serve，用 Node.js 启动静态服务器（npx serve / npx http-server），不要用 python -m http.server。',
           parameters: {
             type: 'object',
             properties: { command: { type: 'string' } },
@@ -697,17 +693,25 @@ export function createEditorTools(
         if (denied.test(command)) {
           return `命令被拒绝（疑似破坏性）：${command}`;
         }
+        // 拒绝用 python 起静态服务器：Windows 下编码乱码，且不是正确的 Web 项目启动方式
+        if (/python\s+-m\s+http\.server/i.test(command)) {
+          return (
+            '命令被拒绝：不要用 python -m http.server 启动静态服务。' +
+            '请改用 Node.js：npx serve . 或 npx http-server .'
+          );
+        }
         try {
           const { stdout, stderr } = await execAsync(command, {
             cwd: primary,
             timeout: 30000,
             maxBuffer: 1024 * 1024,
             windowsHide: true,
+            encoding: 'buffer',
           });
-          const out = `${stdout || ''}${stderr || ''}`.trim();
+          const out = decodeProcOutput(stdout, stderr).trim();
           return truncate(out || '（命令无输出）');
         } catch (e: any) {
-          const out = `${e.stdout || ''}${e.stderr || ''}`.trim();
+          const out = decodeProcOutput(e.stdout, e.stderr).trim();
           return truncate(`${out || e.message || '命令执行失败'}`);
         }
       },
@@ -731,9 +735,10 @@ export function createEditorTools(
               timeout: 15000,
               maxBuffer: 1024 * 1024,
               windowsHide: true,
+              encoding: 'buffer',
             },
           );
-          const out = `${stdout || ''}${stderr || ''}`.trim();
+          const out = decodeProcOutput(stdout, stderr).trim();
           return truncate(out || '（工作区干净）');
         } catch (e: any) {
           return `git status 失败：${e?.message || e}`;
@@ -765,9 +770,10 @@ export function createEditorTools(
               timeout: 15000,
               maxBuffer: 1024 * 1024,
               windowsHide: true,
+              encoding: 'buffer',
             },
           );
-          const out = `${stdout || ''}${stderr || ''}`.trim();
+          const out = decodeProcOutput(stdout, stderr).trim();
           return truncate(out || '（没有未提交改动）');
         } catch (e: any) {
           return `git diff 失败：${e?.message || e}`;

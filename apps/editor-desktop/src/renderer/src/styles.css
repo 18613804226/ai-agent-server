@@ -549,6 +549,23 @@ body {
   background: #2563eb;
 }
 
+.changes-stats {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.changes-added {
+  color: #34d399;
+}
+
+.changes-deleted {
+  color: #f87171;
+}
+
 /* ---------- editor ---------- */
 .editor {
   display: flex;
@@ -999,8 +1016,8 @@ body {
   }
 }
 
-/* 底部状态栏计时器 */
-.status-timer {
+.generating-timer {
+  margin-left: 2px;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
@@ -1009,7 +1026,7 @@ body {
 
 /* ---------- 工具操作块（读/写/编辑/终端等） ---------- */
 .tool-activity {
-  margin: 6px 0;
+  margin: 2px 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);

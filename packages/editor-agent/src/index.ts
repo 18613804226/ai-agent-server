@@ -1,4 +1,5 @@
 export * from './types.js';
+export * from './exec.js';
 export * from './tools.js';
 export * from './prompt.js';
 export * from './agent.js';

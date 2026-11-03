@@ -1,62 +1,115 @@
 import {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-    type ChangeEvent,
-    type MouseEvent as ReactMouseEvent,
-  } from 'react';
-  import { CodeEditor, type CodeEditorHandle } from './components/CodeEditor';
-  import { DiffView } from './components/DiffView';
-  import { FileTree, FolderIcon } from './components/FileTree';
-  import { MentionPicker } from './components/MentionPicker';
-  import { ModelSelect } from './components/ModelSelect';
-  import { QuickOpen } from './components/QuickOpen';
-  import { SettingsModal } from './components/SettingsModal';
-  import { Terminal } from './components/Terminal';
-  import { Welcome } from './components/Welcome';
-  import { changeLabel, diffLines } from './diff';
-  import type { RunCheckpointInfo } from './electron';
-  import { extractMentions, flattenFiles } from './files';
-  import { useMode } from './mode/ModeContext';
-  import { DEFAULT_LOCAL_MODEL } from './models';
-  import { LocalTransport, LocalWorkspace } from './mode/local';
-  import { RemoteTransport } from './mode/remote';
-  import type {
-    AgentMode,
-    AgentTransport,
-    AppConfig,
-    ApprovalPreview,
-    ChatEvent,
-    FileChange,
-    FileEdit,
-    ProviderStatus,
-    WorkspaceNode,
-    WorkspaceProvider,
-    WorkspaceRootInfo,
-  } from './mode/types';
-
-/** 一次工具操作的结构化记录（读/写/编辑/终端等） */
-interface ToolActivity {
-  name: string;
-  args?: Record<string, unknown>;
-  result?: string;
-  /** 对应 tool_call 的本轮序号 */
-  index?: number;
-}
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
+import { CodeEditor, type CodeEditorHandle } from './components/CodeEditor';
+import { DiffView } from './components/DiffView';
+import { FileTree, FolderIcon } from './components/FileTree';
+import { MentionPicker } from './components/MentionPicker';
+import { ModelSelect } from './components/ModelSelect';
+import { QuickOpen } from './components/QuickOpen';
+import { SettingsModal } from './components/SettingsModal';
+import { Terminal } from './components/Terminal';
+import { Welcome } from './components/Welcome';
+import { changeLabel, diffLines } from './diff';
+import type { RunCheckpointInfo } from './electron';
+import { extractMentions, flattenFiles } from './files';
+import { useMode } from './mode/ModeContext';
+import { DEFAULT_LOCAL_MODEL } from './models';
+import { LocalTransport, LocalWorkspace } from './mode/local';
+import { RemoteTransport } from './mode/remote';
+import type {
+  AgentMode,
+  AgentTransport,
+  AppConfig,
+  ApprovalPreview,
+  ChatEvent,
+  FileChange,
+  FileEdit,
+  ProviderStatus,
+  WorkspaceNode,
+  WorkspaceProvider,
+  WorkspaceRootInfo,
+} from './mode/types';
 
 interface ChatMsg {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   thought?: string;
-  /** 流式工具操作块：每个工具调用一条 */
-  tools?: ToolActivity[];
+  /** 按到达顺序排列的事件流（content / tool_call / tool_result 交错）；历史消息没有 */
+  events?: ChatEventItem[];
   /** 本轮消耗的 token 数 */
   tokens?: number;
   /** 本轮耗时（毫秒） */
   durationMs?: number;
+}
+
+type ChatEventItem =
+  | { type: 'thought'; content: string }
+  | { type: 'content'; content: string }
+  | {
+      type: 'tool_call';
+      name: string;
+      args: Record<string, unknown>;
+      index: number;
+      result?: string;
+    };
+
+/** 渲染块：由事件流还原出的「段落 / 思考 / 工具」序列 */
+type MessageBlock =
+  | { type: 'thought'; text: string }
+  | { type: 'content'; text: string }
+  | {
+      type: 'tool';
+      index: number;
+      name: string;
+      args: Record<string, unknown>;
+      result?: string;
+    };
+
+/** 折叠多余空行：模型或标签清洗后常在段落间留下 3+ 个换行，统一成最多一个空行 */
+function collapseBlankLines(text: string): string {
+  return text.replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '').replace(/\n+$/, '');
+}
+
+/**
+ * 把事件流按到达顺序还原成渲染块：相邻 content / thought 合并，工具块保持原位。
+ * 没有 events 的历史消息（断点续跑）退回 thought + content 两段。
+ */
+function buildMessageBlocks(msg: ChatMsg): MessageBlock[] {
+  if (msg.events?.length) {
+    const blocks: MessageBlock[] = [];
+    for (const ev of msg.events) {
+      if (ev.type === 'content') {
+        const last = blocks[blocks.length - 1];
+        if (last?.type === 'content') last.text += ev.content;
+        else blocks.push({ type: 'content', text: ev.content });
+      } else if (ev.type === 'thought') {
+        const last = blocks[blocks.length - 1];
+        if (last?.type === 'thought') last.text += ev.content;
+        else blocks.push({ type: 'thought', text: ev.content });
+      } else if (ev.type === 'tool_call') {
+        blocks.push({
+          type: 'tool',
+          index: ev.index,
+          name: ev.name,
+          args: ev.args,
+          result: ev.result,
+        });
+      }
+    }
+    return blocks;
+  }
+  const blocks: MessageBlock[] = [];
+  if (msg.thought) blocks.push({ type: 'thought', text: msg.thought });
+  if (msg.content) blocks.push({ type: 'content', text: msg.content });
+  return blocks;
 }
 
 interface EditorTab {
@@ -234,6 +287,20 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [changes, setChanges] = useState<FileChange[]>([]);
   const [activeDiff, setActiveDiff] = useState<FileChange | null>(null);
+
+  /** 为每个改动文件算出 +added / -deleted 行数 */
+  const changeStats = useMemo(
+    () =>
+      changes.map((c) => {
+        const diffs = diffLines(c.before ?? '', c.after ?? '');
+        const added = diffs.filter((d) => d.type === 'add').length;
+        const deleted = diffs.filter((d) => d.type === 'del').length;
+        return { added, deleted };
+      }),
+    [changes],
+  );
+  const totalAdded = changeStats.reduce((sum, s) => sum + s.added, 0);
+  const totalDeleted = changeStats.reduce((sum, s) => sum + s.deleted, 0);
   const [pendingApproval, setPendingApproval] = useState<{
     id: string;
     toolName: string;
@@ -443,11 +510,11 @@ export function App() {
   const allModels = useMemo(
     () =>
       (config?.providers ?? []).flatMap((p) =>
-      p.models.map((m) => ({
+        p.models.map((m) => ({
           id: m.id,
           label: m.name || m.id,
         })),
-    ),
+      ),
     [config],
   );
 
@@ -482,8 +549,8 @@ export function App() {
     mode === 'local'
       ? config?.selectedModel || DEFAULT_LOCAL_MODEL
       : config?.remote.model ||
-        config?.selectedModel ||
-        DEFAULT_LOCAL_MODEL;
+      config?.selectedModel ||
+      DEFAULT_LOCAL_MODEL;
 
   const updateModel = async (model: string) => {
     if (!config) return;
@@ -835,10 +902,10 @@ export function App() {
                 const existing = tabs.find((tab) => tab.path === editPath);
                 return existing
                   ? tabs.map((tab) =>
-                      tab.path === editPath
-                        ? { ...tab, content, savedContent: saved }
-                        : tab,
-                    )
+                    tab.path === editPath
+                      ? { ...tab, content, savedContent: saved }
+                      : tab,
+                  )
                   : [...tabs, { path: editPath, content, savedContent: saved }];
               });
             } catch {
@@ -848,9 +915,9 @@ export function App() {
                 tabs.some((tab) => tab.path === editPath)
                   ? tabs
                   : [
-                      ...tabs,
-                      { path: editPath, content: '', savedContent: '' },
-                    ],
+                    ...tabs,
+                    { path: editPath, content: '', savedContent: '' },
+                  ],
               );
             }
             // 等 React 重渲染 + Monaco 编辑器重建完成
@@ -865,12 +932,12 @@ export function App() {
               const existing = tabs.find((tab) => tab.path === editPath);
               return existing
                 ? tabs.map((tab) =>
-                    tab.path === editPath ? { ...tab, content: latest } : tab,
-                  )
+                  tab.path === editPath ? { ...tab, content: latest } : tab,
+                )
                 : [
-                    ...tabs,
-                    { path: editPath, content: latest, savedContent: '' },
-                  ];
+                  ...tabs,
+                  { path: editPath, content: latest, savedContent: '' },
+                ];
             });
           }
         } finally {
@@ -886,28 +953,51 @@ export function App() {
             return {
               ...msg,
               thought: (msg.thought ?? '') + (ev.content ?? ''),
+              events: [
+                ...(msg.events ?? []),
+                { type: 'thought', content: ev.content ?? '' },
+              ],
             };
           case 'content':
-            return { ...msg, content: msg.content + (ev.content ?? '') };
+            return {
+              ...msg,
+              content: msg.content + (ev.content ?? ''),
+              events: [
+                ...(msg.events ?? []),
+                { type: 'content', content: ev.content ?? '' },
+              ],
+            };
           case 'tool_call':
             return {
               ...msg,
-              tools: [
-                ...(msg.tools ?? []),
-                { name: ev.name ?? '', args: ev.args, index: ev.index },
+              events: [
+                ...(msg.events ?? []),
+                {
+                  type: 'tool_call',
+                  name: ev.name ?? '',
+                  args: ev.args ?? {},
+                  index: ev.index ?? 0,
+                },
               ],
             };
           case 'tool_result':
             return {
               ...msg,
-              tools: (msg.tools ?? []).map((tool) =>
-                tool.index === ev.index ? { ...tool, result: ev.result } : tool,
+              events: (msg.events ?? []).map((e) =>
+                e.type === 'tool_call' && e.index === ev.index
+                  ? { ...e, result: ev.result }
+                  : e,
               ),
             };
           case 'error':
             return {
               ...msg,
               content: msg.content + `\n⚠️ ${ev.content ?? ''}`,
+              // 错误文本也要进事件流，否则按 events 渲染时会丢
+              events: [
+                ...(msg.events ?? []),
+                { type: 'content', content: `\n⚠️ ${ev.content ?? ''}` },
+              ],
             };
           default:
             return msg;
@@ -947,14 +1037,14 @@ export function App() {
     setChanges([]);
     setMessages((m) => [
       ...m,
-      { id: crypto.randomUUID(), role: 'user', content: displayQuery },
+      { id: crypto.randomUUID(), role: 'user', content: displayQuery, events: [] },
     ]);
     setStreaming(true);
     setRunState('running');
     const assistantId = crypto.randomUUID();
     setMessages((m) => [
       ...m,
-      { id: assistantId, role: 'assistant', content: '', thought: '' },
+      { id: assistantId, role: 'assistant', content: '', thought: '', events: [] },
     ]);
     abortRef.current = new AbortController();
 
@@ -962,10 +1052,10 @@ export function App() {
     const selection = editorRef.current?.getSelection() ?? '';
     const agentContext = activeFile
       ? {
-          activeFile,
-          activeContent: fileContent.slice(0, 20000),
-          selection: selection || undefined,
-        }
+        activeFile,
+        activeContent: fileContent.slice(0, 20000),
+        selection: selection || undefined,
+      }
       : undefined;
 
     try {
@@ -978,8 +1068,8 @@ export function App() {
           model:
             mode === 'remote'
               ? config?.remote.model ||
-                config?.selectedModel ||
-                DEFAULT_LOCAL_MODEL
+              config?.selectedModel ||
+              DEFAULT_LOCAL_MODEL
               : undefined,
           history,
           context: agentContext,
@@ -993,6 +1083,7 @@ export function App() {
             id: crypto.randomUUID(),
             role: 'assistant',
             content: `⚠️ ${e?.message || e}`,
+            events: [],
           },
         ]);
       }
@@ -1037,7 +1128,7 @@ export function App() {
     const assistantId = crypto.randomUUID();
     setMessages((m) => [
       ...m,
-      { id: assistantId, role: 'assistant', content: '', thought: '' },
+      { id: assistantId, role: 'assistant', content: '', thought: '', events: [] },
     ]);
     abortRef.current = new AbortController();
     try {
@@ -1053,6 +1144,7 @@ export function App() {
             id: crypto.randomUUID(),
             role: 'assistant',
             content: `⚠️ ${e?.message || e}`,
+            events: [],
           },
         ]);
       }
@@ -1153,100 +1245,121 @@ export function App() {
       <div
         className="layout"
         style={{
-          gridTemplateColumns: `${sidebarOpen ? sidebarWidth : 0}px ${
-            sidebarOpen ? 4 : 0
-          }px minmax(0, 1fr) 4px ${chatWidth}px`,
+          gridTemplateColumns: `${sidebarOpen ? sidebarWidth : 0}px ${sidebarOpen ? 4 : 0
+            }px minmax(0, 1fr) 4px ${chatWidth}px`,
         }}
       >
         {sidebarOpen ? (
           <>
-        <aside className="sidebar">
-          <div className="sidebar-root">
-            <span className="sidebar-root-name" title={workspaceRoot}>
-              <FolderIcon />
-              {roots.length ? `${roots.length} 个文件夹` : '未选择工作区'}
-            </span>
-            <div className="sidebar-root-actions">
-              <button
-                type="button"
-                className="icon-btn"
-                title="添加文件夹"
-                aria-label="添加文件夹"
-                onClick={() => void openFolder()}
-              >
-                <svg
-                  viewBox="0 0 16 16"
-                  width="20"
-                  height="20"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.7"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden
-                >
-                  <path d="M1.5 4.5A1.5 1.5 0 0 1 3 3h3l1.5 1.5H13A1.5 1.5 0 0 1 14.5 6v5.5A1.5 1.5 0 0 1 13 13H3a1.5 1.5 0 0 1-1.5-1.5z" />
-                  <path d="M8 7.5v3M6.5 9h3" />
-                </svg>
-              </button>
-              {roots.length ? (
-                <button
-                  type="button"
-                  className="icon-btn"
-                  title="清空工作区"
-                  aria-label="清空工作区"
-                  onClick={() => void clearWorkspace()}
-                >
-                  <svg
-                    viewBox="0 0 16 16"
-                    width="20"
-                    height="20"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.7"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden
+            <aside className="sidebar">
+              <div className="sidebar-root">
+                <span className="sidebar-root-name" title={workspaceRoot}>
+                  <FolderIcon />
+                  {roots.length ? `${roots.length} 个文件夹` : '未选择工作区'}
+                </span>
+                <div className="sidebar-root-actions">
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    title="添加文件夹"
+                    aria-label="添加文件夹"
+                    onClick={() => void openFolder()}
                   >
-                    <path d="M3 4.5h10M6 4.5V3h4v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" />
-                  </svg>
-                </button>
-              ) : null}
-            </div>
-          </div>
-          <FileTree
-            nodes={nodes}
-            activePath={activeFile}
-            onOpen={openFile}
-            onRemoveRoot={removeRoot}
-            onAskAI={askAI}
-            onRefresh={() => void reload()}
-            onDeleted={(path) => {
-              const remainingTabs = editorTabs.filter(
-                (tab) => tab.path !== path && !tab.path.startsWith(path + '/'),
-              );
-              setEditorTabs(remainingTabs);
-              if (
-                activeFile === path ||
-                activeFile.startsWith(path + '/')
-              ) {
-                const nextTab = remainingTabs[0];
-                setActiveFile(nextTab?.path ?? '');
-                setFileContentState(nextTab?.content ?? '');
-                setSavedContentState(nextTab?.savedContent ?? '');
-                setActiveDiff(null);
-              }
-            }}
-            onError={(msg) => setError(msg)}
-          />
-        </aside>
+                    <svg
+                      viewBox="0 0 16 16"
+                      width="20"
+                      height="20"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.7"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden
+                    >
+                      <path d="M1.5 4.5A1.5 1.5 0 0 1 3 3h3l1.5 1.5H13A1.5 1.5 0 0 1 14.5 6v5.5A1.5 1.5 0 0 1 13 13H3a1.5 1.5 0 0 1-1.5-1.5z" />
+                      <path d="M8 7.5v3M6.5 9h3" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    title="刷新"
+                    aria-label="刷新"
+                    onClick={() => void reload()}
+                  >
+                    <svg
+                      viewBox="0 0 16 16"
+                      width="20"
+                      height="20"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.7"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden
+                    >
+                      <path d="M13.5 3.5a6 6 0 1 0 1.7 4.3" />
+                      <path d="M14.5 2.5v3h-3" />
+                    </svg>
+                  </button>
+                  {roots.length ? (
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="清空工作区"
+                      aria-label="清空工作区"
+                      onClick={() => void clearWorkspace()}
+                    >
+                      <svg
+                        viewBox="0 0 16 16"
+                        width="20"
+                        height="20"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden
+                      >
+                        <path d="M3 4.5h10M6 4.5V3h4v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" />
+                      </svg>
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              <FileTree
+                nodes={nodes}
+                activePath={activeFile}
+                onOpen={openFile}
+                onRemoveRoot={removeRoot}
+                onAskAI={askAI}
+                onRefresh={() => void reload()}
+                onDeleted={(path) => {
+                  const remainingTabs = editorTabs.filter(
+                    (tab) => tab.path !== path && !tab.path.startsWith(path + '/'),
+                  );
+                  setEditorTabs(remainingTabs);
+                  if (
+                    activeFile === path ||
+                    activeFile.startsWith(path + '/')
+                  ) {
+                    const nextTab = remainingTabs[0];
+                    setActiveFile(nextTab?.path ?? '');
+                    setFileContentState(nextTab?.content ?? '');
+                    setSavedContentState(nextTab?.savedContent ?? '');
+                    setActiveDiff(null);
+                  }
+                }}
+                onError={(msg) => setError(msg)}
+              />
+            </aside>
 
-        <div
-          className="resizer"
-          role="separator"
-          aria-orientation="vertical"
-          onMouseDown={(e) => startDrag(e, 'sidebar')}
-        />
+            <div
+              className="resizer"
+              role="separator"
+              aria-orientation="vertical"
+              onMouseDown={(e) => startDrag(e, 'sidebar')}
+            />
           </>
         ) : null}
 
@@ -1454,31 +1567,47 @@ export function App() {
                     耗时 {formatElapsed(m.durationMs)}
                   </div>
                 ) : null}
-                {m.thought ? <pre className="thought">{m.thought}</pre> : null}
-                {m.tools?.map((t, i) => (
-                  <div key={i} className="tool-activity">
-                    <div className="tool-activity-head">
-                      <span className="tool-icon">{toolIcon(t.name)}</span>
-                      <span className="tool-summary">
-                        {toolSummary(t.name, t.args)}
-                      </span>
-                      {t.result === undefined ? (
-                        <span className="tool-pending">
-                          <span className="gen-dot" />
-                          <span className="gen-dot" />
-                          <span className="gen-dot" />
+                {buildMessageBlocks(m).map((block, i) => {
+                  if (block.type === 'content') {
+                    const text = collapseBlankLines(block.text);
+                    return text ? (
+                      <div key={i} className="content">
+                        {text}
+                      </div>
+                    ) : null;
+                  }
+                  if (block.type === 'thought') {
+                    const text = collapseBlankLines(block.text);
+                    return text ? (
+                      <pre key={i} className="thought">
+                        {text}
+                      </pre>
+                    ) : null;
+                  }
+                  return (
+                    <div key={i} className="tool-activity">
+                      <div className="tool-activity-head">
+                        <span className="tool-icon">{toolIcon(block.name)}</span>
+                        <span className="tool-summary">
+                          {toolSummary(block.name, block.args)}
                         </span>
+                        {block.result === undefined ? (
+                          <span className="tool-pending">
+                            <span className="gen-dot" />
+                            <span className="gen-dot" />
+                            <span className="gen-dot" />
+                          </span>
+                        ) : null}
+                      </div>
+                      {block.result !== undefined ? (
+                        <details className="tool-result" open>
+                          <summary>结果</summary>
+                          <pre>{block.result}</pre>
+                        </details>
                       ) : null}
                     </div>
-                    {t.result !== undefined ? (
-                      <details className="tool-result">
-                        <summary>结果</summary>
-                        <pre>{t.result}</pre>
-                      </details>
-                    ) : null}
-                  </div>
-                ))}
-                <div className="content">{m.content}</div>
+                  );
+                })}
                 {m.role === 'assistant' && m.tokens != null && !streaming ? (
                   <div className="msg-meta msg-meta-bottom">
                     {m.tokens} tokens
@@ -1497,12 +1626,15 @@ export function App() {
                   <span className="gen-dot" />
                 </span>
                 生成中
+                <span className="generating-timer">
+                  ⏱ {formatElapsed(elapsedMs)}
+                </span>
               </div>
             ) : null}
             {changes.length > 0 && (
               <div className="changes">
                 <div className="changes-title">
-                  本轮改动 ({changes.length})
+                  {changes.length} files changed +{totalAdded} -{totalDeleted}
                   <button
                     type="button"
                     className="changes-undo"
@@ -1515,12 +1647,11 @@ export function App() {
                   {changes.map((c, i) => (
                     <li key={`${c.kind}-${c.path}-${i}`}>
                       <button
-                        className={`changes-row ${
-                          activeDiff?.path === c.path &&
+                        className={`changes-row ${activeDiff?.path === c.path &&
                           activeDiff?.kind === c.kind
-                            ? 'active'
-                            : ''
-                        }`}
+                          ? 'active'
+                          : ''
+                          }`}
                         onClick={() => setActiveDiff(c)}
                         title={c.path}
                       >
@@ -1528,6 +1659,10 @@ export function App() {
                           {changeLabel(c.kind)}
                         </span>
                         <span className="changes-path">{c.path}</span>
+                        <span className="changes-stats">
+                          <span className="changes-added">+{changeStats[i]?.added ?? 0}</span>
+                          <span className="changes-deleted">-{changeStats[i]?.deleted ?? 0}</span>
+                        </span>
                       </button>
                     </li>
                   ))}
@@ -1640,9 +1775,8 @@ export function App() {
                   />
                   <button
                     type="button"
-                    className={`icon-btn approval-toggle ${
-                      config?.approvalMode === 'auto' ? 'is-auto' : 'is-ask'
-                    }`}
+                    className={`icon-btn approval-toggle ${config?.approvalMode === 'auto' ? 'is-auto' : 'is-ask'
+                      }`}
                     title={
                       config?.approvalMode === 'auto'
                         ? '当前：自动放行所有工具（点击切换为询问）'
@@ -1728,14 +1862,6 @@ export function App() {
                 <span>
                   {roots.length ? `${roots.length} 个文件夹` : '未选择工作区'}
                 </span>
-                {streaming ? (
-                  <span className="status-sep">·</span>
-                ) : null}
-                {streaming ? (
-                  <span className="status-timer">
-                    ⏱ {formatElapsed(elapsedMs)}
-                  </span>
-                ) : null}
               </div>
               <span
                 className="muted composer-hint"
@@ -1820,11 +1946,11 @@ export function App() {
             {(pendingApproval.preview?.length
               ? pendingApproval.preview
               : ([
-                  {
-                    kind: 'command',
-                    command: JSON.stringify(pendingApproval.args),
-                  },
-                ] as ApprovalPreview[])
+                {
+                  kind: 'command',
+                  command: JSON.stringify(pendingApproval.args),
+                },
+              ] as ApprovalPreview[])
             ).map((preview, index) => (
               <div key={index} className="approval-preview">
                 {preview.path ? (
