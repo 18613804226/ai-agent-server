@@ -1,4 +1,11 @@
-import { useState, type MouseEvent as ReactMouseEvent, type RefObject } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type RefObject,
+} from 'react';
+import { BrowserPanel } from './BrowserPanel';
 import { CodeEditor, type CodeEditorHandle } from './CodeEditor';
 import { DiffView } from './DiffView';
 import { Terminal } from './Terminal';
@@ -60,6 +67,12 @@ export function EditorPane({
   onEditorChange,
   onAskAI,
   onCloseTerminal,
+  onApplyDiff,
+  browserUrl,
+  onCloseBrowser,
+  browserTabActive,
+  onSelectBrowserTab,
+  onOpenBrowser,
 }: {
   editorTabs: EditorTab[];
   activeFile: string;
@@ -76,10 +89,31 @@ export function EditorPane({
   onEditorChange: (content: string) => void;
   onAskAI: (path: string, selection?: string) => void;
   onCloseTerminal: () => void;
+  onApplyDiff: (path: string, content: string) => void;
+  browserUrl: string | null;
+  onCloseBrowser: () => void;
+  browserTabActive: boolean;
+  onSelectBrowserTab: () => void;
+  onOpenBrowser: (url: string) => void;
 }) {
   const [terminalHeight, setTerminalHeight] = useState(
     () => Number(localStorage.getItem('editor_terminal_height')) || 240,
   );
+  const tabsRef = useRef<HTMLDivElement>(null);
+
+  // 标签栏支持鼠标滚轮横向滚动（隐藏滚动条时仍可滑动）
+  useEffect(() => {
+    const el = tabsRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY !== 0) {
+        e.preventDefault();
+        el.scrollLeft += e.deltaY;
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
 
   /** 拖拽调整终端高度 */
   const startTerminalResize = (e: ReactMouseEvent) => {
@@ -107,11 +141,16 @@ export function EditorPane({
   return (
     <main className="editor">
       <div className="editor-tabbar">
-        <div className="editor-tabs" role="tablist" aria-label="打开的文件">
-          {editorTabs.length ? (
-            editorTabs.map((tab) => {
-              const isActive = activeFile === tab.path && !activeDiff;
-              const isDirty = tab.content !== tab.savedContent;
+        <div
+          className="editor-tabs"
+          role="tablist"
+          aria-label="打开的文件"
+          ref={tabsRef}
+        >
+          {editorTabs.map((tab) => {
+            const isActive =
+              !browserTabActive && activeFile === tab.path && !activeDiff;
+            const isDirty = tab.content !== tab.savedContent;
               return (
                 <div
                   key={tab.path}
@@ -162,8 +201,8 @@ export function EditorPane({
                   </button>
                 </div>
               );
-            })
-          ) : activeDiff ? (
+          })}
+          {activeDiff && !browserTabActive ? (
             <div className="editor-tab-item active">
               <span className="editor-tab-button editor-tab-label">
                 diff: {fileName(activeDiff.path)}
@@ -178,27 +217,36 @@ export function EditorPane({
                 ×
               </button>
             </div>
-          ) : (
+          ) : null}
+          {browserUrl ? (
+            <div
+              className={`editor-tab-item${
+                browserTabActive ? ' active' : ''
+              }`}
+            >
+              <button
+                type="button"
+                className="editor-tab-button"
+                onClick={onSelectBrowserTab}
+              >
+                <span className="editor-tab-label">浏览器</span>
+              </button>
+              <button
+                type="button"
+                className="editor-tab-close"
+                title="关闭浏览器"
+                aria-label="关闭浏览器"
+                onClick={onCloseBrowser}
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
+          {!editorTabs.length && !activeDiff && !browserUrl ? (
             <div className="editor-tab-item active">
               <span className="editor-tab-button editor-tab-label">
                 欢迎
               </span>
-            </div>
-          )}
-          {editorTabs.length > 0 && activeDiff ? (
-            <div className="editor-tab-item active">
-              <span className="editor-tab-button editor-tab-label">
-                diff: {fileName(activeDiff.path)}
-              </span>
-              <button
-                type="button"
-                className="editor-tab-close"
-                title="关闭对比"
-                aria-label="关闭对比"
-                onClick={onCloseDiff}
-              >
-                ×
-              </button>
             </div>
           ) : null}
         </div>
@@ -257,24 +305,33 @@ export function EditorPane({
         ) : null}
       </div>
       <div className="editor-content">
-        {streamingEditPath ? (
-          <div className="streaming-banner">
-            <span className="streaming-dot" />
-            AI 正在编辑 {streamingEditPath}…
-          </div>
-        ) : null}
-        {activeDiff ? (
-          <DiffView change={activeDiff} />
-        ) : activeFile ? (
-          <CodeEditor
-            ref={editorRef}
-            path={activeFile}
-            value={fileContent}
-            onChange={onEditorChange}
-            onAskAI={onAskAI}
-          />
+        {browserUrl && browserTabActive ? (
+          <BrowserPanel initialUrl={browserUrl} onClose={onCloseBrowser} />
         ) : (
-          <Welcome />
+          <>
+            {streamingEditPath ? (
+              <div className="streaming-banner">
+                <span className="streaming-dot" />
+                AI 正在编辑 {streamingEditPath}…
+              </div>
+            ) : null}
+            {activeDiff ? (
+              <DiffView
+                change={activeDiff}
+                onApply={(content) => onApplyDiff(activeDiff.path, content)}
+              />
+            ) : activeFile ? (
+              <CodeEditor
+                ref={editorRef}
+                path={activeFile}
+                value={fileContent}
+                onChange={onEditorChange}
+                onAskAI={onAskAI}
+              />
+            ) : (
+              <Welcome />
+            )}
+          </>
         )}
       </div>
       {terminalOpen ? (
@@ -284,7 +341,11 @@ export function EditorPane({
             onMouseDown={startTerminalResize}
             title="拖拽调整终端高度"
           />
-          <Terminal onClose={onCloseTerminal} height={terminalHeight} />
+          <Terminal
+            onClose={onCloseTerminal}
+            height={terminalHeight}
+            onOpenBrowser={onOpenBrowser}
+          />
         </>
       ) : null}
     </main>

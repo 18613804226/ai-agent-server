@@ -52,6 +52,7 @@ describe('createEditorTools', () => {
       'search_files',
       'glob',
       'run_terminal',
+      'open_in_browser',
       'git_status',
       'git_diff',
       'read_artifact',
@@ -432,7 +433,7 @@ describe('createEditorAgent', () => {
   it('返回绑定 root 的 editor 定义', () => {
     const agent = createEditorAgent(root);
     expect(agent.id).toBe('editor');
-    expect(agent.tools).toHaveLength(15);
+    expect(agent.tools).toHaveLength(16);
     expect(agent.buildSystemPrompt()).toContain(root);
     const names = agent.tools.map((t) => t.definition.function.name);
     expect(names).toContain('verify_workspace');

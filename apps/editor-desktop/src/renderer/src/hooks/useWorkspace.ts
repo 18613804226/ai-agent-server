@@ -65,7 +65,7 @@ export function useWorkspace({
     setError('');
     setChanges([]);
     setActiveDiff(null);
-    updateSessionRef.current({ messages: [] });
+    // 注意：这里不清空聊天消息——切换后端不应丢掉当前会话的历史
     void reload(backend);
   }, [
     backend,

@@ -239,8 +239,13 @@ export class LocalAgent {
       this.agent = null;
       return;
     }
-    const base = createEditorAgent(this.workspaceRoots, (change) =>
-      this.changes.push(change),
+    const base = createEditorAgent(
+      this.workspaceRoots,
+      (change) => this.changes.push(change),
+      {
+        onBrowserOpen: (url) =>
+          this.eventSink?.({ type: 'browser_open', url }),
+      },
     );
     const approvalPolicy: ApprovalPolicy = (name, args) =>
       this.needsApproval(name, args) ? 'ask' : 'allow';
@@ -281,6 +286,8 @@ export class LocalAgent {
         showRoutingThought: true,
         rateLimitRetries: 2,
         zhipuLock: new SimpleLock(),
+        // 模型空响应时自动追问，避免多步任务半路停住
+        emptyRetryLimit: 2,
       });
     }
     return this.orchestrator;

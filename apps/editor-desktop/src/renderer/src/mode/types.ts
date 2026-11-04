@@ -93,6 +93,8 @@ export interface ChatEvent {
   changes?: FileChange[];
   /** file_edit 事件携带的编辑意图（流式动画用） */
   edit?: FileEdit;
+  /** browser_open 事件携带的目标 URL */
+  url?: string;
   /** approval_request 事件 */
   id?: string;
   toolName?: string;

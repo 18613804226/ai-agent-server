@@ -65,6 +65,8 @@ interface UseAgentRunDeps {
   setError: (v: string) => void;
   /** 工作区重载；用 ref 传入避免与 useWorkspace 循环依赖 */
   reloadRef: RefObject<() => Promise<void>>;
+  /** 内置浏览器打开回调（open_in_browser 工具） */
+  onBrowserOpen: (url: string) => void;
 }
 
 /**
@@ -92,6 +94,7 @@ export function useAgentRun(deps: UseAgentRunDeps) {
     setActiveDiff,
     setError,
     reloadRef,
+    onBrowserOpen,
   } = deps;
 
   const messages = session.messages;
@@ -127,6 +130,10 @@ export function useAgentRun(deps: UseAgentRunDeps) {
   /** 把 agent 事件应用到消息列表；本地/云端/断点续跑共用 */
   const applyAgentEvent = useCallback(
     (ev: ChatEvent, assistantId: string) => {
+      if (ev.type === 'browser_open') {
+        if (ev.url) onBrowserOpen(ev.url);
+        return;
+      }
       if (ev.type === 'approval_request') {
         setPendingApproval({
           id: ev.id ?? '',
@@ -291,6 +298,7 @@ export function useAgentRun(deps: UseAgentRunDeps) {
       editorTabsRef,
       messages,
       updateSession,
+      onBrowserOpen,
       setActiveFile,
       setFileContentState,
       setSavedContentState,

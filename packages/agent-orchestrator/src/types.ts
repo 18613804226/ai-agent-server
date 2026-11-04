@@ -14,7 +14,8 @@ export type AgentEventType =
   | 'tool_result'
   | 'error'
   | 'done'
-  | 'file_edit';
+  | 'file_edit'
+  | 'browser_open';
 
 /** 一次工具调用的流式分片（由 tool-call-accumulator 归并） */
 export interface ToolCallLike {
@@ -214,6 +215,8 @@ export interface AgentEvent {
   context?: ContextStats;
   /** done 事件携带的本轮文件改动（编辑器工具产出） */
   changes?: FileChange[];
+  /** browser_open 事件携带的目标 URL */
+  url?: string;
   /** file_edit 事件携带的编辑意图（流式动画用） */
   edit?: FileEdit;
 }

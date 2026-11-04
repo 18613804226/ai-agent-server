@@ -23,6 +23,8 @@ export interface CreateEditorAgentOptions {
    * - 传 null：关闭自动验证（云端代理模式用，客户端通过 verify_workspace 工具验证）
    */
   verifier?: VerifyHook | null;
+  /** 内置浏览器打开回调（open_in_browser 工具用） */
+  onBrowserOpen?: (url: string) => void;
 }
 
 /**
@@ -41,7 +43,7 @@ export function createEditorAgent(
       ? null
       : options.verifier ?? createVerifier(roots);
 
-  const tools = createEditorTools(roots, onChange);
+  const tools = createEditorTools(roots, onChange, options.onBrowserOpen);
   tools.push({
     definition: {
       type: 'function',
@@ -86,6 +88,6 @@ export function createEditorAgent(
     editToolNames: DEFAULT_EDIT_TOOL_NAMES,
     // 编辑器任务（读文件 → 改 → 验证 → 再改…）链路长，给足循环轮数；
     // 问答 demo 不走 agent 定义，仍由 chat.service 显式限制为 4 轮。
-    maxToolRounds: 15,
+    maxToolRounds: 30,
   };
 }

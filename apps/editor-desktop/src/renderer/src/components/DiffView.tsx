@@ -1,57 +1,29 @@
-import { useEffect, useRef } from 'react';
-import * as monaco from 'monaco-editor';
+import { useMemo, useState } from 'react';
 import type { FileChange } from '../mode/types';
+import { diffLines, groupHunks, mergeHunks } from '../diff';
 
 /**
- * Monaco 内置的 diff 视图：左右对比 + 高亮差异行。
- * 比手写 diff 更可靠，且自带滚动同步。
+ * 改动对比 + diff 块审批：
+ * 按 hunk 展示差异，用户可逐块勾选接受/拒绝，点「应用改动」后写回文件。
  */
-export function DiffView({ change }: { change: FileChange }) {
-  const host = useRef<HTMLDivElement>(null);
-  const diffEditorRef = useRef<monaco.editor.IDiffEditor | null>(null);
+export function DiffView({
+  change,
+  onApply,
+}: {
+  change: FileChange;
+  onApply: (content: string) => void;
+}) {
+  const before = change.before ?? '';
+  const after = change.after ?? '';
+  const hunks = useMemo(
+    () => groupHunks(diffLines(before, after)),
+    [before, after],
+  );
+  const [accepted, setAccepted] = useState<Set<number>>(
+    () => new Set(hunks.map((h) => h.id)),
+  );
 
-  useEffect(() => {
-    if (!host.current) return;
-
-    const originalModel = monaco.editor.createModel(
-      change.before ?? '',
-      'plaintext',
-    );
-    const modifiedModel = monaco.editor.createModel(
-      change.after ?? '',
-      'plaintext',
-    );
-
-    const diffEditor = monaco.editor.createDiffEditor(host.current, {
-      theme: 'vs-dark',
-      automaticLayout: true,
-      minimap: { enabled: false },
-      scrollbar: { vertical: 'visible', horizontal: 'visible' },
-      wordWrap: 'on',
-      renderSideBySide: true,
-      ignoreTrimWhitespace: false,
-      renderIndicators: true,
-    });
-    diffEditorRef.current = diffEditor;
-    diffEditor.setModel({ original: originalModel, modified: modifiedModel });
-
-    return () => {
-      diffEditor.dispose();
-      originalModel.dispose();
-      modifiedModel.dispose();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [change.path]);
-
-  // 内容变化时同步
-  useEffect(() => {
-    const editor = diffEditorRef.current;
-    if (!editor) return;
-    const modified = editor.getModifiedEditor();
-    if (modified && modified.getValue() !== (change.after ?? '')) {
-      modified.setValue(change.after ?? '');
-    }
-  }, [change.after]);
+  const allAccepted = accepted.size === hunks.length;
 
   if (change.kind === 'renamed') {
     return (
@@ -60,6 +32,81 @@ export function DiffView({ change }: { change: FileChange }) {
       </div>
     );
   }
+  if (change.kind === 'deleted') {
+    return <div className="diff-empty">已删除：{change.path}</div>;
+  }
 
-  return <div className="diff" ref={host} />;
+  const toggleAll = () => {
+    setAccepted(allAccepted ? new Set() : new Set(hunks.map((h) => h.id)));
+  };
+
+  const toggle = (id: number) => {
+    setAccepted((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  return (
+    <div className="diff-blocks">
+      <div className="diff-blocks-header">
+        <span className="diff-blocks-title" title={change.path}>
+          {change.path}
+        </span>
+        <label className="diff-blocks-all">
+          <input
+            type="checkbox"
+            checked={allAccepted}
+            onChange={toggleAll}
+          />
+          全选
+        </label>
+        <button
+          type="button"
+          className="diff-apply-btn"
+          onClick={() => onApply(mergeHunks(before, after, accepted))}
+        >
+          应用改动
+        </button>
+      </div>
+      {hunks.length === 0 ? (
+        <div className="diff-empty">没有差异</div>
+      ) : (
+        hunks.map((hunk) => (
+          <div
+            key={hunk.id}
+            className={`diff-hunk${
+              accepted.has(hunk.id) ? ' accepted' : ' rejected'
+            }`}
+          >
+            <label className="diff-hunk-head">
+              <input
+                type="checkbox"
+                checked={accepted.has(hunk.id)}
+                onChange={() => toggle(hunk.id)}
+              />
+              <span className="diff-hunk-range">
+                @@ -{hunk.beforeStart},{hunk.beforeLines.length} +
+                {hunk.afterStart},{hunk.afterLines.length} @@
+              </span>
+            </label>
+            <pre className="diff-hunk-body">
+              {hunk.beforeLines.map((l, i) => (
+                <div key={`d${i}`} className="diff-line del">
+                  -{l}
+                </div>
+              ))}
+              {hunk.afterLines.map((l, i) => (
+                <div key={`a${i}`} className="diff-line add">
+                  +{l}
+                </div>
+              ))}
+            </pre>
+          </div>
+        ))
+      )}
+    </div>
+  );
 }

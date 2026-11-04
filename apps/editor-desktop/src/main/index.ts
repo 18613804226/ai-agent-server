@@ -51,6 +51,8 @@ function createWindow(): void {
       nodeIntegration: false,
       // ESM 预加载脚本需要关闭 sandbox
       sandbox: false,
+      // 内置浏览器面板用 <webview>
+      webviewTag: true,
     },
   });
 
@@ -73,6 +75,17 @@ function createWindow(): void {
 app.whenReady().then(() => {
   registerIpc();
   createWindow();
+  // 内置浏览器（<webview>）调试：开发模式自动打开 DevTools，并打印加载失败
+  app.on('web-contents-created', (_event, contents) => {
+    if (contents.getType() !== 'webview') return;
+    contents.on('did-fail-load', (_e, code, desc, url) => {
+      console.error('[webview] 加载失败:', url, code, desc);
+    });
+    contents.on('console-message', (_e, _level, message) => {
+      console.log('[webview]', message);
+    });
+    if (isDev) contents.openDevTools({ mode: 'detach' });
+  });
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

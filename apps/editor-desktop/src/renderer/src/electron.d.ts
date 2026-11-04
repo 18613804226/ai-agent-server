@@ -70,6 +70,20 @@ declare global {
           cwd?: string,
           profile?: string,
         ): Promise<{ output: string; cwd: string; clear?: boolean }>;
+        spawn(
+          command: string,
+          cwd?: string,
+          profile?: string,
+        ): Promise<{ pid: number }>;
+        kill(): Promise<boolean>;
+        onOutput(
+          cb: (ev: {
+            type: 'data' | 'clear' | 'cwd' | 'exit';
+            data?: string;
+            cwd?: string;
+            code?: number;
+          }) => void,
+        ): () => void;
       };
       agent: {
         run(
@@ -108,6 +122,18 @@ declare global {
       chat: {
         getSessions(): Promise<unknown>;
         saveSessions(sessions: unknown): Promise<void>;
+      };
+      browser: {
+        create(url: string): Promise<number>;
+        navigate(
+          id: number,
+          url: string,
+        ): Promise<{ ok: boolean; url: string }>;
+        setBounds(
+          id: number,
+          bounds: { x: number; y: number; width: number; height: number },
+        ): Promise<void>;
+        close(id: number): Promise<void>;
       };
     };
   }

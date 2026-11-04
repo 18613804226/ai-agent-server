@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { basename, dirname, join, resolve } from 'path';
+import { spawn } from 'child_process';
 import {
   buildWorkspaceTree,
   createWorkspaceDirectory,
@@ -12,6 +13,7 @@ import {
   writeWorkspaceFile,
 } from '@repo/editor-agent';
 import { LocalAgent } from './agent/local-agent.js';
+import { browserManager } from './browser.js';
 import {
   getConfig,
   setConfig,
@@ -23,6 +25,9 @@ let localAgent: LocalAgent | null = null;
 let controller: AbortController | null = null;
 /** 终端当前目录（切换工作区时重置） */
 let terminalCwd: string | null = null;
+/** 当前通过 terminal:spawn 启动的进程（用于停止） */
+let spawnedChild: ReturnType<typeof spawn> | null = null;
+let spawnedPid: number | null = null;
 
 function getAgent(): LocalAgent {
   if (!localAgent) {
@@ -234,6 +239,88 @@ export function registerIpc(): void {
     },
   );
 
+  // 交互式终端：spawn 长进程，实时推送输出（dev server 等）
+  ipcMain.handle(
+    'terminal:spawn',
+    (
+      event,
+      payload: { cmd: string; cwd?: string; profile?: string },
+    ) => {
+      const root = getAgent().root;
+      if (!root) throw new Error('请先打开文件夹');
+      const cwd = payload.cwd || terminalCwd || root;
+      const cmd = String(payload.cmd ?? '').trim();
+      if (!cmd) return { pid: 0 };
+      if (cmd === 'clear' || cmd === 'cls') {
+        if (!event.sender.isDestroyed())
+          event.sender.send('terminal:output', { type: 'clear' });
+        return { pid: 0 };
+      }
+      if (cmd === 'cd' || cmd.startsWith('cd ')) {
+        const arg = cmd.slice(2).trim().replace(/^["']|["']$/g, '') || root;
+        const target = resolve(cwd, arg);
+        const roots = getAgent().roots;
+        if (!roots.some((r) => target === r || target.startsWith(r))) {
+          if (!event.sender.isDestroyed())
+            event.sender.send('terminal:output', {
+              type: 'data',
+              data: '拒绝：不能离开工作区',
+            });
+          return { pid: 0 };
+        }
+        terminalCwd = target;
+        if (!event.sender.isDestroyed())
+          event.sender.send('terminal:output', { type: 'cwd', cwd: target });
+        return { pid: 0 };
+      }
+      const profile = payload.profile || 'cmd';
+      let shell: string;
+      let args: string[];
+      if (profile === 'powershell') {
+        shell = 'powershell.exe';
+        args = ['-NoProfile', '-Command', cmd];
+      } else if (profile === 'gitbash') {
+        shell = 'bash.exe';
+        args = ['-c', cmd];
+      } else {
+        shell = 'cmd.exe';
+        args = ['/c', cmd];
+      }
+      const child = spawn(shell, args, { cwd, windowsHide: true });
+      const send = (data: string) => {
+        if (!event.sender.isDestroyed())
+          event.sender.send('terminal:output', { type: 'data', data });
+      };
+      child.stdout?.on('data', (buf: Buffer) => send(decodeProcOutput(buf)));
+      child.stderr?.on('data', (buf: Buffer) => send(decodeProcOutput(buf)));
+      child.on('close', (code) => {
+        if (spawnedChild === child) {
+          spawnedChild = null;
+          spawnedPid = null;
+        }
+        if (!event.sender.isDestroyed())
+          event.sender.send('terminal:output', { type: 'exit', code });
+      });
+      spawnedChild = child;
+      spawnedPid = child.pid ?? null;
+      return { pid: child.pid };
+    },
+  );
+
+  // 停止进程（Windows 用 taskkill /T 杀整个进程树，否则 node 子进程会残留）
+  ipcMain.handle('terminal:kill', async () => {
+    const pid = spawnedPid;
+    if (!pid) return false;
+    spawnedChild = null;
+    spawnedPid = null;
+    try {
+      await execAsync(`taskkill /pid ${pid} /T /F`, { windowsHide: true });
+    } catch {
+      // 进程可能已退出
+    }
+    return true;
+  });
+
   ipcMain.handle(
     'agent:run',
     async (
@@ -339,6 +426,25 @@ export function registerIpc(): void {
     }
     return agent.getState();
   });
+
+  // 内置浏览器
+  ipcMain.handle('browser:create', (_event, url: string) =>
+    browserManager.create(url),
+  );
+  ipcMain.handle('browser:navigate', (_event, id: number, url: string) =>
+    browserManager.navigate(id, url),
+  );
+  ipcMain.handle(
+    'browser:setBounds',
+    (
+      _event,
+      id: number,
+      bounds: { x: number; y: number; width: number; height: number },
+    ) => browserManager.setBounds(id, bounds),
+  );
+  ipcMain.handle('browser:close', (_event, id: number) =>
+    browserManager.close(id),
+  );
 
   // 聊天会话持久化：写入 userData/chat-sessions.json
   ipcMain.handle('chat:getSessions', () => {

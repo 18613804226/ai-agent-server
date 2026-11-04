@@ -51,6 +51,10 @@ export function App() {
   const [activeId, setActiveId] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  /** 内置浏览器预览地址；null 表示未打开 */
+  const [browserUrl, setBrowserUrl] = useState<string | null>(null);
+  /** 浏览器标签是否处于激活（可与文件标签切换） */
+  const [browserTabActive, setBrowserTabActive] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [streamingEditPath, setStreamingEditPath] = useState<string | null>(
@@ -84,6 +88,15 @@ export function App() {
     },
     [activeId],
   );
+
+  const openBrowser = (url: string) => {
+    setBrowserUrl(url || 'http://localhost:3000');
+    setBrowserTabActive(true);
+  };
+  const closeBrowser = () => {
+    setBrowserUrl(null);
+    setBrowserTabActive(false);
+  };
 
   const activeSession: ChatSession =
     sessions.find((s) => s.id === activeId) ?? {
@@ -166,6 +179,7 @@ export function App() {
     setActiveDiff,
     setError,
     reloadRef,
+    onBrowserOpen: openBrowser,
   });
 
   const {
@@ -233,14 +247,29 @@ export function App() {
       .catch(() => {});
   }, []);
 
+  // 兜底：如果 activeId 为空但已有会话，自动选中第一个
+  useEffect(() => {
+    if (!activeId && sessions.length) {
+      setActiveId(sessions[0].id);
+    }
+  }, [sessions, activeId]);
+
   // 会话变化时落盘（debounce）
   useEffect(() => {
     if (!sessions.length) return;
+    if (process.env.NODE_ENV === 'development') {
+      console.log(
+        '[chat] 保存会话',
+        sessions.length,
+        '当前消息数',
+        sessions.find((s) => s.id === activeId)?.messages.length ?? 0,
+      );
+    }
     const t = setTimeout(() => {
       void window.electron.chat.saveSessions(sessions);
     }, 500);
     return () => clearTimeout(t);
-  }, [sessions]);
+  }, [sessions, activeId]);
 
   const createSession = () => {
     const id = crypto.randomUUID();
@@ -342,6 +371,23 @@ export function App() {
     requestAnimationFrame(() => inputRef.current?.focus());
   };
 
+  /** 应用 diff 块审批结果：写回文件并同步改动记录与编辑器 */
+  const applyDiff = async (path: string, content: string) => {
+    try {
+      await backend.workspace.writeFile?.(path, content);
+    } catch (e: any) {
+      setError(e?.message || String(e));
+      return;
+    }
+    setChanges((prev) =>
+      prev.map((c) => (c.path === path ? { ...c, after: content } : c)),
+    );
+    if (activeFile === path) {
+      setFileContent(content);
+      setSavedContent(content);
+    }
+  };
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
@@ -394,6 +440,14 @@ export function App() {
           onClick={() => setTerminalOpen((v) => !v)}
         >
           终端
+        </button>
+        <button
+          className="ghost"
+          onClick={() =>
+            browserUrl ? closeBrowser() : openBrowser('http://localhost:3000')
+          }
+        >
+          浏览器
         </button>
         <div className="root-label" title={workspaceRoot}>
           {roots.length > 1
@@ -481,13 +535,22 @@ export function App() {
           tabContextMenu={tabContextMenu}
           terminalOpen={terminalOpen}
           editorRef={editorRef}
-          onSelectTab={(path) => void selectEditorTab(path)}
+          onSelectTab={(path) => {
+            setBrowserTabActive(false);
+            void selectEditorTab(path);
+          }}
           onRequestCloseTabs={requestCloseEditorTabs}
           onTabContextMenu={(menu) => setTabContextMenu(menu)}
           onCloseDiff={() => setActiveDiff(null)}
           onEditorChange={setFileContent}
           onAskAI={askAI}
           onCloseTerminal={() => setTerminalOpen(false)}
+          onApplyDiff={(path, content) => void applyDiff(path, content)}
+          browserUrl={browserUrl}
+          onCloseBrowser={closeBrowser}
+          browserTabActive={browserTabActive}
+          onSelectBrowserTab={() => setBrowserTabActive(true)}
+          onOpenBrowser={openBrowser}
         />
 
         <div
@@ -547,6 +610,7 @@ export function App() {
           onSelectDiff={setActiveDiff}
           onModelChange={(id) => void updateModel(id)}
           onToggleApproval={toggleApproval}
+          onOpenBrowser={openBrowser}
         />
       </div>
 

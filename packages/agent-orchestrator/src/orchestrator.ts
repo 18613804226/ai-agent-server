@@ -134,6 +134,8 @@ export interface OrchestratorConfig {
   zhipuLock: SimpleLock;
   /** 默认最大工具轮数 */
   defaultMaxRounds?: number;
+  /** 模型空响应（没说话也没调工具）时的最多追问重试次数；0/undefined 关闭 */
+  emptyRetryLimit?: number;
   /** 模型建连超时（ms），默认 60s */
   connectTimeoutMs?: number;
   /** 流式空闲超时（ms），默认 90s；两个 chunk 之间无数据即中止 */
@@ -427,6 +429,9 @@ export class AgentOrchestrator {
     let toolCallSeq = 0;
     let rawFullReply = '';
     let refusalRetried = false;
+    // 模型空响应（没说话也没调工具）时的追问重试次数
+    let emptyRetries = 0;
+    const emptyRetryLimit = this.config.emptyRetryLimit ?? 0;
     let lastFinishReason: string | undefined;
     let lastContextStats: ContextStats | undefined;
     // 本轮 artifact 存储 + 只读工具重复调用缓存
@@ -614,7 +619,30 @@ export class AgentOrchestrator {
       }
 
       // 没有工具要调 → 这一轮就是最终回答
-      if (!toolCalls.length) break;
+      if (!toolCalls.length) {
+        // 空响应（没说话也没调工具）：按配置换候选/追问重试，避免模型半路停
+        if (
+          !roundReply &&
+          emptyRetryLimit > 0 &&
+          emptyRetries < emptyRetryLimit &&
+          round < maxToolRounds
+        ) {
+          emptyRetries++;
+          if (chain.length > 1) {
+            // 还有备用候选：换下一个模型再试（比追问同一模型更有效）
+            chain = chain.slice(1);
+          } else {
+            messages.push({
+              role: 'user',
+              content:
+                '你上一轮没有输出任何内容或工具调用。请继续完成用户的任务；如需执行操作请调用工具。',
+            });
+          }
+          round--; // 不额外消耗轮数
+          continue;
+        }
+        break;
+      }
       if (signal?.aborted) return;
 
       // 有工具要调：把 assistant(tool_calls) 与执行结果追加进上下文，再来一轮流式

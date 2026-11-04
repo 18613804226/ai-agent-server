@@ -50,9 +50,11 @@ export function ChatPanel({
   onSelectDiff,
   onModelChange,
   onToggleApproval,
+  onOpenBrowser,
 }: {
   mode: AgentMode;
   sessionId: string;
+  onOpenBrowser?: (url: string) => void;
   sessions: ChatSession[];
   activeId: string;
   onCreateSession: () => void;
@@ -168,7 +170,12 @@ export function ChatPanel({
           </div>
         )}
         {messages.map((m) => (
-          <ChatMessage key={m.id} msg={m} streaming={streaming} />
+          <ChatMessage
+            key={m.id}
+            msg={m}
+            streaming={streaming}
+            onOpenBrowser={onOpenBrowser}
+          />
         ))}
         {streaming ? (
           <div className="generating">

@@ -1,4 +1,6 @@
-import { useState } from 'react';
+import { memo, useMemo, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { ImageLightbox } from './ImageLightbox';
 
 /** 一个聊天任务（会话） */
@@ -238,23 +240,52 @@ function ToolActivityBlock({
   );
 }
 
-/** 单条消息：按事件流顺序渲染段落 / 思考 / 工具 / 图片 */
-export function ChatMessage({
+/** 单条消息：按事件流顺序渲染段落 / 思考 / 工具 / 图片（memo 避免流式刷新时整列表重渲染） */
+export const ChatMessage = memo(function ChatMessage({
   msg,
   streaming,
+  onOpenBrowser,
 }: {
   msg: ChatMsg;
   streaming: boolean;
+  onOpenBrowser?: (url: string) => void;
 }) {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const blocks = useMemo(() => buildMessageBlocks(msg), [msg]);
   return (
     <div className={`msg msg-${msg.role}`}>
-      {buildMessageBlocks(msg).map((block, i) => {
+      {blocks.map((block, i) => {
         if (block.type === 'content') {
           const text = collapseBlankLines(block.text);
           return text ? (
-            <div key={i} className="content">
-              {text}
+            <div key={i} className="content markdown">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  a: ({ href, children }) => (
+                    <a
+                      href={href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => {
+                        // 本机地址：点击用内置浏览器打开，避免把主窗口导航走
+                        if (
+                          href &&
+                          onOpenBrowser &&
+                          /^https?:\/\/(localhost|127\.0\.0\.1)/.test(href)
+                        ) {
+                          e.preventDefault();
+                          onOpenBrowser(href);
+                        }
+                      }}
+                    >
+                      {children}
+                    </a>
+                  ),
+                }}
+              >
+                {text}
+              </ReactMarkdown>
             </div>
           ) : null;
         }
@@ -311,4 +342,4 @@ export function ChatMessage({
       ) : null}
     </div>
   );
-}
+});

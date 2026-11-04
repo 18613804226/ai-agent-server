@@ -26,6 +26,8 @@ export function createOrchestrator(clients: ModelClients): AgentOrchestrator {
       Number(process.env.CHAT_RATE_LIMIT_RETRIES ?? '2'),
     ),
     zhipuLock: new SimpleLock(),
+    // 模型空响应时自动追问，避免多步任务半路停住
+    emptyRetryLimit: 2,
     // 策略层：所有“可能永远不返回”的边界都要有超时
     connectTimeoutMs: envMs('CHAT_MODEL_CONNECT_TIMEOUT_MS', 60_000),
     streamIdleTimeoutMs: envMs('CHAT_MODEL_IDLE_TIMEOUT_MS', 90_000),

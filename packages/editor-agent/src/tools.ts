@@ -1,4 +1,5 @@
-﻿import {
+﻿import { spawn } from 'child_process';
+import {
   existsSync,
   mkdirSync,
   readdirSync,
@@ -285,6 +286,7 @@ export interface WorkspaceNode {
 export function createEditorTools(
   rootsInput: WorkspaceRootsInput,
   onChange?: ChangeListener,
+  onBrowserOpen?: (url: string) => void,
 ): RegisteredTool[] {
   const roots = normalizeRoots(rootsInput);
   const primary = roots[0]?.path || process.cwd();
@@ -566,8 +568,11 @@ export function createEditorTools(
       },
       async (args) => {
         const abs = safeResolve(String(args.path));
+        const existed = existsSync(abs);
         mkdirSync(abs, { recursive: true });
-        return `已创建目录 ${args.path}`;
+        return existed
+          ? `目录已存在：${args.path}`
+          : `目录已创建：${args.path}`;
       },
     ),
     tool(
@@ -677,16 +682,24 @@ export function createEditorTools(
         function: {
           name: 'run_terminal',
           description:
-            '在工作区目录执行一条终端命令并返回输出。仅用于构建、测试、git 状态等只读/安全操作。启动 Web 项目前先读 package.json 的 scripts，优先用项目自带命令（npm run dev / serve / vite）。如果没有 package.json 或 scripts 里没有 dev/serve，用 Node.js 启动静态服务器（npx serve / npx http-server），不要用 python -m http.server。',
+            '在工作区目录执行一条终端命令并返回输出。仅用于构建、测试、git 状态等只读/安全操作。启动 Web 项目前先读 package.json 的 scripts，优先用项目自带命令（npm run dev / serve / vite）。如果没有 package.json 或 scripts 里没有 dev/serve，用 Node.js 启动静态服务器（npx serve / npx http-server），不要用 python -m http.server。注意：命令里的相对路径以工作区根为基准，不要加根名前缀（用 vue-app/index.html，而不是 test/vue-app/index.html）。',
           parameters: {
             type: 'object',
-            properties: { command: { type: 'string' } },
+            properties: {
+              command: { type: 'string' },
+              background: {
+                type: 'boolean',
+                description:
+                  '是否后台运行（用于 dev server 等长期进程，立即返回不等待）',
+              },
+            },
             required: ['command'],
           },
         },
       },
       async (args) => {
         const command = String(args.command ?? '');
+        const background = Boolean(args.background);
         if (!command.trim()) return '命令不能为空';
         const denied =
           /rm\s+-rf|rd\s+\/s|format\s+[a-z]:|mkfs|dd\s+if=|:?\(\)\s*\{|shutdown|reboot|del\s+\/[sq]/i;
@@ -700,6 +713,17 @@ export function createEditorTools(
             '请改用 Node.js：npx serve . 或 npx http-server .'
           );
         }
+        // 后台运行：用于 dev server 等长期进程，立即返回
+        if (background) {
+          const child = spawn('cmd.exe', ['/c', command], {
+            cwd: primary,
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true,
+          });
+          child.unref();
+          return `已在后台启动（PID ${child.pid}）：${command}。可用内置浏览器打开对应地址查看。`;
+        }
         try {
           const { stdout, stderr } = await execAsync(command, {
             cwd: primary,
@@ -712,8 +736,43 @@ export function createEditorTools(
           return truncate(out || '（命令无输出）');
         } catch (e: any) {
           const out = decodeProcOutput(e.stdout, e.stderr).trim();
-          return truncate(`${out || e.message || '命令执行失败'}`);
+          const code = e.code != null ? `（退出码 ${e.code}）` : '';
+          return truncate(
+            `${out || e.message || '命令执行失败'}${code ? ` ${code}` : ''}\n提示：同一命令失败不要原样重试超过 2 次，请换思路或询问用户。`,
+          );
         }
+      },
+    ),
+    tool(
+      {
+        type: 'function',
+        function: {
+          name: 'open_in_browser',
+          description:
+            '在内置浏览器中打开指定 URL（仅支持 http://localhost / 127.0.0.1）。启动 Web 项目后调用它让用户预览。',
+          parameters: {
+            type: 'object',
+            properties: {
+              url: { type: 'string', description: '如 http://localhost:3000' },
+            },
+            required: ['url'],
+          },
+        },
+      },
+      async (args) => {
+        // 模型有时会把地址写成 Markdown（**url**、`url`），这里清洗后再校验
+        const url = String(args.url ?? '')
+          .replace(/\*\*/g, '')
+          .replace(/[`*_]/g, '')
+          .trim();
+        if (!/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(url)) {
+          return `URL 不被支持：只能打开 http://localhost 或 http://127.0.0.1 的地址（收到：${url}）`;
+        }
+        if (!onBrowserOpen) {
+          return '当前模式不支持内置浏览器，请告诉用户在浏览器中打开该地址';
+        }
+        onBrowserOpen(url);
+        return `已在内置浏览器中打开 ${url}`;
       },
     ),
     tool(

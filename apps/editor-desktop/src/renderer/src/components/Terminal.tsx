@@ -21,13 +21,52 @@ const TERMINAL_PROFILES = [
   { id: 'gitbash', name: 'Git Bash' },
 ];
 
-/** 终端：支持多标签（每个标签独立 cwd / 历史） */
+/** 剥离 ANSI 转义码（颜色/光标等），避免终端显示乱码 */
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+}
+
+/** 把输出行里的 URL 渲染成可点击链接 */
+function renderLine(text: string, onOpenBrowser?: (url: string) => void) {
+  const parts = text.split(/(https?:\/\/[^\s]+)/g);
+  return parts.map((part, i) => {
+    if (/^https?:\/\//.test(part)) {
+      return (
+        <a
+          key={i}
+          href={part}
+          className="terminal-link"
+          onClick={(e) => {
+            e.preventDefault();
+            // Ctrl/Cmd + 点击 → 外部浏览器
+            if (e.ctrlKey || e.metaKey) {
+              window.open(part, '_blank', 'noopener,noreferrer');
+              return;
+            }
+            if (/^https?:\/\/(localhost|127\.0\.0\.1)/.test(part)) {
+              onOpenBrowser?.(part);
+            } else {
+              window.open(part, '_blank', 'noopener,noreferrer');
+            }
+          }}
+        >
+          {part}
+        </a>
+      );
+    }
+    return <span key={i}>{part}</span>;
+  });
+}
+
+/** 终端：多标签 + 实时输出 + 历史命令（↑/↓）+ 可点击链接 */
 export function Terminal({
   onClose,
   height,
+  onOpenBrowser,
 }: {
   onClose: () => void;
   height?: number;
+  onOpenBrowser?: (url: string) => void;
 }) {
   const [terminals, setTerminals] = useState<TerminalTab[]>([
     {
@@ -44,11 +83,12 @@ export function Terminal({
   ]);
   const [activeId, setActiveId] = useState('default');
   const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
   const bodyRef = useRef<HTMLDivElement>(null);
 
   const active = terminals.find((t) => t.id === activeId) ?? terminals[0];
 
-  // 新终端首次激活时拉取当前工作目录
   useEffect(() => {
     if (!active.cwd) {
       void window.electron.terminal
@@ -61,6 +101,45 @@ export function Terminal({
         .catch(() => {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
+
+  // 实时输出（spawn 长进程）
+  useEffect(() => {
+    const off = window.electron.terminal.onOutput((ev) => {
+      if (ev.type === 'data' && ev.data) {
+        const text = stripAnsi(ev.data);
+        setTerminals((prev) =>
+          prev.map((t) => {
+            if (t.id !== activeId) return t;
+            const lines = [...t.lines];
+            const parts = text.split('\n');
+            const last = lines[lines.length - 1];
+            if (last && last.type === 'out') {
+              lines[lines.length - 1] = { ...last, text: last.text + parts[0] };
+            } else {
+              lines.push({ type: 'out', text: parts[0] });
+            }
+            for (let i = 1; i < parts.length; i++) {
+              lines.push({ type: 'out', text: parts[i] });
+            }
+            return { ...t, lines };
+          }),
+        );
+      } else if (ev.type === 'clear') {
+        setTerminals((prev) =>
+          prev.map((t) => (t.id === activeId ? { ...t, lines: [] } : t)),
+        );
+      } else if (ev.type === 'cwd' && ev.cwd) {
+        setTerminals((prev) =>
+          prev.map((t) => (t.id === activeId ? { ...t, cwd: ev.cwd! } : t)),
+        );
+      } else if (ev.type === 'exit') {
+        setTerminals((prev) =>
+          prev.map((t) => (t.id === activeId ? { ...t, running: false } : t)),
+        );
+      }
+    });
+    return off;
   }, [activeId]);
 
   useEffect(() => {
@@ -100,7 +179,7 @@ export function Terminal({
 
   const closeTerminal = (id: string) => {
     setTerminals((prev) => {
-      if (prev.length <= 1) return prev; // 至少保留一个
+      if (prev.length <= 1) return prev;
       const next = prev.filter((t) => t.id !== id);
       if (activeId === id) setActiveId(next[0].id);
       return next;
@@ -112,37 +191,62 @@ export function Terminal({
     const cmd = command.trim();
     if (!cmd || active.running) return;
     const prompt = `PS ${active.cwd || ''}>`;
+    // 记录历史（去重相邻重复）
+    setHistory((prev) =>
+      prev[prev.length - 1] === cmd ? prev : [...prev, cmd],
+    );
+    setHistoryIndex(-1);
     updateTerminal(id, (prev) => ({
       lines: [...prev.lines, { type: 'cmd', text: `${prompt} ${cmd}` }],
       input: '',
       running: true,
     }));
     try {
-      const r = await window.electron.terminal.run(
+      await window.electron.terminal.spawn(
         cmd,
         active.cwd || undefined,
         active.profile,
       );
-      updateTerminal(id, (prev) => ({
-        cwd: r.cwd,
-        lines: r.clear
-          ? []
-          : [
-              ...prev.lines,
-              ...(r.output
-                ? [{ type: 'out' as const, text: r.output.replace(/\s+$/, '') }]
-                : []),
-            ],
-      }));
     } catch (e: any) {
       updateTerminal(id, (prev) => ({
-        lines: [
-          ...prev.lines,
-          { type: 'out', text: `⚠️ ${e?.message || e}` },
-        ],
+        lines: [...prev.lines, { type: 'out', text: `⚠️ ${e?.message || e}` }],
+        running: false,
       }));
-    } finally {
-      updateTerminal(id, { running: false });
+    }
+  };
+
+  const onInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Ctrl+C 停止当前进程
+    if (e.key === 'c' && e.ctrlKey) {
+      e.preventDefault();
+      void window.electron.terminal.kill();
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!history.length) return;
+      const idx =
+        historyIndex < 0 ? history.length - 1 : Math.max(0, historyIndex - 1);
+      setHistoryIndex(idx);
+      updateTerminal(active.id, { input: history[idx] });
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (historyIndex < 0) return;
+      const idx = historyIndex + 1;
+      if (idx >= history.length) {
+        setHistoryIndex(-1);
+        updateTerminal(active.id, { input: '' });
+      } else {
+        setHistoryIndex(idx);
+        updateTerminal(active.id, { input: history[idx] });
+      }
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void run(active.input);
     }
   };
 
@@ -224,31 +328,36 @@ export function Terminal({
           </svg>
         </button>
       </div>
+      <div className="term-prompt">
+        <span className="term-ps">{`PS ${active.cwd || ''}>`}</span>
+        <input
+          aria-label="终端命令"
+          value={active.input}
+          onChange={(e) => updateTerminal(active.id, { input: e.target.value })}
+          onKeyDown={onInputKeyDown}
+          autoFocus
+          spellCheck={false}
+        />
+        {active.running ? (
+          <>
+            <span className="terminal-running">服务运行中</span>
+            <button
+              type="button"
+              className="terminal-stop"
+              title="停止"
+              onClick={() => void window.electron.terminal.kill()}
+            >
+              ■
+            </button>
+          </>
+        ) : null}
+      </div>
       <div className="terminal-body" ref={bodyRef}>
         {active.lines.map((line, i) => (
           <div key={i} className={`term-line ${line.type}`}>
-            {line.text}
+            {renderLine(line.text, onOpenBrowser)}
           </div>
         ))}
-        <div className="term-prompt">
-          <span className="term-ps">{`PS ${active.cwd || ''}>`}</span>
-          <input
-            aria-label="终端命令"
-            value={active.input}
-            onChange={(e) => updateTerminal(active.id, { input: e.target.value })}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                void run(active.input);
-              }
-            }}
-            autoFocus
-            spellCheck={false}
-          />
-          {active.running ? (
-            <span className="terminal-running">运行中…</span>
-          ) : null}
-        </div>
       </div>
     </div>
   );

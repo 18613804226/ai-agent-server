@@ -88,6 +88,26 @@ const api = {
       profile?: string,
     ): Promise<{ output: string; cwd: string; clear?: boolean }> =>
       ipcRenderer.invoke('terminal:run', { cmd: command, cwd, profile }),
+    spawn: (
+      command: string,
+      cwd?: string,
+      profile?: string,
+    ): Promise<{ pid: number }> =>
+      ipcRenderer.invoke('terminal:spawn', { cmd: command, cwd, profile }),
+    kill: (): Promise<boolean> => ipcRenderer.invoke('terminal:kill'),
+    onOutput: (
+      callback: (ev: {
+        type: 'data' | 'clear' | 'cwd' | 'exit';
+        data?: string;
+        cwd?: string;
+        code?: number;
+      }) => void,
+    ): (() => void) => {
+      const listener = (_event: unknown, ev: unknown) =>
+        callback(ev as never);
+      ipcRenderer.on('terminal:output', listener);
+      return () => ipcRenderer.removeListener('terminal:output', listener);
+    },
   },
   agent: {
     run: (
@@ -134,6 +154,21 @@ const api = {
       ipcRenderer.invoke('chat:getSessions'),
     saveSessions: (sessions: unknown): Promise<void> =>
       ipcRenderer.invoke('chat:saveSessions', sessions),
+  },
+  browser: {
+    create: (url: string): Promise<number> =>
+      ipcRenderer.invoke('browser:create', url),
+    navigate: (
+      id: number,
+      url: string,
+    ): Promise<{ ok: boolean; url: string }> =>
+      ipcRenderer.invoke('browser:navigate', id, url),
+    setBounds: (
+      id: number,
+      bounds: { x: number; y: number; width: number; height: number },
+    ): Promise<void> => ipcRenderer.invoke('browser:setBounds', id, bounds),
+    close: (id: number): Promise<void> =>
+      ipcRenderer.invoke('browser:close', id),
   },
 };
 
