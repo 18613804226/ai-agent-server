@@ -142,8 +142,18 @@ export function Terminal({
     return off;
   }, [activeId]);
 
+  // 输出自动贴底；用户向上查看时不打断
+  const stickToBottomRef = useRef(true);
+  const onScroll = () => {
+    const el = bodyRef.current;
+    if (!el) return;
+    stickToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
   useEffect(() => {
-    bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight });
+    if (stickToBottomRef.current) {
+      bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight });
+    }
   }, [active.lines]);
 
   const updateTerminal = (
@@ -285,6 +295,14 @@ export function Terminal({
           <button
             type="button"
             className="terminal-tab-add"
+            title="清屏"
+            onClick={() => updateTerminal(active.id, { lines: [] })}
+          >
+            ⌫
+          </button>
+          <button
+            type="button"
+            className="terminal-tab-add"
             title="新建终端"
             onClick={() => setShowProfileMenu((v) => !v)}
           >
@@ -352,7 +370,7 @@ export function Terminal({
           </>
         ) : null}
       </div>
-      <div className="terminal-body" ref={bodyRef}>
+      <div className="terminal-body" ref={bodyRef} onScroll={onScroll}>
         {active.lines.map((line, i) => (
           <div key={i} className={`term-line ${line.type}`}>
             {renderLine(line.text, onOpenBrowser)}

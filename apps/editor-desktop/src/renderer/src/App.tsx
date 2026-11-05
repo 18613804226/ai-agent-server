@@ -89,14 +89,14 @@ export function App() {
     [activeId],
   );
 
-  const openBrowser = (url: string) => {
+  const openBrowser = useCallback((url: string) => {
     setBrowserUrl(url || 'http://localhost:3000');
     setBrowserTabActive(true);
-  };
-  const closeBrowser = () => {
+  }, []);
+  const closeBrowser = useCallback(() => {
     setBrowserUrl(null);
     setBrowserTabActive(false);
-  };
+  }, []);
 
   const activeSession: ChatSession =
     sessions.find((s) => s.id === activeId) ?? {
@@ -132,6 +132,7 @@ export function App() {
     respondToTabClosePrompt,
     selectEditorTab,
     saveCurrent,
+    saveAllDirty,
     dirty,
   } = useEditorTabs({ backend, setActiveDiff, setError });
 
@@ -382,6 +383,10 @@ export function App() {
     setChanges((prev) =>
       prev.map((c) => (c.path === path ? { ...c, after: content } : c)),
     );
+    // 同步更新当前对比对象，否则再次应用会基于旧的 after
+    setActiveDiff((prev) =>
+      prev && prev.path === path ? { ...prev, after: content } : prev,
+    );
     if (activeFile === path) {
       setFileContent(content);
       setSavedContent(content);
@@ -611,6 +616,8 @@ export function App() {
           onModelChange={(id) => void updateModel(id)}
           onToggleApproval={toggleApproval}
           onOpenBrowser={openBrowser}
+          onApplyDiff={(path, content) => void applyDiff(path, content)}
+          onSaveChanges={() => void saveAllDirty()}
         />
       </div>
 

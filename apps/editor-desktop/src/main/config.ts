@@ -31,8 +31,12 @@ export interface AppConfig {
   providers: ProviderConfig[];
   /** 本地模式选中的模型 id */
   selectedModel: string;
-  /** 工具审批：always 询问 / auto 自动放行 */
-  approvalMode: ApprovalMode;
+  /** @deprecated 用 commandApproval / fileApproval 代替 */
+  approvalMode?: ApprovalMode;
+  /** 命令执行审批：ask 询问 / auto 自动放行 */
+  commandApproval: ApprovalMode;
+  /** 文件操作审批（写/删/移动）：ask 询问 / auto 自动放行 */
+  fileApproval: ApprovalMode;
   local: {
     /** 上次打开的多个工作区文件夹（下次启动恢复） */
     workspaceRoots?: string[];
@@ -64,7 +68,8 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = PROVIDER_PRESETS.filter(
 const DEFAULTS: AppConfig = {
   providers: DEFAULT_PROVIDERS,
   selectedModel: DEFAULT_MODEL_ID,
-  approvalMode: 'ask',
+  commandApproval: 'ask',
+  fileApproval: 'ask',
   local: { workspaceRoots: [] },
   remote: { model: '' },
 };
@@ -92,7 +97,17 @@ export function getConfig(): AppConfig {
         typeof raw.selectedModel === 'string'
           ? raw.selectedModel
           : DEFAULTS.selectedModel,
-      approvalMode: raw.approvalMode === 'auto' ? 'auto' : 'ask',
+      // 兼容旧配置：approvalMode 迁移到 commandApproval/fileApproval
+      commandApproval:
+        raw.commandApproval === 'auto' ||
+        (!raw.commandApproval && raw.approvalMode === 'auto')
+          ? 'auto'
+          : 'ask',
+      fileApproval:
+        raw.fileApproval === 'auto' ||
+        (!raw.fileApproval && raw.approvalMode === 'auto')
+          ? 'auto'
+          : 'ask',
       local: {
         workspaceRoots: Array.isArray(raw.local?.workspaceRoots)
           ? raw.local.workspaceRoots

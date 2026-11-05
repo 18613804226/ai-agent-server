@@ -25,6 +25,8 @@ export interface CreateEditorAgentOptions {
   verifier?: VerifyHook | null;
   /** 内置浏览器打开回调（open_in_browser 工具用） */
   onBrowserOpen?: (url: string) => void;
+  /** true=文件改动不直接落盘，产出 pending diff 等用户确认（diff 块审批） */
+  deferWrite?: boolean;
 }
 
 /**
@@ -43,7 +45,12 @@ export function createEditorAgent(
       ? null
       : options.verifier ?? createVerifier(roots);
 
-  const tools = createEditorTools(roots, onChange, options.onBrowserOpen);
+  const tools = createEditorTools(
+    roots,
+    onChange,
+    options.onBrowserOpen,
+    options.deferWrite,
+  );
   tools.push({
     definition: {
       type: 'function',

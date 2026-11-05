@@ -156,6 +156,7 @@ export function useAgentRun(deps: UseAgentRunDeps) {
                   tokens: ev.tokens,
                   completionTokens: ev.completionTokens,
                   durationMs: dur,
+                  changes: ev.changes,
                 }
               : msg,
           ),

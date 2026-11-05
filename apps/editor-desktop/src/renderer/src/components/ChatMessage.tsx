@@ -1,6 +1,8 @@
 import { memo, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { changeLabel } from '../diff';
+import type { FileChange } from '../mode/types';
 import { ImageLightbox } from './ImageLightbox';
 
 /** 一个聊天任务（会话） */
@@ -29,6 +31,8 @@ export interface ChatMsg {
   completionTokens?: number;
   /** 本轮耗时（毫秒） */
   durationMs?: number;
+  /** 本轮修改的文件（用于消息末尾预览/对比） */
+  changes?: FileChange[];
 }
 
 export type ChatEventItem =
@@ -245,13 +249,23 @@ export const ChatMessage = memo(function ChatMessage({
   msg,
   streaming,
   onOpenBrowser,
+  onSelectDiff,
+  onApplyDiff,
+  onSaveChanges,
 }: {
   msg: ChatMsg;
   streaming: boolean;
   onOpenBrowser?: (url: string) => void;
+  onSelectDiff?: (c: FileChange) => void;
+  onApplyDiff?: (path: string, content: string) => void;
+  onSaveChanges?: () => void;
 }) {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const blocks = useMemo(() => buildMessageBlocks(msg), [msg]);
+  const pendingChanges = useMemo(
+    () => msg.changes?.filter((c) => c.pending) ?? [],
+    [msg.changes],
+  );
   return (
     <div className={`msg msg-${msg.role}`}>
       {blocks.map((block, i) => {
@@ -330,6 +344,85 @@ export const ChatMessage = memo(function ChatMessage({
                 (msg.durationMs / 1000)
               ).toFixed(0)} tokens/s`
             : ''}
+        </div>
+      ) : null}
+      {msg.changes?.length ? (
+        <div className="message-changes">
+          <div className="message-changes-title">
+            {pendingChanges.length
+              ? `${pendingChanges.length} 个文件待确认`
+              : `${msg.changes.length} 个文件已修改`}
+            {pendingChanges.length ? (
+              <>
+                <button
+                  type="button"
+                  className="message-changes-save"
+                  onClick={() =>
+                    pendingChanges.forEach((c) =>
+                      onApplyDiff?.(c.path, c.after ?? ''),
+                    )
+                  }
+                  title="确认写入文件"
+                >
+                  确认写入
+                </button>
+                <button
+                  type="button"
+                  className="message-changes-revert"
+                  onClick={() =>
+                    pendingChanges.forEach((c) =>
+                      onApplyDiff?.(c.path, c.before ?? ''),
+                    )
+                  }
+                  title="取消改动，恢复为修改前"
+                >
+                  取消
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="message-changes-save"
+                  onClick={() => onSaveChanges?.()}
+                  title="保存全部改动（写入文件）"
+                >
+                  保存改动
+                </button>
+                <button
+                  type="button"
+                  className="message-changes-revert"
+                  onClick={() =>
+                    msg.changes?.forEach((c) =>
+                      onApplyDiff?.(c.path, c.before ?? ''),
+                    )
+                  }
+                  title="放弃全部改动，恢复为修改前"
+                >
+                  全部回滚
+                </button>
+              </>
+            )}
+          </div>
+          <ul className="message-changes-list">
+            {msg.changes.map((c, i) => (
+              <li key={`${c.kind}-${c.path}-${i}`}>
+                <button
+                  type="button"
+                  onClick={() => onSelectDiff?.(c)}
+                  title={`预览改动：${c.path}`}
+                >
+                  <span className={`badge badge-${c.kind}`}>
+                    {changeLabel(c.kind)}
+                  </span>
+                  <span className="message-changes-path">{c.path}</span>
+                  {c.pending ? (
+                    <span className="message-changes-pending">待确认</span>
+                  ) : null}
+                </button>
+              </li>
+            ))}
+          </ul>
         </div>
       ) : null}
       {previewIndex !== null && msg.images?.length ? (

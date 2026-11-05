@@ -193,6 +193,21 @@ export function useEditorTabs({
     }
   }, [activeFile, fileContent, backend, setSavedContent, setError]);
 
+  /** 保存所有未保存（dirty）的文件 */
+  const saveAllDirty = useCallback(async () => {
+    for (const tab of editorTabs) {
+      if (tab.content === tab.savedContent) continue;
+      if (!backend.workspace.writeFile) continue;
+      try {
+        await backend.workspace.writeFile(tab.path, tab.content);
+        setSavedContent(tab.content);
+        setError('');
+      } catch (e: any) {
+        setError(e?.message || String(e));
+      }
+    }
+  }, [editorTabs, backend, setSavedContent, setError]);
+
   return {
     editorTabs,
     setEditorTabs,
@@ -218,6 +233,7 @@ export function useEditorTabs({
     respondToTabClosePrompt,
     selectEditorTab,
     saveCurrent,
+    saveAllDirty,
     dirty,
   };
 }

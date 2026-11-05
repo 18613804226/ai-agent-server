@@ -259,12 +259,12 @@ export function registerIpc(): void {
       if (cmd === 'cd' || cmd.startsWith('cd ')) {
         const arg = cmd.slice(2).trim().replace(/^["']|["']$/g, '') || root;
         const target = resolve(cwd, arg);
-        const roots = getAgent().roots;
-        if (!roots.some((r) => target === r || target.startsWith(r))) {
+        // 终端面板允许切换到任意本地目录（用户手动操作）；AI 工具仍受工作区限制
+        if (!existsSync(target)) {
           if (!event.sender.isDestroyed())
             event.sender.send('terminal:output', {
               type: 'data',
-              data: '拒绝：不能离开工作区',
+              data: `目录不存在：${target}`,
             });
           return { pid: 0 };
         }

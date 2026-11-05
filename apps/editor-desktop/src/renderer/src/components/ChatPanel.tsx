@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, type RefObject } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  type RefObject,
+} from 'react';
 import { ChatMessage, formatElapsed, type ChatMsg } from './ChatMessage';
 import { Composer } from './Composer';
 import { changeLabel, diffLines } from '../diff';
@@ -51,10 +57,14 @@ export function ChatPanel({
   onModelChange,
   onToggleApproval,
   onOpenBrowser,
+  onApplyDiff,
+  onSaveChanges,
 }: {
   mode: AgentMode;
   sessionId: string;
   onOpenBrowser?: (url: string) => void;
+  onApplyDiff: (path: string, content: string) => void;
+  onSaveChanges: () => void;
   sessions: ChatSession[];
   activeId: string;
   onCreateSession: () => void;
@@ -99,9 +109,11 @@ export function ChatPanel({
       el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   };
 
-  useEffect(() => {
+  // 用 layout effect + 直接设置 scrollTop，避免绘制后跳动
+  useLayoutEffect(() => {
     if (stickToBottomRef.current) {
-      chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
+      const el = chatRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
     }
   }, [messages, changes, chatRef]);
 
@@ -175,6 +187,9 @@ export function ChatPanel({
             msg={m}
             streaming={streaming}
             onOpenBrowser={onOpenBrowser}
+            onSelectDiff={onSelectDiff}
+            onApplyDiff={onApplyDiff}
+            onSaveChanges={onSaveChanges}
           />
         ))}
         {streaming ? (

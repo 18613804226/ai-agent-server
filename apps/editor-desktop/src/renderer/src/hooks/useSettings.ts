@@ -118,7 +118,7 @@ export function useSettings({
     if (!config) return;
     const next: AppConfig = {
       ...config,
-      approvalMode: config.approvalMode === 'auto' ? 'ask' : 'auto',
+      commandApproval: config.commandApproval === 'auto' ? 'ask' : 'auto',
     };
     void saveConfig(next);
   };

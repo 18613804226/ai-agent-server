@@ -46,6 +46,8 @@ export class LocalAgent {
   private agent: AgentDefinition | null = null;
   /** 本轮工具产生的文件改动 */
   private changes: FileChange[] = [];
+  /** 文件操作审批开启：改动不直接落盘，产出 pending diff 等用户确认 */
+  private deferWrite = false;
   /** 等待渲染层响应的审批请求 */
   private readonly pendingApprovals = new Map<string, (approved: boolean) => void>();
   /** 审批事件出口；未设置时自动放行（避免无 UI 场景挂起） */
@@ -170,9 +172,21 @@ export class LocalAgent {
   }
 
   private needsApproval(name: string, args: Record<string, unknown>): boolean {
-    if (getConfig().approvalMode === 'auto') return false;
-    if (APPROVAL_TOOLS.has(name)) return true;
+    const cfg = getConfig();
+    // 文件操作（写/删/移动）：由「文件操作审批」开关控制
+    const fileTools = [
+      'write_file',
+      'edit_file',
+      'apply_patch',
+      'delete_file',
+      'move_file',
+    ];
+    if (fileTools.includes(name)) {
+      return cfg.fileApproval !== 'auto';
+    }
+    // 命令执行：由「命令执行审批」开关控制（仅危险命令）
     if (name === 'run_terminal') {
+      if (cfg.commandApproval === 'auto') return false;
       return RISKY_COMMAND.test(String(args.command ?? ''));
     }
     return false;
@@ -245,8 +259,11 @@ export class LocalAgent {
       {
         onBrowserOpen: (url) =>
           this.eventSink?.({ type: 'browser_open', url }),
+        // 文件操作审批开启时：改动不直接落盘，产出 pending diff 等用户确认
+        deferWrite: getConfig().fileApproval === 'ask',
       },
     );
+    this.deferWrite = getConfig().fileApproval === 'ask';
     const approvalPolicy: ApprovalPolicy = (name, args) =>
       this.needsApproval(name, args) ? 'ask' : 'allow';
     const requestApproval: ApprovalHook = (context) =>

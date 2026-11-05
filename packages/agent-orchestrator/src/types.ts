@@ -147,6 +147,8 @@ export interface FileChange {
   after?: string;
   /** renamed 时的原路径 */
   from?: string;
+  /** true=待用户确认（diff 块审批），确认后才写入 */
+  pending?: boolean;
 }
 
 /**

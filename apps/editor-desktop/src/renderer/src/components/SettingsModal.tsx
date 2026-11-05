@@ -44,7 +44,11 @@ export function SettingsModal({
     setSaving(true);
     setError('');
     try {
-      await onSave({ ...draft, approvalMode: draft.approvalMode ?? 'ask' });
+      await onSave({
+        ...draft,
+        commandApproval: draft.commandApproval ?? 'ask',
+        fileApproval: draft.fileApproval ?? 'ask',
+      });
       onClose();
     } catch (e: any) {
       setError(e?.message || String(e));
@@ -145,40 +149,48 @@ export function SettingsModal({
             <div className="section-head">
               <h4>工具审批</h4>
             </div>
-            <label className="approval-option">
-              <input
-                type="radio"
-                name="approvalMode"
-                value="ask"
-                checked={draft.approvalMode !== 'auto'}
-                onChange={() =>
-                  setDraft((d) => ({ ...d, approvalMode: 'ask' }))
-                }
-              />
-              <span>
-                <strong>总是询问</strong>
+            <div className="approval-row">
+              <div className="approval-row-text">
+                <strong>命令执行审批</strong>
                 <span className="muted small">
-                  写文件、删文件、移动、危险命令都会弹 diff 确认
+                  run_terminal 等命令执行前询问（危险命令）
                 </span>
-              </span>
-            </label>
-            <label className="approval-option">
-              <input
-                type="radio"
-                name="approvalMode"
-                value="auto"
-                checked={draft.approvalMode === 'auto'}
-                onChange={() =>
-                  setDraft((d) => ({ ...d, approvalMode: 'auto' }))
-                }
-              />
-              <span>
-                <strong>自动放行</strong>
+              </div>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={draft.commandApproval !== 'auto'}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      commandApproval: e.target.checked ? 'ask' : 'auto',
+                    }))
+                  }
+                />
+                <span className="switch-slider" />
+              </label>
+            </div>
+            <div className="approval-row">
+              <div className="approval-row-text">
+                <strong>文件操作审批</strong>
                 <span className="muted small">
-                  不弹窗，所有工具直接执行（风险自负）
+                  写、删、移动文件前询问（可在 diff 里逐块确认/取消）
                 </span>
-              </span>
-            </label>
+              </div>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={draft.fileApproval !== 'auto'}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      fileApproval: e.target.checked ? 'ask' : 'auto',
+                    }))
+                  }
+                />
+                <span className="switch-slider" />
+              </label>
+            </div>
           </section>
 
           {error ? <div className="modal-error">⚠️ {error}</div> : null}

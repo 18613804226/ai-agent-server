@@ -44,6 +44,10 @@ describe('isLiveInfoQuery', () => {
     '嗯嗯',
     '好嘞',
     '哈哈哈',
+    '嘻嘻',
+    '嘻嘻哈哈',
+    '笑嘻嘻',
+    '好不好',
   ])('不将一般查询识别为实时查询：%s', (query) => {
     expect(isLiveInfoQuery(query)).toBe(false);
   });

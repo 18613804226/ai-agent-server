@@ -42,8 +42,12 @@ export interface ProviderStatus {
 export interface AppConfig {
   providers: ProviderConfig[];
   selectedModel: string;
-  /** 工具审批：always 询问 / auto 自动放行 */
+  /** @deprecated 用 commandApproval / fileApproval */
   approvalMode?: 'ask' | 'auto';
+  /** 命令执行审批：ask 询问 / auto 自动放行 */
+  commandApproval: 'ask' | 'auto';
+  /** 文件操作审批：ask 询问 / auto 自动放行 */
+  fileApproval: 'ask' | 'auto';
   local: { workspaceRoot?: string };
   remote: { model?: string };
 }
@@ -54,6 +58,8 @@ export interface FileChange {
   before?: string;
   after?: string;
   from?: string;
+  /** true=待用户确认（diff 块审批），确认后才写入 */
+  pending?: boolean;
 }
 
 /** 两种模式共用的流式事件（本地 IPC / 云端 SSE 结构一致） */

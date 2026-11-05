@@ -295,19 +295,19 @@ export function Composer({
             <button
               type="button"
               className={`icon-btn approval-toggle ${
-                config?.approvalMode === 'auto' ? 'is-auto' : 'is-ask'
+                config?.commandApproval === 'auto' ? 'is-auto' : 'is-ask'
               }`}
               title={
-                config?.approvalMode === 'auto'
-                  ? '当前：自动放行所有工具（点击切换为询问）'
-                  : '当前：写/删/危险命令需确认（点击切换为自动放行）'
+                config?.commandApproval === 'auto'
+                  ? '当前：命令自动放行（点击切换为询问）'
+                  : '当前：危险命令需确认（点击切换为自动放行）'
               }
               aria-label={
-                config?.approvalMode === 'auto'
-                  ? '自动放行审批，点击切换为询问审批'
-                  : '询问审批，点击切换为自动放行'
+                config?.commandApproval === 'auto'
+                  ? '命令自动放行，点击切换为询问'
+                  : '命令询问，点击切换为自动放行'
               }
-              aria-pressed={config?.approvalMode === 'auto'}
+              aria-pressed={config?.commandApproval === 'auto'}
               onClick={onToggleApproval}
             >
               <svg
@@ -323,7 +323,7 @@ export function Composer({
                 aria-hidden="true"
               >
                 <path d="M10 2.5 16 5v4.7c0 3.5-2.4 6.1-6 7.8-3.6-1.7-6-4.3-6-7.8V5l6-2.5Z" />
-                {config?.approvalMode === 'auto' ? (
+                {config?.commandApproval === 'auto' ? (
                   <path d="m7.2 9.8 1.8 1.8 3.8-4" />
                 ) : (
                   <>

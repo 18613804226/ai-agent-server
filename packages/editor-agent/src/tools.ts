@@ -287,6 +287,8 @@ export function createEditorTools(
   rootsInput: WorkspaceRootsInput,
   onChange?: ChangeListener,
   onBrowserOpen?: (url: string) => void,
+  /** true=文件改动不直接落盘，产出 pending diff 等用户确认 */
+  deferWrite?: boolean,
 ): RegisteredTool[] {
   const roots = normalizeRoots(rootsInput);
   const primary = roots[0]?.path || process.cwd();
@@ -352,6 +354,17 @@ export function createEditorTools(
         const abs = safeResolve(path);
         const content = String(args.content ?? '');
         const before = tryReadText(abs);
+        // deferWrite：只产出待确认 diff，不写文件
+        if (deferWrite) {
+          onChange?.({
+            path: cleanPath(path),
+            kind: before === undefined ? 'created' : 'modified',
+            before,
+            after: content,
+            pending: true,
+          });
+          return `已生成对 ${path} 的改动，等待用户确认后写入`;
+        }
         mkdirSync(dirname(abs), { recursive: true });
         writeFileSync(abs, content, 'utf8');
         onChange?.({
@@ -391,6 +404,17 @@ export function createEditorTools(
           return `未找到要替换的文本：${oldStr.slice(0, 60)}`;
         }
         const next = raw.split(oldStr).join(String(args.new_string ?? ''));
+        // deferWrite：只产出待确认 diff，不写文件
+        if (deferWrite) {
+          onChange?.({
+            path: cleanPath(String(args.path)),
+            kind: 'modified',
+            before: raw,
+            after: next,
+            pending: true,
+          });
+          return `已生成对 ${args.path} 的改动，等待用户确认后写入`;
+        }
         writeFileSync(abs, next, 'utf8');
         onChange?.({
           path: cleanPath(String(args.path)),
