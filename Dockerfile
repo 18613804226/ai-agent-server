@@ -47,14 +47,17 @@ RUN pnpm --filter @repo/agent-orchestrator build \
     && pnpm --filter @repo/general-agent build \
     && pnpm --filter @repo/server build
 
-# 6.5 单独留一份 prisma CLI 到 /opt/prisma-cli：
-#     运行时 compose 的「一次性 db-push 服务」要用它同步表结构（项目无 migrations，只有 db push）。
-#     prisma CLI 属于 devDependencies，第 7 步裁剪 dev 依赖后就没了，
-#     所以提前装到独立目录：不污染 package.json，也不影响 lockfile。
-#     cp -rL 解引用 symlink：pnpm 虚拟 store 里全是相对链接，直接 cp -r 会拷成断链。
-RUN mkdir -p /tmp/prisma-cli \
-    && DATABASE_URL="$BUILD_DATABASE_URL" pnpm --dir /tmp/prisma-cli add prisma@7.10.0 --ignore-scripts \
-    && cp -rL /tmp/prisma-cli/node_modules /opt/prisma-cli/node_modules
+# 6.5 先把「装依赖时由 postinstall 下载的二进制」存一份到 /opt/bin-assets：
+#     - schema-engine（@prisma/engines）：`prisma db push` 执行 DDL 用它
+#     - ffmpeg（ffmpeg-static）：视频转写 / TTS / 图片处理都靠它
+#     第 7 步的 prod 安装带 --ignore-scripts（跳过 postinstall），prod 依赖树里可能就没有它们，
+#     所以先存、第 7.2 步再补回。找不到也不报错：Prisma 7 的 schema diff 已不依赖原生引擎。
+RUN mkdir -p /opt/bin-assets \
+    && for f in /app/node_modules/.pnpm/@prisma+engines@*/node_modules/@prisma/engines/schema-engine-* \
+               /app/node_modules/.pnpm/ffmpeg-static@*/node_modules/ffmpeg-static/ffmpeg; do \
+         if [ -f "$f" ]; then cp -a "$f" /opt/bin-assets/; fi; \
+       done \
+    && ls -l /opt/bin-assets
 
 # 7. 裁剪开发依赖：从 dev 安装切到 prod 安装。
 #    ⚠️ 不能用 `pnpm prune --prod`：在 `--filter` 安装后它会把生产依赖也误删（已实测）。
@@ -63,10 +66,24 @@ ENV CI=true
 RUN DATABASE_URL="$BUILD_DATABASE_URL" pnpm install --prod --frozen-lockfile --filter @repo/server... --ignore-scripts
 
 # 7.1 prod 安装会重建 @prisma/client，之前生成的 client 会丢，必须再生成一次。
-#     （@prisma/engines 的 engine 二进制不受影响，实测保留；运行时同步表结构用 6.5 步留的 CLI）
+#     （prisma CLI 是 @repo/server 的运行时依赖，prod 安装后依然在 apps/server/node_modules/prisma，
+#       compose 的「一次性 db-push 服务」直接用它，无需镜像里另装一份）
 RUN DATABASE_URL="$BUILD_DATABASE_URL" pnpm --filter @repo/server exec prisma generate
 
-# 8. 构建期自检：运行时依赖与 Prisma client 必须真的可用
+# 7.2 把 6.5 存下来的二进制补回 prod 依赖树（prod 安装的 --ignore-scripts 跳过了 postinstall 下载）
+RUN for d in /app/node_modules/.pnpm/@prisma+engines@*/node_modules/@prisma/engines; do \
+        cp -an /opt/bin-assets/schema-engine-* "$d"/ 2>/dev/null || true; \
+    done \
+    && for d in /app/node_modules/.pnpm/ffmpeg-static@*/node_modules/ffmpeg-static; do \
+        cp -an /opt/bin-assets/ffmpeg "$d"/ 2>/dev/null || true; \
+    done \
+    && (ls -l /app/node_modules/.pnpm/ffmpeg-static@*/node_modules/ffmpeg-static/ | head -8 || true)
+
+# 8. 构建期自检：运行时依赖、Prisma client、prisma CLI 必须真的可用
+#    prisma CLI 是 compose 的 db-push 服务要用的入口（cwd=/app/apps/server），缺了就地失败，别等上线才发现。
+RUN cd /app/apps/server \
+    && test -f node_modules/prisma/build/index.js \
+    && DATABASE_URL="$BUILD_DATABASE_URL" node node_modules/prisma/build/index.js -v
 RUN node apps/server/scripts/selfcheck.cjs
 
 # 9. 运行阶段：cwd 必须是 apps/server，main.ts 用 process.cwd() 定位 uploads/files

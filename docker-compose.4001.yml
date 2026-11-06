@@ -38,12 +38,14 @@ services:
 
   # 1.5 一次性任务：把 Prisma schema 同步到数据库（项目无 migrations，只有 db push）。
   #     跑完即退出；backend 等它成功后才启动，避免启动瞬间 Prisma 报「列不存在」。
-  #     prisma CLI 由 Dockerfile 第 6.5 步留在镜像的 /opt/prisma-cli 里。
+  #     prisma 是 @repo/server 的运行时依赖，生产镜像里自带 CLI：
+  #     /app/apps/server/node_modules/prisma（Dockerfile 第 8 步会断言它真的能跑）。
+  #     用 node 直接跑入口文件，不依赖 .bin 软链的可执行位。
   db-push:
     image: my-backend-app:latest
     container_name: ai-agent-db-push
     restart: "no"
-    entrypoint: ["/opt/prisma-cli/node_modules/.bin/prisma"]
+    entrypoint: ["node", "/app/apps/server/node_modules/prisma/build/index.js"]
     command: ["db", "push"]
     working_dir: /app/apps/server
     environment:

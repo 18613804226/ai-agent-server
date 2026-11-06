@@ -260,7 +260,15 @@ CHAT_DEMO_REPLAY=""                          # 留空=失败时兜底回放；tr
 CHAT_LIVE_HISTORY_MESSAGES="12"              # 实时查询保留的历史消息条数（6~30，默认 12 ≈ 6 轮）
 CHAT_MAX_INPUT_TOKENS="6000"                 # 初始上下文窗口基准；编排器预算 = 该值 + 18000
 CHAT_CONTEXT_MAX_INPUT_TOKENS=""             # 留空随上面推导；填值直接覆盖编排器工具循环预算
+CHAT_CONTEXT_KEEP_RECENT_TOOLS="3"           # 工具循环里保留最近几条完整工具结果，更早的压成预览
+CHAT_CONTEXT_KEEP_RECENT_TOOL_ROUNDS="2"      # 保留最近几轮完整工具调用，更早的整轮压成预览
+CHAT_CONTEXT_TOOL_PREVIEW_CHARS="240"        # 旧工具结果压成预览时的长度上限
+CHAT_CONTEXT_OLD_MESSAGE_PREVIEW_CHARS="800" # 更早的普通消息压成预览时的长度上限
 CHAT_RATE_LIMIT_RETRIES="2"                  # 免费层 429 限流时的原地重试次数
+CHAT_MODEL_CONNECT_TIMEOUT_MS="60000"        # 模型连接超时（ms）
+CHAT_MODEL_IDLE_TIMEOUT_MS="90000"           # 流式空闲超时（ms）：两个 chunk 之间无数据即中止
+CHAT_TOOL_TIMEOUT_MS="120000"                # 单次工具执行超时（ms）
+CHAT_TOOL_MAX_RESULT_CHARS="8000"            # 工具结果最大字符数
 CHAT_ZHIPU_LOCK_TIMEOUT_MS="5000"            # 智谱串行锁最长等待（ms）；超时自动降级到下一个候选
 CHAT_SHOW_ROUTING_THOUGHT="true"             # 是否把模型选择推给前端思考流（含 APP 端）
 CHAT_USER_PROFILE="on"                       # 用户画像：on=只记用户明确声明的白名单偏好；off=完全不记不注入

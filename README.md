@@ -322,7 +322,15 @@ CHAT_DEMO_REPLAY=""                          # 留空=失败时兜底回放；tr
 CHAT_LIVE_HISTORY_MESSAGES="12"              # 实时查询保留的历史消息条数（6~30，默认 12 ≈ 6 轮）
 CHAT_MAX_INPUT_TOKENS="6000"                 # 初始上下文窗口基准；编排器预算 = 该值 + 18000
 CHAT_CONTEXT_MAX_INPUT_TOKENS=""             # 留空随上面推导；填值直接覆盖编排器工具循环预算
+CHAT_CONTEXT_KEEP_RECENT_TOOLS="3"           # 工具循环里保留最近几条完整工具结果，更早的压成预览
+CHAT_CONTEXT_KEEP_RECENT_TOOL_ROUNDS="2"      # 保留最近几轮完整工具调用，更早的整轮压成预览
+CHAT_CONTEXT_TOOL_PREVIEW_CHARS="240"        # 旧工具结果压成预览时的长度上限
+CHAT_CONTEXT_OLD_MESSAGE_PREVIEW_CHARS="800" # 更早的普通消息压成预览时的长度上限
 CHAT_RATE_LIMIT_RETRIES="2"                  # 免费层 429 限流时的原地重试次数
+CHAT_MODEL_CONNECT_TIMEOUT_MS="60000"        # 模型连接超时（ms）
+CHAT_MODEL_IDLE_TIMEOUT_MS="90000"           # 流式空闲超时（ms）：两个 chunk 之间无数据即中止
+CHAT_TOOL_TIMEOUT_MS="120000"                # 单次工具执行超时（ms）
+CHAT_TOOL_MAX_RESULT_CHARS="8000"            # 工具结果最大字符数
 CHAT_ZHIPU_LOCK_TIMEOUT_MS="5000"            # 智谱串行锁最长等待（ms）；超时自动降级到下一个候选
 CHAT_SHOW_ROUTING_THOUGHT="true"             # 是否把模型选择推给前端思考流（含 APP 端）
 CHAT_USER_PROFILE="on"                       # 用户画像：on=只记用户明确声明的白名单偏好；off=完全不记不注入
@@ -766,12 +774,15 @@ backend（云端模式）
 Docker 构建上下文是仓库根（要拿到 `packages/`）：
 
 ```bash
-# 构建（限制 buildkit 内存，避免小机器 OOM）
-docker buildx build --memory 1500m -t my-backend-app:latest .
+# 构建（compose 里已定义 build: .；服务器没装 buildx 时用这个）
+docker compose -f docker-compose.4001.yml --env-file apps/server/.env build backend
 
 # 启动：postgres → 一次性 db-push（同步表结构）→ backend
 docker compose -f docker-compose.4001.yml --env-file apps/server/.env up -d --no-build
 ```
+
+> 内存紧张且**装了 buildx** 的机器可以限内存构建：`docker buildx build --memory 1500m -t my-backend-app:latest .`。
+> 没装 buildx 时执行它会报 `unknown flag: --memory`（buildx 的参数被当成 docker 的），构建仍会退回 compose 的 docker driver 继续跑。
 
 > 注意：`.env` 位于 `apps/server/.env`，不是仓库根。
 
@@ -779,7 +790,8 @@ docker compose -f docker-compose.4001.yml --env-file apps/server/.env up -d --no
 
 项目**没有 migrations**，只有 `prisma db push`。compose 里为此加了一个一次性服务 `db-push`：跑完即退出，`backend` 等它 `service_completed_successfully` 才启动，所以不会再出现「服务起来了但 Prisma 报列不存在」。
 
-- `prisma` CLI 属于 `devDependencies`，镜像裁剪 dev 依赖后就没了，所以 Dockerfile 第 6.5 步把它单独装到 `/opt/prisma-cli`，compose 用那个路径执行 `prisma db push`。
+- `prisma` 是 `@repo/server` 的**运行时依赖**（不是 devDependency），所以生产镜像里自带 CLI：`/app/apps/server/node_modules/prisma`。compose 的 `db-push` 服务直接用 `node /app/apps/server/node_modules/prisma/build/index.js db push` 执行；Dockerfile 第 8 步会在构建期断言这个入口真的能跑（`prisma -v`），缺了就地构建失败，不会等到上线才发现。
+- 镜像里另外保留了两份「装依赖时 postinstall 下载的二进制」：`schema-engine`（Prisma 的 DDL 引擎）和 `ffmpeg`（视频转写 / TTS / 图片处理要用）。prod 安装带 `--ignore-scripts` 会跳过 postinstall，所以 Dockerfile 第 6.5 步先存、第 7.2 步再补回依赖树。
 - **改了 `schema.prisma` 之后**：`db-push` 是「跑一次就退出」的一次性任务，单纯再 `up` 不会重跑它，二选一：
 
 ```bash
@@ -797,6 +809,7 @@ docker compose -f docker-compose.4001.yml --env-file apps/server/.env up -d --no
 ### 2 核 2G 小机器建议
 
 - **构建是 CPU 密集型**：`pnpm install` + `tsc` + `prisma generate` 会跑满 2 核。如果部署时机器卡死，建议在 CI（ubuntu-latest）里构建并推送到镜像仓库，ECS 只 `docker pull`。
+- **Prisma 的 OpenSSL 告警**：构建时会出现 `Prisma failed to detect the libssl/openssl version ... Defaulting to "openssl-1.1.x"`。`node:20-slim` 里 node 自带 libssl3，Prisma 引擎实际可用，这个告警无害；真报引擎错误时再在 Dockerfile 里加 `apt-get install -y --no-install-recommends openssl`。
 - **运行时资源已在 compose 里限制**：postgres `0.8 核 / 512M`，backend `1.2 核 / 768M`，Node 堆 `--max-old-space-size=512`，postgres 参数已调小。
 - **加 swap**：`fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile`，避免内存尖峰直接触发 OOM。
 - **监控**：`docker stats` / `htop` 看是构建还是运行时吃 CPU；`docker logs -f ai-agent-backend` 看是否崩溃重启。
