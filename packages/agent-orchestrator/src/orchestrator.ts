@@ -220,6 +220,8 @@ export class AgentOrchestrator {
     payload: Record<string, unknown>,
     signal?: AbortSignal,
     onThought?: (text: string) => void,
+    /** 由宿主按场景注入，只对智谱候选生效 */
+    sampling?: { temperature?: number; top_p?: number },
   ): Promise<{
     stream: any;
     candidate: ModelCandidate;
@@ -265,10 +267,16 @@ export class AgentOrchestrator {
       const maxTries = this.config.rateLimitRetries + 1;
       for (let attempt = 1; attempt <= maxTries; attempt++) {
         try {
-          // 智谱：默认关思考链（首字从 50s+ 降到秒级）；qwen 不适用该参数
+          // 智谱：默认关思考链（首字从 50s+ 降到秒级）；问答链路可再叠加采样参数。
+          // qwen 不适用这两个参数，降级到 qwen 时保持服务端默认。
           const body =
             candidate.provider === 'zhipu'
-              ? { ...payload, model: candidate.model, ...zhipuThinkingParam() }
+              ? {
+                  ...payload,
+                  model: candidate.model,
+                  ...zhipuThinkingParam(),
+                  ...sampling,
+                }
               : { ...payload, model: candidate.model };
           const stream = await withTimeout(
             client.chat.completions.create(body as any, {
@@ -417,6 +425,7 @@ export class AgentOrchestrator {
       editToolNames,
       approvalPolicy,
       requestApproval,
+      sampling,
     } = input;
 
     let chain = input.candidates ?? this.deriveCandidates(input);
@@ -485,6 +494,7 @@ export class AgentOrchestrator {
           this.config.showRoutingThought
             ? (t) => pendingThoughts.push(t)
             : undefined,
+          sampling,
         );
       usedModel = `${candidate.provider}:${candidate.model}`;
       try {

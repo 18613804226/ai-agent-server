@@ -13,6 +13,8 @@ import { PrismaService } from '../prisma/prisma.service.js';
 export class SessionService {
   /** 每设备最多保留的会话数 */
   private static readonly MAX_SESSIONS = 20;
+  /** 最近多少小时内更新过的会话不参与自动清理：保护现场提前准备的演示会话 */
+  private static readonly PROTECT_RECENT_HOURS = 24;
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -27,13 +29,28 @@ export class SessionService {
       // ✅ 一次删够差额：并发创建/历史数据可能已超上限，只删一条会「删一加一」永远回不到 20 以内
       const overflow =
         existingSessions.length - SessionService.MAX_SESSIONS + 1;
-      const oldestIds = existingSessions
-        .slice(0, overflow)
-        .map((session) => session.id);
-      // 用 deleteMany：并发下同一会话被抢先删掉也不会抛 P2025 把整个请求带崩
-      await this.prisma.chatSession.deleteMany({
-        where: { id: { in: oldestIds } },
+      // ✅ 现场提前准备好、最近还在用的演示会话不能被静默删掉：
+      //    没有 updatedAt 字段的老数据按「最旧」处理，保持原有清理行为
+      const cutoff =
+        Date.now() - SessionService.PROTECT_RECENT_HOURS * 60 * 60 * 1000;
+      const deletable = existingSessions.filter((session: any) => {
+        const updatedAt = session.updatedAt
+          ? new Date(session.updatedAt).getTime()
+          : 0;
+        return !Number.isFinite(updatedAt) || updatedAt < cutoff;
       });
+      const oldestIds = deletable.slice(0, overflow).map((s) => s.id);
+      // 用 deleteMany：并发下同一会话被抢先删掉也不会抛 P2025 把整个请求带崩
+      if (oldestIds.length) {
+        await this.prisma.chatSession.deleteMany({
+          where: { id: { in: oldestIds } },
+        });
+      }
+      if (oldestIds.length < overflow) {
+        console.warn(
+          `🛡️ 会话保护：${overflow - oldestIds.length} 个最近 ${SessionService.PROTECT_RECENT_HOURS} 小时内使用过的会话未被自动清理（当前 ${existingSessions.length + 1} 条，上限 ${SessionService.MAX_SESSIONS}）`,
+        );
+      }
     }
     return this.prisma.chatSession.create({
       data: { title: title || '', deviceId: deviceId || null },
@@ -63,6 +80,15 @@ export class SessionService {
   async deleteSession(id: string, deviceId?: string) {
     await this.assertSessionOwner(id, deviceId);
     return this.prisma.chatSession.delete({ where: { id } });
+  }
+
+  /** 清空消息但保留会话本身（会话 ID、知识库绑定等现场状态不丢） */
+  async clearMessages(id: string, deviceId?: string) {
+    await this.assertSessionOwner(id, deviceId);
+    const { count } = await this.prisma.message.deleteMany({
+      where: { sessionId: id },
+    });
+    return { id, deleted: count };
   }
 
   async getSessions(deviceId?: string) {

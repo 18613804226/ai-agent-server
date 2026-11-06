@@ -5,6 +5,7 @@ import type {
   ProviderStatus,
 } from '../mode/types';
 import { ProviderModal } from './ProviderModal';
+import { DatabaseSettings } from './DatabaseSettings';
 import { DEFAULT_MODEL_ID } from '../../../shared/providers';
 
 export function SettingsModal({
@@ -48,6 +49,7 @@ export function SettingsModal({
         ...draft,
         commandApproval: draft.commandApproval ?? 'ask',
         fileApproval: draft.fileApproval ?? 'ask',
+        databaseApproval: draft.databaseApproval ?? 'ask',
       });
       onClose();
     } catch (e: any) {
@@ -191,7 +193,30 @@ export function SettingsModal({
                 <span className="switch-slider" />
               </label>
             </div>
+            <div className="approval-row">
+              <div className="approval-row-text">
+                <strong>数据库操作审批</strong>
+                <span className="muted small">
+                  execute_sql 写操作前询问（query_database 只读，不询问）
+                </span>
+              </div>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={draft.databaseApproval !== 'auto'}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      databaseApproval: e.target.checked ? 'ask' : 'auto',
+                    }))
+                  }
+                />
+                <span className="switch-slider" />
+              </label>
+            </div>
           </section>
+
+          <DatabaseSettings />
 
           {error ? <div className="modal-error">⚠️ {error}</div> : null}
         </div>

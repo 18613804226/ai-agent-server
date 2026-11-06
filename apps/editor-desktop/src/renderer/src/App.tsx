@@ -53,6 +53,8 @@ export function App() {
   const [terminalOpen, setTerminalOpen] = useState(false);
   /** 内置浏览器预览地址；null 表示未打开 */
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
+  /** 数据库面板是否打开 */
+  const [databaseOpen, setDatabaseOpen] = useState(false);
   /** 浏览器标签是否处于激活（可与文件标签切换） */
   const [browserTabActive, setBrowserTabActive] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
@@ -454,6 +456,12 @@ export function App() {
         >
           浏览器
         </button>
+        <button
+          className="ghost"
+          onClick={() => setDatabaseOpen((v) => !v)}
+        >
+          数据库
+        </button>
         <div className="root-label" title={workspaceRoot}>
           {roots.length > 1
             ? `${roots.length} 个文件夹`
@@ -556,6 +564,8 @@ export function App() {
           browserTabActive={browserTabActive}
           onSelectBrowserTab={() => setBrowserTabActive(true)}
           onOpenBrowser={openBrowser}
+          databaseOpen={databaseOpen}
+          onCloseDatabase={() => setDatabaseOpen(false)}
         />
 
         <div

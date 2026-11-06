@@ -1,9 +1,12 @@
 import type {
   AppConfig,
   ChatEvent,
+  DatabaseConfig,
+  DatabaseConnectionInput,
   ProviderConfig,
   ProviderStatus,
 } from './mode/types';
+import type { DatabaseSchema } from '@repo/editor-agent';
 
 export {};
 
@@ -122,6 +125,23 @@ declare global {
       chat: {
         getSessions(): Promise<unknown>;
         saveSessions(sessions: unknown): Promise<void>;
+      };
+      database: {
+        list(): Promise<DatabaseConfig>;
+        save(conn: DatabaseConnectionInput): Promise<DatabaseConfig>;
+        delete(id: string): Promise<DatabaseConfig>;
+        setActive(id: string): Promise<DatabaseConfig>;
+        test(
+          conn: DatabaseConnectionInput,
+        ): Promise<{ ok: boolean; message: string }>;
+        schema(): Promise<DatabaseSchema>;
+        query(sql: string): Promise<{ rows: unknown[] }>;
+        execute(sql: string): Promise<{ rowsAffected: number | null }>;
+        tableRows(
+          name: string,
+          limit?: number,
+        ): Promise<{ rows: unknown[] }>;
+        resetDemo(): Promise<{ ok: boolean }>;
       };
       browser: {
         create(url: string): Promise<number>;

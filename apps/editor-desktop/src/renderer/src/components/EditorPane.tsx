@@ -7,6 +7,7 @@ import {
 } from 'react';
 import { BrowserPanel } from './BrowserPanel';
 import { CodeEditor, type CodeEditorHandle } from './CodeEditor';
+import { DatabasePanel } from './DatabasePanel';
 import { DiffView } from './DiffView';
 import { Terminal } from './Terminal';
 import { Welcome } from './Welcome';
@@ -73,6 +74,8 @@ export function EditorPane({
   browserTabActive,
   onSelectBrowserTab,
   onOpenBrowser,
+  databaseOpen,
+  onCloseDatabase,
 }: {
   editorTabs: EditorTab[];
   activeFile: string;
@@ -95,6 +98,8 @@ export function EditorPane({
   browserTabActive: boolean;
   onSelectBrowserTab: () => void;
   onOpenBrowser: (url: string) => void;
+  databaseOpen: boolean;
+  onCloseDatabase: () => void;
 }) {
   const [terminalHeight, setTerminalHeight] = useState(
     () => Number(localStorage.getItem('editor_terminal_height')) || 240,
@@ -149,7 +154,10 @@ export function EditorPane({
         >
           {editorTabs.map((tab) => {
             const isActive =
-              !browserTabActive && activeFile === tab.path && !activeDiff;
+              !browserTabActive &&
+              !databaseOpen &&
+              activeFile === tab.path &&
+              !activeDiff;
             const isDirty = tab.content !== tab.savedContent;
               return (
                 <div
@@ -242,7 +250,21 @@ export function EditorPane({
               </button>
             </div>
           ) : null}
-          {!editorTabs.length && !activeDiff && !browserUrl ? (
+          {databaseOpen ? (
+            <div className="editor-tab-item active">
+              <span className="editor-tab-button editor-tab-label">数据库</span>
+              <button
+                type="button"
+                className="editor-tab-close"
+                title="关闭数据库"
+                aria-label="关闭数据库"
+                onClick={onCloseDatabase}
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
+          {!editorTabs.length && !activeDiff && !browserUrl && !databaseOpen ? (
             <div className="editor-tab-item active">
               <span className="editor-tab-button editor-tab-label">
                 欢迎
@@ -305,7 +327,9 @@ export function EditorPane({
         ) : null}
       </div>
       <div className="editor-content">
-        {browserUrl && browserTabActive ? (
+        {databaseOpen ? (
+          <DatabasePanel />
+        ) : browserUrl && browserTabActive ? (
           <BrowserPanel initialUrl={browserUrl} onClose={onCloseBrowser} />
         ) : (
           <>

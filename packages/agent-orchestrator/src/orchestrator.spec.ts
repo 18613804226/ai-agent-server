@@ -66,6 +66,45 @@ describe('AgentOrchestrator.run', () => {
     expect(done?.fullReply).toBe('你好');
   });
 
+  it('采样参数只下发给智谱候选，qwen 与不传时保持服务端默认', async () => {
+    const chunks = [{ choices: [{ delta: { content: 'ok' } }] }];
+    const zhipu = fakeClient([chunks]);
+    await collect(
+      new AgentOrchestrator(config({ getClient: () => zhipu.client })),
+      {
+        messages: [],
+        candidates: [{ provider: 'zhipu', model: 'glm-4.5-flash' }],
+        sampling: { temperature: 0.7, top_p: 0.8 },
+      },
+    );
+    expect(zhipu.create.mock.calls[0][0]).toMatchObject({
+      temperature: 0.7,
+      top_p: 0.8,
+    });
+
+    const dash = fakeClient([[...chunks]]);
+    await collect(
+      new AgentOrchestrator(config({ getClient: () => dash.client })),
+      {
+        messages: [],
+        candidates: [dashscope('qwen')],
+        sampling: { temperature: 0.7, top_p: 0.8 },
+      },
+    );
+    expect(dash.create.mock.calls[0][0].temperature).toBeUndefined();
+    expect(dash.create.mock.calls[0][0].top_p).toBeUndefined();
+
+    const plain = fakeClient([[...chunks]]);
+    await collect(
+      new AgentOrchestrator(config({ getClient: () => plain.client })),
+      {
+        messages: [],
+        candidates: [{ provider: 'zhipu', model: 'glm-4.5-flash' }],
+      },
+    );
+    expect(plain.create.mock.calls[0][0].temperature).toBeUndefined();
+  });
+
   it('工具调用：先 tool_call/tool_result，再跑下一轮出最终回答', async () => {
     const toolDelta = {
       choices: [

@@ -181,11 +181,12 @@ export function ChatPanel({
             试试：帮我看下工作区里有哪些文件 / 读一下 xxx 文件
           </div>
         )}
-        {messages.map((m) => (
+        {messages.map((m, i) => (
           <ChatMessage
             key={m.id}
             msg={m}
             streaming={streaming}
+            isLatest={i === messages.length - 1}
             onOpenBrowser={onOpenBrowser}
             onSelectDiff={onSelectDiff}
             onApplyDiff={onApplyDiff}

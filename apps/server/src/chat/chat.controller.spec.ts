@@ -83,9 +83,15 @@ const mkFile = (): Express.Multer.File =>
   }) as never;
 
 async function drain(obs: any) {
+  const events: any[] = [];
   await new Promise<void>((resolve) => {
-    obs.subscribe({ complete: () => resolve(), error: () => resolve() });
+    obs.subscribe({
+      next: (event: any) => events.push(event.data),
+      complete: () => resolve(),
+      error: () => resolve(),
+    });
   });
+  return events;
 }
 
 describe('ChatController.streamMessage：只有文件没有 query', () => {
@@ -167,6 +173,148 @@ describe('ChatController.streamMessage：只有文件没有 query', () => {
     );
     await drain(obs);
     expect(chatService.sendMessageStream.mock.calls[0][1]).toBe('你好');
+  });
+
+  it('APP 端透传 platform，请求体显式声明优先于 Device.platform', async () => {
+    const { controller, chatService } = mkController();
+    const obs = await controller.streamMessage(
+      { id: 'dev-1', platform: 'web' },
+      'sess-1',
+      { query: '你好', platform: 'ios' },
+      undefined,
+      mkRes(),
+    );
+    await drain(obs);
+    expect(chatService.sendMessageStream.mock.calls[0][9]).toBe('ios');
+  });
+
+  it('未显式声明时回退到登录时上报的 Device.platform', async () => {
+    const { controller, chatService } = mkController();
+    const obs = await controller.streamMessage(
+      { id: 'dev-1', platform: 'android' },
+      'sess-1',
+      { query: '你好' },
+      undefined,
+      mkRes(),
+    );
+    await drain(obs);
+    expect(chatService.sendMessageStream.mock.calls[0][9]).toBe('android');
+  });
+
+  it('结构化工具事件与 done 指标原样透传', async () => {
+    const { controller, chatService } = mkController();
+    chatService.sendMessageStream.mockImplementation(
+      async (_s: string, _q: string, onChunk: any) => {
+        onChunk('thought', '🔧 调用 fetchWeatherInfo');
+        onChunk('tool_call', {
+          name: 'fetchWeatherInfo',
+          args: '{"city":"北京"}',
+          index: 0,
+        });
+        onChunk('tool_result', {
+          name: 'fetchWeatherInfo',
+          index: 0,
+          result: '晴 26℃',
+          resultLength: 5,
+          durationMs: 123,
+          status: 'success',
+        });
+        return {
+          fullReply: 'ok',
+          tokens: 10,
+          model: 'glm-4.5-flash',
+          completionTokens: 8,
+          finishReason: 'stop',
+          truncated: false,
+          ttftMs: 300,
+          durationMs: 900,
+          sourcesCount: 2,
+        };
+      },
+    );
+    const obs = await controller.streamMessage(
+      { id: 'dev-1' },
+      'sess-1',
+      { query: '北京天气' },
+      undefined,
+      mkRes(),
+    );
+    const events = await drain(obs);
+    expect(events).toContainEqual({
+      type: 'thought',
+      content: '🔧 调用 fetchWeatherInfo',
+    });
+    expect(events).toContainEqual({
+      type: 'tool_call',
+      name: 'fetchWeatherInfo',
+      args: '{"city":"北京"}',
+      index: 0,
+    });
+    expect(events).toContainEqual({
+      type: 'tool_result',
+      name: 'fetchWeatherInfo',
+      index: 0,
+      result: '晴 26℃',
+      resultLength: 5,
+      durationMs: 123,
+      status: 'success',
+    });
+    expect(events[events.length - 1]).toMatchObject({
+      type: 'done',
+      model: 'glm-4.5-flash',
+      completionTokens: 8,
+      finishReason: 'stop',
+      truncated: false,
+      ttftMs: 300,
+      durationMs: 900,
+      sourcesCount: 2,
+    });
+  });
+
+  it('服务抛错时补一帧收敛文案并正常结束流', async () => {
+    const { controller, chatService } = mkController();
+    chatService.sendMessageStream.mockRejectedValue(
+      new Error('Request failed with status code 401 invalid api key'),
+    );
+    const obs = await controller.streamMessage(
+      { id: 'dev-1' },
+      'sess-1',
+      { query: '你好' },
+      undefined,
+      mkRes(),
+    );
+    const events = await drain(obs);
+    expect(events).toContainEqual({
+      type: 'error',
+      content: '模型服务鉴权异常，请检查后端配置。',
+    });
+    expect(events[events.length - 1].type).toBe('error');
+  });
+});
+
+describe('ChatController：演示辅助接口', () => {
+  it('GET demo/questions 返回固定问题清单', async () => {
+    const { controller } = mkController();
+    const result = await controller.getDemoQuestions();
+    expect(result.questions).toHaveLength(5);
+    expect(result.questions[0]).toHaveProperty('question');
+    expect(result.questions[0]).toHaveProperty('label');
+  });
+
+  it('清空消息走 clearMessages，并带上设备 ID 做归属校验', async () => {
+    const { controller, sessionService } = mkController();
+    sessionService.clearMessages = vi
+      .fn()
+      .mockResolvedValue({ id: 'sess-1', deleted: 3 });
+    const result = await controller.clearSessionMessages(
+      { id: 'dev-1' },
+      'sess-1',
+    );
+    expect(sessionService.clearMessages).toHaveBeenCalledWith(
+      'sess-1',
+      'dev-1',
+    );
+    expect(result).toEqual({ id: 'sess-1', deleted: 3 });
   });
 });
 

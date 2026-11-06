@@ -433,10 +433,13 @@ describe('createEditorAgent', () => {
   it('返回绑定 root 的 editor 定义', () => {
     const agent = createEditorAgent(root);
     expect(agent.id).toBe('editor');
-    expect(agent.tools).toHaveLength(16);
+    expect(agent.tools).toHaveLength(19);
     expect(agent.buildSystemPrompt()).toContain(root);
     const names = agent.tools.map((t) => t.definition.function.name);
     expect(names).toContain('verify_workspace');
+    expect(names).toContain('describe_database');
+    expect(names).toContain('query_database');
+    expect(names).toContain('execute_sql');
   });
 
   it('默认启用自动验证，可以显式关闭', () => {

@@ -8,6 +8,7 @@ import { readFile, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { SimpleLock } from '@repo/agent-orchestrator';
+import { toSpeakableText } from './chat-prompt.js';
 
 // ✅ 模块顶层：整个进程只建一次，所有 TTS 请求复用这套连接
 const dashscopeAgent = new https.Agent({
@@ -58,6 +59,12 @@ export class SpeechService {
       throw new HttpException('文本内容无法朗读', HttpStatus.BAD_REQUEST);
     }
 
+    // ✅ 朗读前把 Markdown / 链接 / emoji 变成口语文本，并按句边界截断
+    const speakable = toSpeakableText(text);
+    if (!speakable || !/[\p{Script=Han}A-Za-z0-9]/u.test(speakable)) {
+      throw new HttpException('文本内容无法朗读', HttpStatus.BAD_REQUEST);
+    }
+
     const apiKey = process.env.DASHSCOPE_API_KEY || process.env.OPENAI_API_KEY;
     if (!apiKey) {
       throw new HttpException(
@@ -81,7 +88,7 @@ export class SpeechService {
               //    实测可用的是 qwen3-tts-flash；可用 TTS_MODEL 显式覆盖
               model: process.env.TTS_MODEL || 'qwen3-tts-flash',
               input: {
-                text: text.slice(0, 300),
+                text: speakable,
                 voice,
               },
               parameters: {

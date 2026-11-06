@@ -48,9 +48,19 @@ export interface AppConfig {
   commandApproval: 'ask' | 'auto';
   /** 文件操作审批：ask 询问 / auto 自动放行 */
   fileApproval: 'ask' | 'auto';
+  /** 数据库写操作审批：ask 询问 / auto 自动放行 */
+  databaseApproval: 'ask' | 'auto';
   local: { workspaceRoot?: string };
   remote: { model?: string };
 }
+
+/** 数据库连接类型与演示 id 统一从 shared 引用，避免主/渲染进程漂移 */
+export type {
+  DatabaseConnection,
+  DatabaseConfig,
+  DatabaseConnectionInput,
+} from '../../../shared/database';
+export { DEMO_DB_ID } from '../../../shared/database';
 
 export interface FileChange {
   path: string;

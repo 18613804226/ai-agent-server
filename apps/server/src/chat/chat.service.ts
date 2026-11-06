@@ -14,6 +14,7 @@ import {
   formatRoutingThought,
   isAttachmentRefusal,
   resolveModelCandidates,
+  zhipuChatSamplingParam,
   type ContentGate,
   type RegisteredTool,
 } from '@repo/agent-orchestrator';
@@ -28,15 +29,41 @@ import {
   ATTACHMENT_TTL_MS,
   type AttachmentKind,
 } from './attachment-store.js';
-import { buildSystemPrompt, estimateTokens } from './chat-prompt.js';
+import {
+  buildSystemPrompt,
+  createAppReplyFormatter,
+  estimateTokens,
+  formatAppReply,
+  friendlyChatError,
+  isAppPlatform,
+} from './chat-prompt.js';
 import { ImageService } from './image.service.js';
 import { AttachmentService } from './attachment.service.js';
 import { SpeechService } from './speech.service.js';
+import {
+  DEMO_FALLBACK,
+  demoReplayEvents,
+  demoReplayMode,
+  findDemoReplay,
+  type DemoReplayEntry,
+} from './demo-replay.js';
 
 // ✅ 一次最多 2 张图进模型上下文（当前轮优先，剩余名额从最新历史消息补）
 const MAX_MODEL_IMAGES = 2;
 // ✅ 单图预算（压缩后长边上限 1280 时实测 1095 token），取整留余量做保守估算
 const MODEL_IMAGE_TOKEN_COST = 1200;
+
+/** 流式回调：文本类传 content，结构化事件传对象，sources 传数组 */
+export type StreamEmit = (
+  type:
+    | 'thought'
+    | 'content'
+    | 'error'
+    | 'sources'
+    | 'tool_call'
+    | 'tool_result',
+  payload: string | any[] | Record<string, unknown>,
+) => void;
 
 @Injectable()
 export class ChatService {
@@ -87,15 +114,90 @@ export class ChatService {
     }
   }
 
+  /**
+   * 离线回放：按预录事件把工具链 + 正文重新推一遍。
+   * 持久化单独包 try/catch —— 现场连数据库一起挂了，也要能把流程演示完。
+   */
+  private async playDemoReplay(params: {
+    sessionId: string;
+    userQuery: string;
+    persistContent?: string;
+    entry: DemoReplayEntry;
+    onChunk: StreamEmit;
+    startTime: number;
+    /** 主链路已经落过 user 消息时传 false，避免重复写一条 */
+    persistUser: boolean;
+    reason?: string;
+  }) {
+    const {
+      sessionId,
+      userQuery,
+      persistContent,
+      entry,
+      onChunk,
+      startTime,
+      persistUser,
+      reason,
+    } = params;
+
+    if (persistUser) {
+      try {
+        await this.prisma.message.create({
+          data: {
+            sessionId,
+            role: 'user',
+            content: persistContent ?? userQuery,
+          },
+        });
+      } catch {
+        // 回放不依赖数据库
+      }
+    }
+
+    if (reason) onChunk('thought', reason);
+    for (const [type, payload] of demoReplayEvents(entry)) {
+      onChunk(type, payload);
+    }
+    if (entry.sources.length) onChunk('sources', entry.sources);
+
+    try {
+      await this.prisma.message.create({
+        data: {
+          sessionId,
+          role: 'assistant',
+          content: entry.reply,
+          // Prisma JSON 字段要求 InputJsonValue，回放数据在这里收窄
+          sources: entry.sources as any,
+        },
+      });
+      await this.prisma.chatSession.update({
+        where: { id: sessionId },
+        data: { updatedAt: new Date() },
+      });
+    } catch {
+      // 回放不依赖数据库
+    }
+
+    return {
+      fullReply: entry.reply,
+      sources: entry.sources,
+      tokens: 0,
+      model: 'demo-replay',
+      truncated: false,
+      completionTokens: 0,
+      finishReason: 'stop',
+      ttftMs: 0,
+      durationMs: Date.now() - startTime,
+      sourcesCount: entry.sources.length,
+    };
+  }
+
   //  核心：支持 Function Calling 与流式（Streaming）输出的对话方法
   //  signal：客户端断开时 abort，会立刻掐断上游大模型请求（否则模型还在烧 token）
   async sendMessageStream(
     sessionId: string,
     userQuery: string,
-    onChunk: (
-      type: 'thought' | 'content' | 'error' | 'sources',
-      text: string | any[],
-    ) => void,
+    onChunk: StreamEmit,
     images?: string[],
     signal?: AbortSignal,
     fileIds?: string[],
@@ -113,6 +215,11 @@ export class ChatService {
      * 但**不该把这句系统补的话写进聊天记录** —— 传这个字段存用户原始输入（可能为空）。
      */
     persistContent?: string,
+    /**
+     * 客户端平台：APP 端启用移动端专用提示词 + 排版兜底清洗。
+     * 放末尾可选位，不影响现有调用方。
+     */
+    platform?: string,
   ) {
     const overallStartTime = Date.now();
     const aborted = () => signal?.aborted === true;
@@ -131,6 +238,19 @@ export class ChatService {
             );
           }
         }
+      }
+
+      // ✅ 强制回放模式：完全不请求模型，现场断网 / 余额不足也能走完整流程
+      if (demoReplayMode() === 'forced') {
+        return this.playDemoReplay({
+          sessionId,
+          userQuery,
+          persistContent,
+          entry: findDemoReplay(userQuery) ?? DEMO_FALLBACK,
+          onChunk,
+          startTime: overallStartTime,
+          persistUser: true,
+        });
       }
 
       // ✅ 闲聊不查 RAG，省掉一次 embedding 调用 + 向量检索
@@ -385,11 +505,32 @@ export class ChatService {
       const historySourceSummary = historySourceLabels.length
         ? [...new Set(historySourceLabels)].join('、')
         : '此前对话未引用知识库资料。';
+      const isApp = isAppPlatform(platform);
+      // APP 端流式增量清洗器：只在 APP 端创建，其它端输出保持逐字不变
+      const appReplyFormatter = isApp ? createAppReplyFormatter() : undefined;
+
+      // ✅ 闲聊增强档：本轮没有资料/附件/联网结果/工具需求时，额外前置口语直给要求；
+      //    工具 / 附件 / 引用规则两档共用同一份文本，Demo 的工具调用展示不受影响。
+      const casualTurn =
+        !liveInfoQuery &&
+        !context &&
+        !webSearchContext &&
+        !festivalContext &&
+        !needsToolsForLiveQuery &&
+        (usedAttachments?.length ?? 0) === 0 &&
+        // 历史里引用过知识库来源时不叠加闲聊语气，避免把严谨追问带成闲聊口吻
+        historySourceLabels.length === 0 &&
+        !hasImages;
+      // ✅ 本轮是否基于给定资料作答：决定采样用「严谨档」还是「活泼档」
+      const groundedTurn = !!context || (usedAttachments?.length ?? 0) > 0;
+
       const systemPrompt = buildSystemPrompt({
         context,
         historySourceSummary,
         webSearchContext,
         festivalContext,
+        platform,
+        promptProfile: casualTurn ? 'chat' : 'full',
       });
 
       // ✅ 分配图片名额：当前轮优先，剩余名额从最新的历史消息往前补。
@@ -543,8 +684,14 @@ export class ChatService {
         { zhipuAvailable: this.orchestrator.zhipuAvailable },
       );
 
-      // ✅ 把路由决策推给前端思考流：用户能直接看到"为什么选了这个模型"
-      if (this.orchestrator.showRoutingThought && candidates.length) {
+      // ✅ 把路由决策推给前端思考流：用户能直接看到"为什么选了这个模型"。
+      //    APP 端收掉这条纯调试信息；工具调用 / 联网检索 / 附件解析 / 降级提示
+      //    一律原样保留，Demo 要向面试官展示 Agent 的工具链能力。
+      if (
+        !isApp &&
+        this.orchestrator.showRoutingThought &&
+        candidates.length
+      ) {
         onChunk(
           'thought',
           formatRoutingThought(
@@ -578,10 +725,32 @@ export class ChatService {
 
       const shortTool = (s: string, n = 60) =>
         s.length > n ? `${s.slice(0, n).trimEnd()}…` : s;
+      /** 工具入参可能很长（附件正文等），只给展示用的摘要 */
+      const summarizeArgs = (args: unknown): string => {
+        if (args == null) return '';
+        try {
+          const s = typeof args === 'string' ? args : JSON.stringify(args);
+          return shortTool(s, 500);
+        } catch {
+          return '';
+        }
+      };
+      const inferToolStatus = (result: string): string => {
+        if (result.startsWith('用户拒绝执行')) return 'denied';
+        if (result.startsWith('【重复调用】')) return 'cached';
+        if (result.startsWith('工具参数错误')) return 'error';
+        return 'success';
+      };
 
       let fullReply = '';
       let usedTokens = 0;
       let truncated = false;
+      let completionTokens = 0;
+      let finishReason = '';
+      /** 首个真正出字的时刻，用于算首字延迟 */
+      let firstContentAt: number | undefined;
+      /** tool_call.index → 收到调用的时间戳，用于估算工具展示耗时 */
+      const toolCallStartedAt = new Map<number, number>();
 
       for await (const ev of this.orchestrator.run(
         {
@@ -594,6 +763,10 @@ export class ChatService {
           //    后端预检索为空时也开启，让模型自己再搜一次或如实说明（见 liveSearchEmpty）。
           includeTools:
             !liveInfoQuery || needsToolsForLiveQuery || liveSearchEmpty,
+          // ✅ 按任务分档采样：只作用于免费层 GLM-4.5-Flash，代码 Agent 链路不传
+          sampling: zhipuChatSamplingParam(
+            liveInfoQuery ? 'live' : groundedTurn ? 'knowledge' : 'casual',
+          ),
           signal,
         },
         gate,
@@ -603,31 +776,70 @@ export class ChatService {
           case 'thought':
             onChunk('thought', ev.content ?? '');
             break;
-          case 'content':
-            onChunk('content', ev.content ?? '');
+          case 'content': {
+            const raw = ev.content ?? '';
+            if (!appReplyFormatter) {
+              if (raw) firstContentAt ??= Date.now();
+              onChunk('content', raw);
+            } else {
+              // 逐 chunk 压空行；跨 chunk 的连续换行由 formatter 内部合并
+              const text = appReplyFormatter(raw);
+              if (text) {
+                firstContentAt ??= Date.now();
+                onChunk('content', text);
+              }
+            }
             break;
-          case 'tool_call':
+          }
+          case 'tool_call': {
+            const index = ev.index ?? 0;
+            toolCallStartedAt.set(index, Date.now());
+            // ✅ 保留原有文本提示，老版 APP 展示不受影响
             onChunk('thought', `🔧 调用 ${ev.name}`);
+            // ✅ 同时推结构化事件：工具名 + 入参摘要 + 序号
+            onChunk('tool_call', {
+              name: ev.name ?? '',
+              args: summarizeArgs(ev.args),
+              index,
+            });
             break;
-          case 'tool_result':
-            onChunk(
-              'thought',
-              `↩️ ${ev.name}：${shortTool(ev.result ?? '')}`,
-            );
+          }
+          case 'tool_result': {
+            const raw = ev.result ?? '';
+            const index = ev.index ?? 0;
+            const startedAt = toolCallStartedAt.get(index);
+            toolCallStartedAt.delete(index);
+            onChunk('thought', `↩️ ${ev.name}：${shortTool(raw)}`);
+            // ✅ 结构化结果：预览 + 原长 + 耗时 + 状态，前端可渲染可展开卡片
+            onChunk('tool_result', {
+              name: ev.name ?? '',
+              index,
+              result: shortTool(raw, 200),
+              resultLength: raw.length,
+              durationMs: startedAt ? Date.now() - startedAt : null,
+              status: inferToolStatus(raw),
+            });
             break;
+          }
           case 'error':
             onChunk('error', ev.content ?? '');
             break;
           case 'done':
-            fullReply = ev.fullReply ?? '';
+            // APP 端落库/返回的全文也做一次完整清洗，与流式看到的保持一致
+            fullReply = appReplyFormatter
+              ? formatAppReply(ev.fullReply ?? '')
+              : (ev.fullReply ?? '');
             usedModel = ev.model ?? '';
             usedTokens = ev.tokens ?? 0;
             truncated = ev.truncated === true;
+            completionTokens = ev.completionTokens ?? 0;
+            finishReason = ev.finishReason ?? '';
             break;
         }
       }
 
-      if (truncated) {
+      // APP 端不推这条内部警告；工具调用相关的 thought 不受影响
+      if (truncated && !isApp) {
         onChunk('thought', '⚠️ 回答达到长度上限，内容可能被截断。');
       }
 
@@ -660,6 +872,14 @@ export class ChatService {
         tokens: usedTokens,
         model: usedModel,
         truncated,
+        completionTokens,
+        finishReason,
+        // ✅ 首字延迟 / 总耗时 / 来源数：done 事件展示给面试官
+        ttftMs: firstContentAt
+          ? firstContentAt - overallStartTime
+          : undefined,
+        durationMs: Date.now() - overallStartTime,
+        sourcesCount: replySources.length,
       };
     } catch (error: any) {
       const totalDuration = Date.now() - overallStartTime;
@@ -674,14 +894,49 @@ export class ChatService {
 //         console.log(
 //           `⏹️ [性能监控] 客户端已断开，提前结束（累计 ${totalDuration}ms）`,
 //         );
-        return { fullReply: '', sources: [], tokens: 0, model: usedModel };
+        return {
+          fullReply: '',
+          sources: [],
+          tokens: 0,
+          model: usedModel,
+          truncated: false,
+          completionTokens: 0,
+          finishReason: '',
+          ttftMs: undefined,
+          durationMs: totalDuration,
+          sourcesCount: 0,
+        };
       }
 
       console.error('sendMessageStream 执行出错:', error);
 //       console.log(`❌ [性能监控] 请求异常中断，累计耗时: ${totalDuration}ms`);
 
-      const errorMsg =
-        error.message || '服务器开小差了，请检查后端配置或账户余额';
+      // ✅ 离线回放兜底：模型/网络类故障才回放，参数校验这类客户端错误照常报错。
+      //    user 消息在主链路开头已落库，这里不再重复写。
+      const isClientError =
+        error?.status === 400 || error?.getStatus?.() === 400;
+      if (demoReplayMode() !== 'off' && !isClientError) {
+        console.warn(
+          `🎬 [demo-replay] 上游失败，切换离线回放: ${error?.message || ''}`,
+        );
+        try {
+          return await this.playDemoReplay({
+            sessionId,
+            userQuery,
+            persistContent,
+            entry: findDemoReplay(userQuery) ?? DEMO_FALLBACK,
+            onChunk,
+            startTime: overallStartTime,
+            persistUser: false,
+            reason: '⚠️ 模型服务暂时不可用，已切换演示回放，下面的流程照常展示。',
+          });
+        } catch (replayError) {
+          console.error('🎬 [demo-replay] 回放失败:', replayError);
+        }
+      }
+
+      // ✅ 收敛成可展示文案：内部错误原文只进日志，不进聊天区
+      const errorMsg = friendlyChatError(error?.message ?? '');
       try {
         onChunk('error', errorMsg);
       } catch {}

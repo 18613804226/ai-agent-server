@@ -37,6 +37,8 @@ export interface AppConfig {
   commandApproval: ApprovalMode;
   /** 文件操作审批（写/删/移动）：ask 询问 / auto 自动放行 */
   fileApproval: ApprovalMode;
+  /** 数据库写操作审批（execute_sql）：ask 询问 / auto 自动放行 */
+  databaseApproval: ApprovalMode;
   local: {
     /** 上次打开的多个工作区文件夹（下次启动恢复） */
     workspaceRoots?: string[];
@@ -70,6 +72,7 @@ const DEFAULTS: AppConfig = {
   selectedModel: DEFAULT_MODEL_ID,
   commandApproval: 'ask',
   fileApproval: 'ask',
+  databaseApproval: 'ask',
   local: { workspaceRoots: [] },
   remote: { model: '' },
 };
@@ -108,6 +111,8 @@ export function getConfig(): AppConfig {
         (!raw.fileApproval && raw.approvalMode === 'auto')
           ? 'auto'
           : 'ask',
+      databaseApproval:
+        raw.databaseApproval === 'auto' ? 'auto' : 'ask',
       local: {
         workspaceRoots: Array.isArray(raw.local?.workspaceRoots)
           ? raw.local.workspaceRoots

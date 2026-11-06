@@ -5,6 +5,66 @@ import { mkdir, writeFile, rm } from 'fs/promises';
 import JSZip from 'jszip';
 import ExcelJS from 'exceljs';
 
+describe('Chat SessionService：演示会话保护与清空', () => {
+  it('超限清理时跳过 24 小时内刚用过的演示会话', async () => {
+    const sessions = Array.from({ length: 20 }, (_, i) => ({
+      id: `s-${i}`,
+      updatedAt: i < 3 ? new Date() : new Date('2020-01-01'),
+    }));
+    const deleteMany = vi.fn().mockResolvedValue({ count: 1 });
+    const prisma = {
+      chatSession: {
+        findMany: vi.fn().mockResolvedValue(sessions),
+        deleteMany,
+        create: vi.fn().mockResolvedValue({ id: 'new' }),
+      },
+    };
+    const service = new SessionService(prisma as never);
+    await service.createSession('dev-1');
+    expect(deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: ['s-3'] } },
+    });
+  });
+
+  it('所有超限会话都受保护时不删任何会话', async () => {
+    const sessions = Array.from({ length: 20 }, (_, i) => ({
+      id: `s-${i}`,
+      updatedAt: new Date(),
+    }));
+    const deleteMany = vi.fn();
+    const prisma = {
+      chatSession: {
+        findMany: vi.fn().mockResolvedValue(sessions),
+        deleteMany,
+        create: vi.fn().mockResolvedValue({ id: 'new' }),
+      },
+    };
+    const service = new SessionService(prisma as never);
+    await service.createSession('dev-1');
+    expect(deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('clearMessages 只删消息并保留会话', async () => {
+    const deleteMany = vi.fn().mockResolvedValue({ count: 7 });
+    const prisma = {
+      chatSession: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValue({ id: 'sess-1', deviceId: 'dev-1' }),
+        delete: vi.fn(),
+      },
+      message: { deleteMany },
+    };
+    const service = new SessionService(prisma as never);
+    const result = await service.clearMessages('sess-1', 'dev-1');
+    expect(deleteMany).toHaveBeenCalledWith({
+      where: { sessionId: 'sess-1' },
+    });
+    expect(prisma.chatSession.delete).not.toHaveBeenCalled();
+    expect(result).toEqual({ id: 'sess-1', deleted: 7 });
+  });
+});
+
 describe('ChatService session source metadata', () => {
   beforeAll(() => {
     process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test-key';

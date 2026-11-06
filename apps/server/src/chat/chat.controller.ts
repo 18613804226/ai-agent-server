@@ -16,6 +16,8 @@ import {
 } from '@nestjs/common'; // 💡 1. 引入 Req
 import type { Request, Response } from 'express'; // 💡 2. 引入 Express 的 Request 类型
 import { ChatService } from './chat.service.js';
+import { friendlyChatError } from './chat-prompt.js';
+import { demoQuestions } from './demo-replay.js';
 import { AttachmentService } from './attachment.service.js';
 import { ExcelService } from './excel.service.js';
 import { ImageService } from './image.service.js';
@@ -71,6 +73,21 @@ export class ChatController {
   @Delete('sessions/:id')
   async deleteSession(@CurrentDevice() device: any, @Param('id') id: string) {
     return this.sessionService.deleteSession(id, device?.id);
+  }
+
+  // ✅ 清空消息但保留会话：重置演示现场时不用重建会话、不用重新绑知识库
+  @Delete('sessions/:id/messages')
+  async clearSessionMessages(
+    @CurrentDevice() device: any,
+    @Param('id') id: string,
+  ) {
+    return this.sessionService.clearMessages(id, device?.id);
+  }
+
+  // ✅ 演示面板用：离线回放的固定问题清单
+  @Get('demo/questions')
+  async getDemoQuestions() {
+    return { questions: demoQuestions() };
   }
 
   @Post('tts')
@@ -262,6 +279,8 @@ export class ChatController {
       images?: unknown;
       fileIds?: unknown;
       attachmentIds?: unknown;
+      /** APP 端可显式声明终端形态；不传时回退到登录时上报的 Device.platform */
+      platform?: string;
     },
     @UploadedFile() file: Express.Multer.File | undefined,
     @Res({ passthrough: true }) res: Response,
@@ -286,6 +305,14 @@ export class ChatController {
     };
 
     const rawQuery = typeof body?.query === 'string' ? body.query : '';
+    // ✅ 端标识只用于选提示词和排版清洗，不参与鉴权/配额。
+    //    APP 端可随请求显式声明；没传就退回登录时上报的 Device.platform。
+    const platform =
+      typeof body?.platform === 'string' && body.platform.trim()
+        ? body.platform.trim().slice(0, 64)
+        : typeof device?.platform === 'string'
+          ? device.platform.slice(0, 64)
+          : undefined;
     const images = asList(body?.images);
     const fileIds = asList(body?.fileIds);
     const attachmentIds = asList(body?.attachmentIds);
@@ -326,6 +353,16 @@ export class ChatController {
     //    在 handler 返回、Nest 建立订阅之前发出的第一个事件会被直接丢掉
     //    （实测「正在解析附件」提示就是这么丢的）。Observable 在被订阅后才开始工作。
     return new Observable<MessageEvent>((subscriber) => {
+      let errorEmitted = false;
+      // 免费层首字慢 / 工具往返 / 视频转写都会长时间静默，
+      // 网关空闲超时会掐断连接；每 15s 推一帧让连接保持活跃。
+      const heartbeat = setInterval(() => {
+        if (!isClientDisconnected) {
+          subscriber.next({
+            data: { type: 'ping', at: Date.now() },
+          } as MessageEvent);
+        }
+      }, 15_000);
       void (async () => {
         try {
           let inlineAttachments:
@@ -358,15 +395,21 @@ export class ChatController {
           const result = await this.chatService.sendMessageStream(
             sessionId,
             query,
-            (type, content) => {
+            (type, payload) => {
               // 断开了就别再往已经关闭的响应里写
               if (!isClientDisconnected) {
-                subscriber.next({
-                  data:
-                    type === 'sources'
-                      ? { type, sources: content }
-                      : { type, content },
-                } as MessageEvent);
+                if (type === 'error') errorEmitted = true;
+                // 结构化事件（tool_call / tool_result）直接展开成 SSE data，
+                // 文本类事件仍走 content，老版 APP 的解析逻辑不用改
+                const data =
+                  type === 'sources'
+                    ? { type, sources: payload }
+                    : typeof payload === 'object' &&
+                        payload !== null &&
+                        !Array.isArray(payload)
+                      ? { type, ...payload }
+                      : { type, content: payload };
+                subscriber.next({ data } as MessageEvent);
               }
             },
             images, // 图片 URL 列表，交给大模型识别
@@ -375,30 +418,52 @@ export class ChatController {
             attachmentIds, // 先上传后引用的附件 ID
             inlineAttachments, // 随本条消息直传的附件（已当场解析）
             rawQuery, // ✅ 落库用用户原文：只传文件时补的默认指令不进聊天记录
+            platform, // ✅ APP 端专用提示词 / 排版清洗的开关
           );
 
           if (!isClientDisconnected) {
             // ✅ 完成后记账：次数 +1、token 累加（客户端断开不重复计）
             void this.authService.recordUsage(device.id, result?.tokens ?? 0);
-            // 把本轮 token / 模型推给前端，供消息下方展示「耗时 · tokens」
+            // ✅ 把本轮指标一次性推给前端：模型徽标 / 首字延迟 / 总耗时 / 来源数，
+            //    面试官能直观看到模型分层、降级与性能
             subscriber.next({
               data: {
                 type: 'done',
                 tokens: result?.tokens ?? 0,
                 model: result?.model ?? '',
+                completionTokens: result?.completionTokens ?? 0,
+                finishReason: result?.finishReason ?? '',
+                truncated: result?.truncated === true,
+                ttftMs: result?.ttftMs ?? null,
+                durationMs: result?.durationMs ?? 0,
+                sourcesCount: result?.sourcesCount ?? 0,
               },
             } as MessageEvent);
             subscriber.complete();
           }
         } catch (err) {
           if (!isClientDisconnected) {
-            subscriber.error(err);
+            // service 已经推过 error 事件就不重复推；否则补一帧收敛后的文案
+            if (!errorEmitted) {
+              subscriber.next({
+                data: {
+                  type: 'error',
+                  content: friendlyChatError(
+                    err instanceof Error ? err.message : '',
+                  ),
+                },
+              } as MessageEvent);
+            }
+            // ✅ 用完整流结束而不是 subscriber.error()：EventSource 会把后者
+            //    当成连接异常并重连，演示现场容易变成反复重连
+            subscriber.complete();
           }
         }
       })();
 
       // 退订（客户端断开）时中断上游
       return () => {
+        clearInterval(heartbeat);
         isClientDisconnected = true;
         abortController.abort();
       };

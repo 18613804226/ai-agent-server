@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { buildSystemPrompt, estimateTokens } from './chat-prompt.js';
+import {
+  buildSystemPrompt,
+  createAppReplyFormatter,
+  estimateTokens,
+  formatAppReply,
+  friendlyChatError,
+  isAppPlatform,
+  toSpeakableText,
+} from './chat-prompt.js';
 
 describe('estimateTokens', () => {
   it('空串返回 0', () => {
@@ -87,5 +95,157 @@ describe('buildSystemPrompt', () => {
       now,
     };
     expect(buildSystemPrompt(parts)).toBe(buildSystemPrompt(parts));
+  });
+});
+
+describe('按端区分提示词', () => {
+  const now = new Date('2026-01-02T03:04:05Z');
+  const base = {
+    context: '',
+    historySourceSummary: '此前对话未引用知识库资料。',
+    webSearchContext: '',
+    now,
+  };
+
+  it('ios / android / 常见别名识别为 APP 端', () => {
+    expect(isAppPlatform('ios')).toBe(true);
+    expect(isAppPlatform('Android')).toBe(true);
+    expect(isAppPlatform('ios 17.2')).toBe(true);
+    expect(isAppPlatform('app')).toBe(true);
+  });
+
+  it('web / desktop / 空值不识别为 APP 端', () => {
+    expect(isAppPlatform('web')).toBe(false);
+    expect(isAppPlatform('desktop')).toBe(false);
+    expect(isAppPlatform(undefined)).toBe(false);
+    expect(isAppPlatform(null)).toBe(false);
+  });
+
+  it('APP 端前置移动端输出规范，同时保留原有工具与引用规则', () => {
+    const web = buildSystemPrompt({ ...base, platform: 'web' });
+    const app = buildSystemPrompt({ ...base, platform: 'ios' });
+    expect(app.startsWith('【APP 端输出规范')).toBe(true);
+    expect(app).toContain('任意位置最多 1 个换行符');
+    expect(app).toContain('不复述用户问题');
+    expect(app).toContain('推理少写、能省就省');
+    expect(app).toContain('你的名字叫toto');
+    expect(app).toContain('fetchWeatherInfo');
+    expect(app).toContain('【引用规则】');
+    expect(app.length).toBeGreaterThan(web.length);
+  });
+
+  it('非 APP 端（含不传 platform）与原模板完全一致', () => {
+    expect(buildSystemPrompt(base)).toBe(
+      buildSystemPrompt({ ...base, platform: 'desktop' }),
+    );
+    expect(buildSystemPrompt(base)).not.toContain('【APP 端输出规范');
+  });
+
+  it('闲聊档同样携带完整工具/引用规则，只额外叠加口语要求', () => {
+    const full = buildSystemPrompt({ ...base, promptProfile: 'full' });
+    const chat = buildSystemPrompt({ ...base, promptProfile: 'chat' });
+    expect(chat).toContain('【搜索结果与工具规则】');
+    expect(chat).toContain('fetchWeatherInfo');
+    expect(chat).toContain('festival_info');
+    expect(chat).toContain('【引用规则】');
+    expect(chat).toContain('【历史对话来源状态】');
+    expect(chat).toContain('【本轮对话风格】');
+    expect(chat.length).toBeGreaterThan(full.length);
+    // 规则部分与完整档一字不差，只是前置了一段对话风格要求
+    expect(chat.endsWith(full)).toBe(true);
+  });
+
+  it('闲聊档叠加 APP 规范时，引用规则那一条仍然保留', () => {
+    const appChat = buildSystemPrompt({
+      ...base,
+      promptProfile: 'chat',
+      platform: 'ios',
+    });
+    expect(appChat.startsWith('【APP 端输出规范')).toBe(true);
+    expect(appChat).toContain('任意位置最多 1 个换行符');
+    expect(appChat).toContain('下方工具、附件、知识库来源');
+    expect(appChat).toContain('【搜索结果与工具规则】');
+  });
+});
+
+describe('APP 端排版兜底清洗', () => {
+  it('连续空行压成单个换行，首尾空白去掉', () => {
+    expect(formatAppReply('第一句\n\n\n第二句')).toBe('第一句\n第二句');
+    expect(formatAppReply('\n  \n  你好 \n\n')).toBe('你好');
+    expect(formatAppReply('a\r\n\r\nb')).toBe('a\nb');
+  });
+
+  it('单个合法换行保留', () => {
+    expect(formatAppReply('第一句\n第二句')).toBe('第一句\n第二句');
+  });
+
+  it('流式清洗跨 chunk 边界也能压掉连续换行', () => {
+    const format = createAppReplyFormatter();
+    const out = [
+      format('你好\n'),
+      format('\n\n世界'),
+      format('。\n'),
+      format('\n'),
+      format('结束'),
+    ].join('');
+    expect(out).toBe('你好\n世界。\n结束');
+  });
+
+  it('流式开头不留白，结果与整段清洗一致', () => {
+    const chunks = ['\n\n  ', '第一段\n\n', '\n第二段'];
+    const format = createAppReplyFormatter();
+    expect(chunks.map(format).join('')).toBe(formatAppReply(chunks.join('')));
+  });
+});
+
+describe('friendlyChatError', () => {
+  it('按错误类型收敛，兜底不回显内部原文', () => {
+    expect(
+      friendlyChatError('Request failed with status code 401 invalid api key'),
+    ).toBe('模型服务鉴权异常，请检查后端配置。');
+    expect(friendlyChatError('429 Too Many Requests')).toBe(
+      '当前体验人数较多，模型正在排队，请稍后重试。',
+    );
+    expect(friendlyChatError('ETIMEDOUT')).toBe(
+      '上游模型响应超时，请稍后重试。',
+    );
+    expect(
+      friendlyChatError(
+        'PrismaClientKnownRequestError: table users does not exist',
+      ),
+    ).toBe('本轮回答遇到问题，请稍后重试。');
+  });
+});
+
+describe('toSpeakableText', () => {
+  it('去掉标题/粗体/链接/emoji，只留可朗读文本', () => {
+    const text =
+      '# 天气\n**北京**今天 [详情](https://example.com/a) 晴 ☀️\n\n- 26℃\n- 东南风';
+    const out = toSpeakableText(text);
+    expect(out).not.toContain('#');
+    expect(out).not.toContain('**');
+    expect(out).not.toContain('https://');
+    expect(out).not.toContain('☀');
+    expect(out).toContain('北京');
+    expect(out).toContain('详情');
+    expect(out).toContain('26℃');
+  });
+
+  it('裸 URL 换成「链接」，来源标注不朗读', () => {
+    expect(toSpeakableText('见 https://a.com/x 说明')).toContain('链接');
+    expect(toSpeakableText('回答【来源：手册.pdf】')).not.toContain('来源');
+  });
+
+  it('按句边界截断，不切在半句', () => {
+    const out = toSpeakableText('第一句说明了背景情况。'.repeat(40), 60);
+    expect(out.length).toBeLessThanOrEqual(60);
+    expect(out.endsWith('。')).toBe(true);
+  });
+
+  it('代码块整段丢弃，行内代码留内容', () => {
+    expect(
+      toSpeakableText('```\nconst a = 1;\n```\n用 `fetch` 请求'),
+    ).not.toContain('const');
+    expect(toSpeakableText('用 `fetch` 请求')).toContain('fetch');
   });
 });

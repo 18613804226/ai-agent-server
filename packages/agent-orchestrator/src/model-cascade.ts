@@ -130,6 +130,39 @@ export function zhipuThinkingParam(): Record<string, unknown> {
   };
 }
 
+/** 问答档位：闲聊要活泼，基于资料/附件的回答要严谨，实时信息居中 */
+export type ChatSamplingProfile = 'casual' | 'knowledge' | 'live';
+
+const CHAT_SAMPLING_PRESETS: Record<
+  ChatSamplingProfile,
+  { temperature: number; top_p: number }
+> = {
+  casual: { temperature: 0.7, top_p: 0.8 },
+  knowledge: { temperature: 0.4, top_p: 0.8 },
+  live: { temperature: 0.5, top_p: 0.8 },
+};
+
+/**
+ * 按任务分档的采样参数：只由问答链路传入，代码 Agent 链路保持服务端默认。
+ *
+ * top_p 统一 0.8 用于收敛候选词，避免温度升高后发散、乱加空行和冗余文字。
+ * `CHAT_GLM_TEMPERATURE` / `CHAT_GLM_TOP_P` 可覆盖所有档位；越界或非法值
+ * 回落到当前档位的预设，避免脏配置直接发给上游。
+ */
+export function zhipuChatSamplingParam(
+  profile: ChatSamplingProfile = 'casual',
+): { temperature: number; top_p: number } {
+  const preset = CHAT_SAMPLING_PRESETS[profile] ?? CHAT_SAMPLING_PRESETS.casual;
+  const sampling = (name: string, fallback: number): number => {
+    const n = envNumber(name, fallback);
+    return n > 0 && n <= 1 ? n : fallback;
+  };
+  return {
+    temperature: sampling('CHAT_GLM_TEMPERATURE', preset.temperature),
+    top_p: sampling('CHAT_GLM_TOP_P', preset.top_p),
+  };
+}
+
 /** 智谱客户端的 key / baseUrl：单独一套，缺 key 时返回 null（自动退化为单模型） */
 export function resolveZhipuCredentials(): {
   apiKey: string;

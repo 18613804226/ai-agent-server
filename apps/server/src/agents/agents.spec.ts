@@ -48,9 +48,13 @@ describe('agent 注册', () => {
       'search_files',
       'glob',
       'run_terminal',
+      'open_in_browser',
       'git_status',
       'git_diff',
       'read_artifact',
+      'describe_database',
+      'query_database',
+      'execute_sql',
       'verify_workspace',
     ]);
   });

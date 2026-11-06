@@ -1,6 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { AgentEvent } from '@repo/agent-orchestrator';
 import type { AppConfig, ProviderConfig } from '../main/config.js';
+import type {
+  DatabaseConfig,
+  DatabaseConnectionInput,
+} from '../shared/database.js';
+import type { DatabaseSchema } from '@repo/editor-agent';
 
 interface AgentFileChange {
   path: string;
@@ -154,6 +159,33 @@ const api = {
       ipcRenderer.invoke('chat:getSessions'),
     saveSessions: (sessions: unknown): Promise<void> =>
       ipcRenderer.invoke('chat:saveSessions', sessions),
+  },
+  database: {
+    list: (): Promise<DatabaseConfig> =>
+      ipcRenderer.invoke('database:list'),
+    save: (conn: DatabaseConnectionInput): Promise<DatabaseConfig> =>
+      ipcRenderer.invoke('database:save', conn),
+    delete: (id: string): Promise<DatabaseConfig> =>
+      ipcRenderer.invoke('database:delete', id),
+    setActive: (id: string): Promise<DatabaseConfig> =>
+      ipcRenderer.invoke('database:setActive', id),
+    test: (
+      conn: DatabaseConnectionInput,
+    ): Promise<{ ok: boolean; message: string }> =>
+      ipcRenderer.invoke('database:test', conn),
+    schema: (): Promise<DatabaseSchema> =>
+      ipcRenderer.invoke('database:schema'),
+    query: (sql: string): Promise<{ rows: unknown[] }> =>
+      ipcRenderer.invoke('database:query', sql),
+    execute: (sql: string): Promise<{ rowsAffected: number | null }> =>
+      ipcRenderer.invoke('database:execute', sql),
+    tableRows: (
+      name: string,
+      limit?: number,
+    ): Promise<{ rows: unknown[] }> =>
+      ipcRenderer.invoke('database:tableRows', name, limit),
+    resetDemo: (): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('database:resetDemo'),
   },
   browser: {
     create: (url: string): Promise<number> =>

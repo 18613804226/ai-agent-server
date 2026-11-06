@@ -28,9 +28,28 @@ export class RemoteTransport implements AgentTransport {
   private lastContext?: AgentPromptContext;
   private lastRoots: string[] = [];
   private lastSummary = '';
+  private eventUnsubscribe: (() => void) | null = null;
 
   get session(): string | null {
     return this.sessionId;
+  }
+
+  /**
+   * 订阅主进程 agent:event：本地工具执行产生的审批请求（approval_request）
+   * 经此通道下发，否则云端模式无法弹出审批。
+   */
+  private subscribeEvents(onEvent: (ev: ChatEvent) => void): void {
+    this.unsubscribeEvents();
+    this.eventUnsubscribe = window.electron.agent.onEvent(
+      (ev) => {
+        onEvent(ev as ChatEvent);
+      },
+    );
+  }
+
+  private unsubscribeEvents(): void {
+    this.eventUnsubscribe?.();
+    this.eventUnsubscribe = null;
   }
 
   private async ensureSession(): Promise<string> {
@@ -94,29 +113,35 @@ export class RemoteTransport implements AgentTransport {
       ? AbortSignal.any([signal, this.controller.signal])
       : this.controller.signal;
 
-    await streamChatWithTools(
-      sessionId,
-      query,
-      (ev) => {
-        // 云端模式：done 时把客户端收集的改动挂上去，渲染层才能展示/撤销
-        if (ev.type === 'done') {
-          void window.electron.agent
-            .getChanges()
-            .then((changes) => onEvent({ ...ev, changes } as ChatEvent));
-          return;
-        }
-        onEvent(ev as ChatEvent);
-      },
-      (name, args) => window.electron.agent.execTool(name, args),
-      {
-        signal: combined,
-        model: options?.model,
-        workspaceRoots: roots.map((r) => r.path),
-        workspaceSummary,
-        context: options?.context,
-        images: options?.images,
-      },
-    );
+    // 审批请求经主进程 agent:event 回到渲染层
+    this.subscribeEvents(onEvent);
+    try {
+      await streamChatWithTools(
+        sessionId,
+        query,
+        (ev) => {
+          // 云端模式：done 时把客户端收集的改动挂上去，渲染层才能展示/撤销
+          if (ev.type === 'done') {
+            void window.electron.agent
+              .getChanges()
+              .then((changes) => onEvent({ ...ev, changes } as ChatEvent));
+            return;
+          }
+          onEvent(ev as ChatEvent);
+        },
+        (name, args) => window.electron.agent.execTool(name, args),
+        {
+          signal: combined,
+          model: options?.model,
+          workspaceRoots: roots.map((r) => r.path),
+          workspaceSummary,
+          context: options?.context,
+          images: options?.images,
+        },
+      );
+    } finally {
+      this.unsubscribeEvents();
+    }
   }
 
   abort(): void {
@@ -148,27 +173,32 @@ export class RemoteTransport implements AgentTransport {
       ? AbortSignal.any([signal, this.controller.signal])
       : this.controller.signal;
 
-    await streamChatWithTools(
-      sessionId,
-      '继续执行之前的任务。',
-      (ev) => {
-        if (ev.type === 'done') {
-          void window.electron.agent
-            .getChanges()
-            .then((changes) => onEvent({ ...ev, changes } as ChatEvent));
-          return;
-        }
-        onEvent(ev as ChatEvent);
-      },
-      (name, args) => window.electron.agent.execTool(name, args),
-      {
-        signal: combined,
-        model: undefined,
-        workspaceRoots: this.lastRoots,
-        workspaceSummary: this.lastSummary,
-        context: this.lastContext,
-        resume: true,
-      },
-    );
+    this.subscribeEvents(onEvent);
+    try {
+      await streamChatWithTools(
+        sessionId,
+        '继续执行之前的任务。',
+        (ev) => {
+          if (ev.type === 'done') {
+            void window.electron.agent
+              .getChanges()
+              .then((changes) => onEvent({ ...ev, changes } as ChatEvent));
+            return;
+          }
+          onEvent(ev as ChatEvent);
+        },
+        (name, args) => window.electron.agent.execTool(name, args),
+        {
+          signal: combined,
+          model: undefined,
+          workspaceRoots: this.lastRoots,
+          workspaceSummary: this.lastSummary,
+          context: this.lastContext,
+          resume: true,
+        },
+      );
+    } finally {
+      this.unsubscribeEvents();
+    }
   }
 }

@@ -37,6 +37,29 @@
 - 支持客户端中断时取消上游模型请求。
 - 提供语音识别和语音合成接口。
 
+### APP 端提示词与排版
+
+`/chat/:id/stream` 按客户端平台选择提示词：登录时上报 `platform: 'ios' | 'android'`（也识别 `app` / `mobile` 等别名），或直接在请求体带 `platform`，请求体优先。判定为 APP 端时：
+
+- 系统提示词前置一段移动端输出规范：直给答案、口语短句、不复述问题、推理只保留必要的一句（不展开分步推演）、不用 Markdown 标题/列表/表格/分割线，任意位置最多 1 个换行；原有的工具、附件、知识库来源与联网引用规则全部保留。
+- 回复额外做排版兜底清洗：流式逐 chunk 与落库全文都会把连续空行（含跨 chunk 边界、CRLF、只夹空格的伪空行）压成单个换行并去掉首尾空白，避免手机上一屏只显示几行字。
+
+Web / 桌面端或不传 `platform` 时不叠加 APP 排版规范与排版清洗。提示词与清洗逻辑在 `src/chat/chat-prompt.ts`，单测见 `src/chat/chat-prompt.spec.ts`。
+APP 端只收掉模型路由决策、长度上限这类调试提示；`🔧 调用工具`、`↩️ 工具结果`、`🔎 已联网检索`、附件解析与降级提示全部保留展示，方便演示 Agent 的工具调用链。
+
+### 流式事件（SSE）
+
+`/chat/:id/stream` 每帧 `data` 是一个 JSON 对象，`type` 取值：
+
+- `thought` / `content` / `error`：`content` 为文本；错误文案已收敛，不含内部报错原文。
+- `sources`：`sources` 为引用来源数组。
+- `tool_call`：`{ name, args, index }`，`args` 是入参摘要（最长 500 字）。
+- `tool_result`：`{ name, index, result, resultLength, durationMs, status }`；`result` 为 200 字预览、`resultLength` 为原长、`durationMs` 为从 call 到 result 的墙钟耗时，`status` 取 `success | error | cached | denied`。按 `index` 与 `tool_call` 配对即可渲染可展开的工具卡片。
+- `done`：`{ tokens, model, completionTokens, finishReason, truncated, ttftMs, durationMs, sourcesCount }`，其中 `ttftMs` 是首字延迟。
+- `ping`：每 15 秒一帧心跳，避免长静默期被网关断开，客户端忽略即可。
+
+兼容性：结构化 `tool_call` / `tool_result` 是新增事件，原有的 `🔧 调用 …` / `↩️ …` 文本 `thought` 仍同时推送，老版 APP 无需改动也能展示工具链。出错时推一帧收敛文案后正常结束流，不再用 `subscriber.error()` 触发 EventSource 反复重连。
+
 ## 项目结构
 
 ```text
@@ -190,6 +213,17 @@ pnpm --filter @repo/server start:dev
 
 思考链默认给智谱请求带上 `thinking:{type:'disabled'}`：它会让「你好」这种问候也产出上千字推理，严重拖慢首字。需要模型自行深度推理时配 `CHAT_GLM_THINKING=true`（且必须换成 `GLM-4.6V-Flash` 等推理模型，`glm-4-flash` 等非推理型号无推理能力）。
 
+智能问答链路按任务分档给 GLM 下发采样参数（只作用于智谱候选）：闲聊 `temperature=0.7`（比 0.65 基准档更活泼）、知识库/附件问答 `0.4`（严格基于资料、少编造）、实时搜索 `0.5`，`top_p` 统一 `0.8` 以收敛发散、少加空行。代码 Agent 链路和降级到 qwen 的请求不下发，保持服务端默认。`CHAT_GLM_TEMPERATURE` / `CHAT_GLM_TOP_P` 会覆盖所有档位，取值需在 `(0, 1]`，非法值回落到当前档预设。
+
+提示词也按场景分档：工具、附件、知识库来源与引用规则两档共用、始终完整保留，保证 Demo 里工具调用链和来源标注随时可见；本轮没有资料/附件/联网结果/工具需求时，只是额外前置一段「口语直给」的对话风格要求（含 APP 排版规范），让闲聊不显得死板。
+
+### 面试 Demo 稳定性：离线回放 / 会话保护 / 语音朗读
+
+- **离线回放**：`CHAT_DEMO_REPLAY` 三态。留空（默认）只在主链路（模型、联网检索、数据库）失败时兜底回放；`true` 完全不请求模型，纯离线演示；`off` 关闭。回放按预录顺序重放 `thought` → `tool_call` → `tool_result` → `content` → `sources`，`done.model` 标为 `demo-replay`，现场断网、限流、余额不足都能把流程走完。回放只演示流程，不编造事实、URL 或来源；原始错误仍写后端日志。参数校验这类 400 错误不回放。
+- **固定问题**：`GET /chat/demo/questions` 返回 5 条预置问题（工具调用 / 联网检索 / 知识库 RAG / 多轮追问 / 闲聊身份），演示面板可一键填入。
+- **会话保护**：每设备 20 条上限触发自动清理时跳过 24 小时内更新过的会话，避免提前准备的演示历史被静默删掉；跳过时打日志。重置现场用 `DELETE /chat/sessions/:id/messages`，只清空消息、保留会话 ID 与知识库绑定。
+- **语音朗读**：`POST /chat/tts` 先把回答里的 Markdown 标题、粗斜体、代码块、链接（只留锚文本）、裸 URL、emoji 与来源标注清洗成口语文本，再按句边界截断到 300 字，避免符号被逐字念出或断在半句。
+
 智谱免费层**限 1 个并发请求**，是 429 的主要来源；本项目已用进程内串行锁规避，并配了限流原地重试。
 
 可用环境变量完全覆盖链路，**无需改代码**：
@@ -208,7 +242,11 @@ CHAT_MODEL_FALLBACK="qwen3.7-flash"          # 全局兜底
 CHAT_COMPLEXITY_THRESHOLD="3"                # 得分达到该值算「复杂」
 CHAT_EXPERT_THRESHOLD="5"                    # 得分达到该值算「高难度」（默认=复杂阈值+2）
 CHAT_GLM_THINKING="false"                    # 是否保留思考链（默认关）
+CHAT_GLM_TEMPERATURE=""                      # 留空按任务分档 0.7/0.4/0.5；填值则覆盖所有档位
+CHAT_GLM_TOP_P=""                            # 留空用 0.8；填值则覆盖所有档位
+CHAT_DEMO_REPLAY=""                          # 留空=失败时兜底回放；true=纯离线演示；off=关闭
 CHAT_RATE_LIMIT_RETRIES="2"                  # 免费层 429 限流时的原地重试次数
+CHAT_ZHIPU_LOCK_TIMEOUT_MS="30000"           # 智谱串行锁最长等待（ms）；超时自动降级到下一个候选
 CHAT_SHOW_ROUTING_THOUGHT="true"             # 是否把模型选择推给前端思考流
 ```
 
@@ -440,8 +478,8 @@ Content-Type: application/json
 |------|----|------|
 | `src/chat/excel-check.spec.ts` | 单元 | Excel 错误识别的纯规则：单元格归一化、列地址换算、列类型推断、必填判定、IQR 离群、行指纹、错误码元数据 |
 | `test/integration/excel-check.integration.spec.ts` | 集成 | 用 exceljs 写真实 xlsx 跑全流程：五类问题各一例 + 上限截断、规则开关、空行误报、多工作表 |
-| `packages/agent-orchestrator/src/model-cascade.spec.ts` | 单元 | 模型分层：复杂度判定、平台推导（glm/qwen）、候选链、降级判定、配置与思考开关 |
-| `packages/agent-orchestrator/src/orchestrator.spec.ts` | 单元 | 编排器主循环：纯对话、工具调用回填、拒答重试、候选降级、无候选、中断 |
+| `packages/agent-orchestrator/src/model-cascade.spec.ts` | 单元 | 模型分层：复杂度判定、平台推导（glm/qwen）、候选链、降级判定、配置与思考开关、采样三档与 env 覆盖 |
+| `packages/agent-orchestrator/src/orchestrator.spec.ts` | 单元 | 编排器主循环：纯对话、工具调用回填、拒答重试、候选降级、无候选、中断、锁等待超时降级、采样只下发智谱候选 |
 | `packages/agent-orchestrator/src/simple-lock.spec.ts` | 单元 | 进程内互斥锁：互斥性、FIFO、重复释放保护、异常必须 finally |
 | `packages/agent-orchestrator/src/tool-call-accumulator.spec.ts` | 单元 | 流式 tool_calls 分片累积与收敛 |
 | `src/agents/agents.spec.ts` | 单元 | agent 注册、消息组装、工具执行、editor 文件工具越界/破坏性命令防护 |
@@ -450,7 +488,10 @@ Content-Type: application/json
 | `src/chat/video-transcript.spec.ts` | 单元 | 视频超时长 / 无音轨错误类型与文案 |
 | `src/auth/auth.service.spec.ts` | 单元 | 设备/管理员登录、token 校验、每日配额与跨天重置、用量记账 |
 | `src/auth/admin.controller.spec.ts` | 单元 | 管理后台：非管理员 403、设备分页、用量统计 |
-| `src/chat/chat.service.spec.ts` | 单元 | 会话 CRUD 契约（不存在返回 null、标题更新、删除） |
+| `src/chat/chat.service.spec.ts` | 单元 | 会话 CRUD 契约（不存在返回 null、标题更新、删除）、演示会话 24h 保护与清空消息 |
+| `src/chat/chat-prompt.spec.ts` | 单元 | APP 端提示词与排版清洗、两档共用完整工具/引用规则、错误收敛、朗读文本清洗 |
+| `src/chat/chat.controller.spec.ts` | 单元 | SSE 事件透传、done 指标、错误帧、演示辅助接口 |
+| `src/chat/demo-replay.spec.ts` | 单元 | 回放三态、预录事件与不编造兜底，forced / 失败兜底 / off 的服务集成 |
 | `src/chat/kb-upload.spec.ts` | 单元 | 知识库上传：类型/大小拒绝、状态流转、删除（mock Prisma） |
 | `src/chat/web-search.spec.ts` | 单元 | 实时查询识别、Tavily 结果格式化 |
 | `src/vector/vector.service.spec.ts` | 单元 | 向量写入 NUL 清洗、metadata 删除过滤 |

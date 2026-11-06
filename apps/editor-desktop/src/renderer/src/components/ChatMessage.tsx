@@ -1,7 +1,7 @@
-import { memo, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { changeLabel } from '../diff';
+import { changeLabel, diffLines } from '../diff';
 import type { FileChange } from '../mode/types';
 import { ImageLightbox } from './ImageLightbox';
 
@@ -244,10 +244,75 @@ function ToolActivityBlock({
   );
 }
 
+/**
+ * 思考块：一个最大高度的可折叠窗口。
+ * 流式思考时自动展开（内部滚动跟随最新内容），思考结束自动折叠，头部可随时手动开合。
+ */
+function ThoughtBlock({
+  text,
+  streaming,
+}: {
+  text: string;
+  streaming: boolean;
+}) {
+  const [open, setOpen] = useState(streaming);
+  const bodyRef = useRef<HTMLPreElement>(null);
+
+  useEffect(() => {
+    setOpen(streaming);
+  }, [streaming]);
+
+  // 展开且仍在思考时，窗口内部自动贴底，保证看到最新思考内容
+  useEffect(() => {
+    if (open && streaming) {
+      const el = bodyRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  }, [text, open, streaming]);
+
+  return (
+    <div className={`thought${open ? ' open' : ''}`}>
+      <button
+        type="button"
+        className="thought-head"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        title={open ? '收起思考' : '展开思考'}
+      >
+        <span className="thought-icon">💭</span>
+        <span className="thought-title">
+          {streaming ? '思考中…' : '已思考'}
+        </span>
+        <span className={`thought-toggle${open ? ' open' : ''}`}>
+          <svg
+            viewBox="0 0 16 16"
+            width="12"
+            height="12"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+          >
+            <path d="m6 4 4 4-4 4" />
+          </svg>
+        </span>
+      </button>
+      {open ? (
+        <pre className="thought-body" ref={bodyRef}>
+          {text}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
+
 /** 单条消息：按事件流顺序渲染段落 / 思考 / 工具 / 图片（memo 避免流式刷新时整列表重渲染） */
 export const ChatMessage = memo(function ChatMessage({
   msg,
   streaming,
+  isLatest = false,
   onOpenBrowser,
   onSelectDiff,
   onApplyDiff,
@@ -255,19 +320,70 @@ export const ChatMessage = memo(function ChatMessage({
 }: {
   msg: ChatMsg;
   streaming: boolean;
+  /** 是否为当前正在生成的最后一条消息（决定思考窗口是否自动展开） */
+  isLatest?: boolean;
   onOpenBrowser?: (url: string) => void;
   onSelectDiff?: (c: FileChange) => void;
   onApplyDiff?: (path: string, content: string) => void;
   onSaveChanges?: () => void;
 }) {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const [copied, setCopied] = useState(false);
   const blocks = useMemo(() => buildMessageBlocks(msg), [msg]);
+
+  const copyMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(msg.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // 剪贴板不可用时忽略
+    }
+  };
   const pendingChanges = useMemo(
     () => msg.changes?.filter((c) => c.pending) ?? [],
     [msg.changes],
   );
+  /** 每个改动文件的增删行数（用于消息内联摘要） */
+  const changesWithStats = useMemo(
+    () =>
+      (msg.changes ?? []).map((c) => {
+        const diffs = diffLines(c.before ?? '', c.after ?? '');
+        return {
+          change: c,
+          added: diffs.filter((d) => d.type === 'add').length,
+          deleted: diffs.filter((d) => d.type === 'del').length,
+        };
+      }),
+    [msg.changes],
+  );
   return (
     <div className={`msg msg-${msg.role}`}>
+      <button
+        type="button"
+        className={`message-copy${copied ? ' copied' : ''}`}
+        title={copied ? '已复制' : '复制消息'}
+        onClick={copyMessage}
+      >
+        {copied ? (
+          '✓'
+        ) : (
+          <svg
+            viewBox="0 0 16 16"
+            width="13"
+            height="13"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+          >
+            <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+            <path d="M10.5 5.5v-2a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3.5v5A1.5 1.5 0 0 0 4 10h1.5" />
+          </svg>
+        )}
+      </button>
       {blocks.map((block, i) => {
         if (block.type === 'content') {
           const text = collapseBlankLines(block.text);
@@ -305,10 +421,13 @@ export const ChatMessage = memo(function ChatMessage({
         }
         if (block.type === 'thought') {
           const text = collapseBlankLines(block.text);
+          // 仅当思考仍在进行（当前消息且思考块是最后一个块）时自动展开，否则折叠
           return text ? (
-            <pre key={i} className="thought">
-              {text}
-            </pre>
+            <ThoughtBlock
+              key={i}
+              text={text}
+              streaming={streaming && isLatest && i === blocks.length - 1}
+            />
           ) : null;
         }
         if (block.type === 'images') {
@@ -405,21 +524,30 @@ export const ChatMessage = memo(function ChatMessage({
             )}
           </div>
           <ul className="message-changes-list">
-            {msg.changes.map((c, i) => (
+            {changesWithStats.map(({ change: c, added, deleted }, i) => (
               <li key={`${c.kind}-${c.path}-${i}`}>
-                <button
-                  type="button"
-                  onClick={() => onSelectDiff?.(c)}
-                  title={`预览改动：${c.path}`}
-                >
-                  <span className={`badge badge-${c.kind}`}>
-                    {changeLabel(c.kind)}
+                <div className="message-change-row">
+                  <span className="message-change-file">
+                    <span className={`badge badge-${c.kind}`}>
+                      {changeLabel(c.kind)}
+                    </span>
+                    <span className="message-changes-path">{c.path}</span>
                   </span>
-                  <span className="message-changes-path">{c.path}</span>
+                  <span className="message-change-stats">
+                    <span className="changes-added">+{added}</span>
+                    <span className="changes-deleted">-{deleted}</span>
+                  </span>
+                  <button
+                    type="button"
+                    className="message-change-view"
+                    onClick={() => onSelectDiff?.(c)}
+                  >
+                    View Diff
+                  </button>
                   {c.pending ? (
                     <span className="message-changes-pending">待确认</span>
                   ) : null}
-                </button>
+                </div>
               </li>
             ))}
           </ul>

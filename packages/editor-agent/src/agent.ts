@@ -3,6 +3,7 @@ import type {
   VerifyHook,
 } from '@repo/agent-orchestrator';
 import { createEditorTools, type WorkspaceRootsInput } from './tools.js';
+import { createDatabaseTools, type DatabaseRunner } from './database.js';
 import { buildEditorSystemPrompt } from './prompt.js';
 import { createVerifier } from './verify.js';
 import type { ChangeListener } from './types.js';
@@ -27,6 +28,8 @@ export interface CreateEditorAgentOptions {
   onBrowserOpen?: (url: string) => void;
   /** true=文件改动不直接落盘，产出 pending diff 等用户确认（diff 块审批） */
   deferWrite?: boolean;
+  /** 数据库执行器（宿主注入）；未传时数据库工具提示未配置 */
+  database?: DatabaseRunner;
 }
 
 /**
@@ -51,6 +54,7 @@ export function createEditorAgent(
     options.onBrowserOpen,
     options.deferWrite,
   );
+  tools.push(...createDatabaseTools(options.database));
   tools.push({
     definition: {
       type: 'function',

@@ -8,12 +8,15 @@ import {
   decodeProcOutput,
   deleteWorkspacePath,
   execAsync,
+  isReadOnlySql,
   readWorkspaceFile,
   renameWorkspacePath,
   writeWorkspaceFile,
 } from '@repo/editor-agent';
 import { LocalAgent } from './agent/local-agent.js';
 import { browserManager } from './browser.js';
+import { getDatabaseManager } from './database.js';
+import type { DatabaseConnectionInput } from '../shared/database.js';
 import {
   getConfig,
   setConfig,
@@ -445,6 +448,45 @@ export function registerIpc(): void {
   ipcMain.handle('browser:close', (_event, id: number) =>
     browserManager.close(id),
   );
+
+  // 数据库连接与查询（密码不出主进程）
+  ipcMain.handle('database:list', () => getDatabaseManager().listConfig());
+  ipcMain.handle('database:save', (_event, conn: DatabaseConnectionInput) =>
+    getDatabaseManager().saveConnection(conn),
+  );
+  ipcMain.handle('database:delete', (_event, id: string) =>
+    getDatabaseManager().deleteConnection(id),
+  );
+  ipcMain.handle('database:setActive', (_event, id: string) =>
+    getDatabaseManager().setActive(id),
+  );
+  ipcMain.handle('database:test', (_event, conn: DatabaseConnectionInput) =>
+    getDatabaseManager().testConnection(conn),
+  );
+  ipcMain.handle('database:schema', () => getDatabaseManager().schema());
+  ipcMain.handle('database:query', async (_event, sql: string) => {
+    const text = String(sql ?? '');
+    if (!isReadOnlySql(text)) {
+      throw new Error('database:query 只允许只读 SQL，写操作请使用「执行写 SQL」');
+    }
+    const rows = await getDatabaseManager().queryReadOnly(text);
+    return { rows };
+  });
+  ipcMain.handle('database:tableRows', async (_event, name: string, limit = 200) => {
+    const rows = await getDatabaseManager().tableRows(
+      String(name ?? ''),
+      Number(limit) || 200,
+    );
+    return { rows };
+  });
+  ipcMain.handle('database:execute', async (_event, sql: string) => {
+    const result = await getDatabaseManager().execute(String(sql ?? ''));
+    return { rowsAffected: result.rowsAffected ?? null };
+  });
+  ipcMain.handle('database:resetDemo', async () => {
+    await getDatabaseManager().resetDemo();
+    return { ok: true };
+  });
 
   // 聊天会话持久化：写入 userData/chat-sessions.json
   ipcMain.handle('chat:getSessions', () => {

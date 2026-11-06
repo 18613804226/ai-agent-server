@@ -115,19 +115,23 @@ backend（云端模式）
 
 `read_file` / `write_file` / `edit_file` / `apply_patch` / `delete_file` / `move_file` /
 `create_directory` / `list_dir` / `search_files` / `glob` / `run_terminal` /
-`git_status` / `git_diff`
+`git_status` / `git_diff` / `open_in_browser`
 
 ## 功能
 
 - 左侧工作区文件树（本地 IPC），支持**多个文件夹**（VS Code 多根），目录可展开/折叠
 - 可添加/移除文件夹、清空工作区
 - 文件树右键菜单：新建文件/文件夹、重命名、删除、问 AI
-- 中间代码编辑器：CodeMirror + oneDark，按扩展名语法高亮，**可手动编辑 + Ctrl+S 保存**
-- 底部终端面板：在工作区目录执行命令，支持 `cd` / `clear`
+- 中间代码编辑器：Monaco，按扩展名语法高亮，**可手动编辑 + Ctrl+S 保存**
+- 底部终端面板：多标签、实时输出（长进程不卡）、↑/↓ 历史命令、Ctrl+C/■ 停止、链接可点击（单击内置浏览器、Ctrl+单击外部浏览器）、清屏、PowerShell/cmd/Git Bash 切换
+- 内置浏览器：顶栏「浏览器」打开预览（仅 localhost/127.0.0.1），AI 可一键打开
 - 快速打开文件（Ctrl+P）、侧栏开关（Ctrl+B）、设置（Ctrl+,）
-- 右侧 AI 对话，流式渲染 `thought` / `content` / `tool_call` / `tool_result`
+- 右侧 AI 对话，流式渲染 `thought` / `content` / `tool_call` / `tool_result`，支持 Markdown、图片输入（选择/粘贴/拖拽 + 点击放大）、消息复制
 - 输入框支持 `@` 引用工作区文件，发送时自动把文件内容带给 agent
-- 每轮结束后在侧栏列出「本轮改动」，点击查看行级 diff（A/M/D/R 标记）
+- 多会话：右侧任务标签栏，新建/切换/删除任务，消息/输入独立，持久化到 `chat-sessions.json`
+- 每轮结束后在消息里列出「已修改文件」（含 +N -N 与 View Diff），点击打开并排 diff（左旧右新 + hunk 逐块接受/拒绝）
+- diff 块审批：文件操作审批开启时，AI 改动显示「待确认」，确认后才写入文件
+- 工具审批拆分：命令执行 / 文件操作 两个独立开关
 - 生成中可「停止」，会 abort 上游请求
 
 ## 快捷键
@@ -157,4 +161,4 @@ backend（云端模式）
 - 所有文件工具都限制在工作区根目录内，越界路径直接拒绝。
 - `run_terminal` 有破坏性命令黑名单；`delete_file` 只能删文件。
 - 模型 API Key 存在 Electron `userData/config.json`，`safeStorage` 可用时用系统钥匙串加密。
-- 本地模式目前是「工具直接写入」；diff 预览与写前确认在路线图中。
+- 本地模式支持「工具直接写入」与「diff 块审批」：文件操作审批开启时，AI 改动先不落盘，消息里显示「待确认」，确认后才写入；也可在 diff 视图逐块接受/拒绝。

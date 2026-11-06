@@ -20,6 +20,7 @@ import {
 import { ArtifactStore } from '@repo/agent-orchestrator';
 import { randomUUID } from 'node:crypto';
 import { getConfig } from '../config.js';
+import { getDatabaseManager } from '../database.js';
 import { resolveModel } from './model.js';
 import { RunStore, type RunCheckpoint, type RunState } from './run-store.js';
 
@@ -189,6 +190,10 @@ export class LocalAgent {
       if (cfg.commandApproval === 'auto') return false;
       return RISKY_COMMAND.test(String(args.command ?? ''));
     }
+    // 数据库写操作：由「数据库操作审批」开关控制
+    if (name === 'execute_sql') {
+      return cfg.databaseApproval !== 'auto';
+    }
     return false;
   }
 
@@ -261,6 +266,8 @@ export class LocalAgent {
           this.eventSink?.({ type: 'browser_open', url }),
         // 文件操作审批开启时：改动不直接落盘，产出 pending diff 等用户确认
         deferWrite: getConfig().fileApproval === 'ask',
+        // 数据库执行器：本地模式直接可用；云端模式由 tool_request 回到这里执行
+        database: getDatabaseManager().getRunner(),
       },
     );
     this.deferWrite = getConfig().fileApproval === 'ask';

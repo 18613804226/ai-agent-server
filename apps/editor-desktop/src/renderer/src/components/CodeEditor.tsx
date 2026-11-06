@@ -18,32 +18,116 @@ interface CodeEditorProps {
 }
 
 function languageFor(path: string): string {
-  const ext = path.split('.').pop()?.toLowerCase() ?? '';
+  const name = path.split(/[\\/]/).pop()?.toLowerCase() ?? '';
+  const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '';
+  // 无扩展名或 Dockerfile.* 变体
+  if (name === 'dockerfile' || name.startsWith('dockerfile.')) return 'dockerfile';
   switch (ext) {
     case 'ts':
+    case 'mts':
+    case 'cts':
     case 'tsx':
       return 'typescript';
     case 'js':
     case 'mjs':
     case 'cjs':
-      return 'javascript';
     case 'jsx':
       return 'javascript';
     case 'json':
+    case 'jsonc':
       return 'json';
     case 'md':
     case 'mdx':
       return 'markdown';
     case 'css':
-    case 'scss':
-    case 'less':
       return 'css';
+    case 'scss':
+      return 'scss';
+    case 'less':
+      return 'less';
     case 'html':
     case 'htm':
     case 'vue':
+    case 'svelte':
       return 'html';
     case 'py':
+    case 'pyw':
+    case 'pyi':
       return 'python';
+    case 'java':
+      return 'java';
+    case 'go':
+      return 'go';
+    case 'c':
+    case 'h':
+      return 'c';
+    case 'cpp':
+    case 'cc':
+    case 'cxx':
+    case 'hpp':
+    case 'hh':
+    case 'hxx':
+      return 'cpp';
+    case 'cs':
+      return 'csharp';
+    case 'php':
+      return 'php';
+    case 'rb':
+      return 'ruby';
+    case 'rs':
+      return 'rust';
+    case 'swift':
+      return 'swift';
+    case 'kt':
+    case 'kts':
+      return 'kotlin';
+    case 'scala':
+      return 'scala';
+    case 'sh':
+    case 'bash':
+    case 'zsh':
+      return 'shell';
+    case 'sql':
+      return 'sql';
+    case 'yaml':
+    case 'yml':
+      return 'yaml';
+    case 'xml':
+      return 'xml';
+    case 'lua':
+      return 'lua';
+    case 'pl':
+    case 'pm':
+      return 'perl';
+    case 'r':
+      return 'r';
+    case 'ps1':
+    case 'psm1':
+      return 'powershell';
+    case 'bat':
+    case 'cmd':
+      return 'bat';
+    case 'ini':
+    case 'cfg':
+    case 'conf':
+    case 'toml':
+      return 'ini';
+    case 'graphql':
+    case 'gql':
+      return 'graphql';
+    case 'proto':
+      return 'protobuf';
+    case 'dart':
+      return 'dart';
+    case 'ex':
+    case 'exs':
+      return 'elixir';
+    case 'clj':
+    case 'cljs':
+      return 'clojure';
+    case 'fs':
+    case 'fsx':
+      return 'fsharp';
     default:
       return 'plaintext';
   }

@@ -261,6 +261,11 @@ export interface AgentInput {
   candidates?: import('./model-cascade.js').ModelCandidate[];
   /** 复杂度；candidates 缺省时用于推导候选链 */
   complexity?: import('./model-cascade.js').Complexity;
+  /**
+   * 采样参数覆盖，仅下发给智谱候选（qwen 与代码 Agent 链路不受影响）。
+   * 不传则用模型服务端默认值。
+   */
+  sampling?: { temperature?: number; top_p?: number };
   /** 客户端中断信号 */
   signal?: AbortSignal;
 }

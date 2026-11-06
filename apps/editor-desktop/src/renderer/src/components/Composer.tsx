@@ -208,6 +208,10 @@ export function Composer({
           value={input}
           placeholder="Chat with AI Editor"
           onChange={handleInputChange}
+          onBlur={() => {
+            // 失焦时关闭 @ 文件选择（延迟，避免点击选项时提前关闭）
+            setTimeout(() => setMention(null), 150);
+          }}
           onPaste={async (e) => {
             const files = e.clipboardData?.files;
             if (files && files.length) {

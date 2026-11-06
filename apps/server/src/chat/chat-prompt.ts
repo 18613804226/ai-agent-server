@@ -23,22 +23,69 @@ export interface SystemPromptParts {
   festivalContext?: string;
   /** 可注入当前时间，便于测试；默认取 now */
   now?: Date;
+  /**
+   * 客户端平台（登录时上报的 Device.platform，或请求体显式带上的 platform）。
+   * APP 端会叠加一份移动端专用的输出规范；不传 / web / desktop 保持原模板。
+   */
+  platform?: string | null;
+  /**
+   * 提示词档位：'chat' 为闲聊增强档（完整规则 + 前置口语直给要求），
+   * 默认 'full'。两档的工具 / 附件 / 引用规则完全一致，不裁剪能力。
+   */
+  promptProfile?: 'chat' | 'full';
+}
+
+/** Device.platform 上报值 + 常见客户端别名，用于判定是否移动端 APP */
+const APP_PLATFORM_ALIASES = new Set([
+  'ios',
+  'android',
+  'app',
+  'mobile',
+  'iphone',
+  'ipad',
+  'harmony',
+  'harmonyos',
+  'flutter',
+  'react-native',
+]);
+
+export function isAppPlatform(platform?: string | null): boolean {
+  if (!platform) return false;
+  const p = platform.trim().toLowerCase();
+  return APP_PLATFORM_ALIASES.has(p) || /^(ios|android|app|mobile)[-_/ .]/.test(p);
 }
 
 /**
- * 组装 system prompt。
- *
- * 注意：正文里的缩进/空行是刻意保留的（模型对排版敏感），改动时请连同
- * chat-prompt.spec.ts 一起更新。
+ * APP 端专用输出规范：手机屏幕窄 + 流式逐字显示，大片空行会直接吃掉半屏，
+ * 且 GLM 偏代码模型，闲聊容易写出文档式的分节、列表和多余推理。
+ * 这段放在提示词最前面并声明最高优先级，但不覆盖工具 / 附件 / 引用规则。
  */
-export function buildSystemPrompt(parts: SystemPromptParts): string {
-  const now = parts.now ?? new Date();
-  const currentTime = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai',
-    dateStyle: 'full',
-    timeStyle: 'short',
-  }).format(now);
+const APP_OUTPUT_RULES = `【APP 端输出规范｜优先级最高，覆盖下方所有规则】
+当前在手机 APP 上对话，屏幕窄、内容按流式逐字显示，请严格遵守：
+1. 直给答案，第一句就是结论；不复述用户问题，不写「好的」「我来帮你」这类开场白，不写结尾总结和客套话。
+2. 口语自然、短句，像人当面说话；一般 1～3 句说完，能一句说清就不展开，不要写成文档或说明书。
+3. 任意位置最多 1 个换行符，禁止连续空行和大片留白；不要用 Markdown 标题、加粗、编号列表、表格、代码块、分割线、表情和装饰符号。确实要分项时，用「一是…二是…」连在同一段里说完。
+4. 推理少写、能省就省：确有必要交代依据时最多一句话带过，不要分步推演、不要展开长篇分析；不知道就直接说不清楚，不编造、不脑补。
+5. 下方工具、附件、知识库来源与联网引用规则依然有效；联网事实的链接直接跟在对应句子后面，知识库来源只在末尾写一行【来源：xxx】，都不要额外空行。`;
 
+/**
+ * 闲聊增强档：只额外强调口语直给，工具 / 附件 / 引用规则由完整模板提供。
+ * 两档共用同一份规则文本，Demo 里不会出现「闲聊时不展示工具链」的落差。
+ */
+const CHAT_TONE_RULES = `【本轮对话风格】
+用自然口语直接回答，不复述用户的问题，不加开场白、结尾总结和客套话；不知道就说不清楚，不编造，不写长篇分析。
+下方的工具与引用规则在本轮同样生效：遇到实时信息、天气、农历、计算或需要查证的内容时按规则调用工具并标注来源；本轮没有检索到资料时不要声称引用了来源。`;
+
+/**
+ * 完整模板：工具、附件、知识库、历史来源与引用规则。
+ * 两档共用同一份文本，改动时请连同 chat-prompt.spec.ts 一起更新。
+ *
+ * 注意：正文里的缩进/空行是刻意保留的（模型对排版敏感）。
+ */
+function buildFullPrompt(
+  parts: SystemPromptParts,
+  currentTime: string,
+): string {
   return `你是一个专属的 AI 智能助手。
     - 你的名字叫toto。
     - 当前时间：${currentTime}。涉及"今天/明天/现在/星期几"的问题必须以这个时间为准，禁止自己推测日期。
@@ -77,4 +124,133 @@ ${parts.festivalContext ? `\n     ${parts.festivalContext}\n` : ''}
       - 只有实际使用了上面的知识库资料，才在回答末尾注明来源文件名，格式：【来源：xxx】。
       - 知识库资料不是实时搜索结果，不得用它回答热搜、新闻或其他实时信息问题。
       - 若没有获得可用的实时搜索结果，应明确说明未能获取实时信息，不要编造近期事实。`;
+}
+
+/**
+ * 组装 system prompt：按端叠加 APP 规范，闲聊档额外前置口语要求。
+ * 工具 / 附件 / 引用规则在任何档位都完整保留（Demo 要展示工具调用链）。
+ */
+export function buildSystemPrompt(parts: SystemPromptParts): string {
+  const now = parts.now ?? new Date();
+  const currentTime = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    dateStyle: 'full',
+    timeStyle: 'short',
+  }).format(now);
+
+  const isApp = isAppPlatform(parts.platform);
+  // APP 端把移动端规则前置：模型对提示词首尾位置更敏感
+  const appRules = isApp ? `${APP_OUTPUT_RULES}\n` : '';
+  const full = buildFullPrompt(parts, currentTime);
+
+  if (parts.promptProfile === 'chat') {
+    return `${appRules}${CHAT_TONE_RULES}\n${full}`;
+  }
+  return `${appRules}${full}`;
+}
+
+/** 连续换行（含只夹了空格/制表符的"空行"）一律收成单个换行 */
+function collapseBlankLines(text: string): string {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/\n(?:[ \t]*\n)+/g, '\n');
+}
+
+/**
+ * APP 端兜底清洗：提示词压不住时用代码收掉空行，保证历史回显也是紧凑排版。
+ */
+export function formatAppReply(text: string): string {
+  return collapseBlankLines(text).trim();
+}
+
+/**
+ * 流式版本：content 是逐 chunk 推给前端的，只清洗落库内容没用（用户已经看到空行了）。
+ * 因此额外记住上一个 chunk 是否以换行结尾，把跨 chunk 边界的连续换行也合并掉。
+ */
+export function createAppReplyFormatter(): (chunk: string) => string {
+  let started = false;
+  let lastWasNewline = false;
+  return (chunk: string): string => {
+    if (!chunk) return '';
+    let out = collapseBlankLines(chunk);
+    if (!started) {
+      // 开头不留白：流式第一帧就出现换行/空格，手机上会顶出一截空白
+      out = out.replace(/^\s+/, '');
+      if (!out) return '';
+      started = true;
+    } else if (lastWasNewline) {
+      out = out.replace(/^\n+/, '');
+    }
+    if (!out) return '';
+    lastWasNewline = out.endsWith('\n');
+    return out;
+  };
+}
+
+/**
+ * 把主链路的内部错误收敛成可展示文案：面试 Demo 里不该把 401/402、
+ * Prisma、Tavily 的原始报错直接糊到聊天区；内部详情仍由调用方写日志。
+ */
+export function friendlyChatError(message: string): string {
+  const m = (message || '').toLowerCase();
+  if (/abort|timeout|timed ?out|etimedout|超时/.test(m)) {
+    return '上游模型响应超时，请稍后重试。';
+  }
+  if (/rate.?limit|429|too many requests|限流|并发|排队/.test(m)) {
+    return '当前体验人数较多，模型正在排队，请稍后重试。';
+  }
+  if (/401|unauthorized|api.?key|鉴权|密钥|认证/.test(m)) {
+    return '模型服务鉴权异常，请检查后端配置。';
+  }
+  if (/402|insufficient|balance|quota|余额|欠费|额度/.test(m)) {
+    return '模型账户额度不足，请检查服务配置。';
+  }
+  if (/network|econn|fetch failed|socket|dns|网络|连接失败/.test(m)) {
+    return '网络连接异常，请稍后重试。';
+  }
+  if (/所有模型候选均请求失败|没有可用的模型候选/.test(message)) {
+    return '模型服务暂时不可用，请稍后重试。';
+  }
+  // 兜底不回显原文，避免内部细节外泄
+  return '本轮回答遇到问题，请稍后重试。';
+}
+
+/**
+ * TTS 朗读前的口语化清洗：Markdown / 链接 / emoji 这些视觉符号如果直接送进
+ * 合成接口，会被逐字念成「井号」「星号」「h t t p s…」。
+ * 最后按句边界截断到 limit 字，避免 300 字硬截断在半句话中间。
+ */
+export function toSpeakableText(text: string, limit = 300): string {
+  let s = text || '';
+  s = s.replace(/```[\s\S]*?```/g, ' '); // 代码块整段丢弃
+  s = s.replace(/`([^`]*)`/g, '$1'); // 行内代码留内容
+  s = s.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1'); // 图片留 alt
+  s = s.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1'); // 链接只留锚文本
+  s = s.replace(/https?:\/\/\S+/g, '链接'); // 裸 URL
+  s = s.replace(/<[^>]+>/g, ''); // HTML 标签
+  s = s.replace(/【来源[:：][^】]*】/g, ''); // 来源标注
+  s = s.replace(/^\s{0,3}#{1,6}\s*/gm, ''); // 标题符号
+  s = s.replace(/^\s{0,3}[-*+>]\s+/gm, ''); // 列表 / 引用符号
+  s = s.replace(/^\s*\|[-: |\t]+\|\s*$/gm, ' '); // 表格分隔行
+  s = s.replace(/^\s*[-=*]{3,}\s*$/gm, ' '); // 分割线
+  s = s.replace(/\|/g, '，'); // 表格竖线转停顿
+  s = s.replace(/[*_~]/g, ''); // 粗体 / 斜体 / 删除线
+  s = s.replace(
+    /[\u{1F000}-\u{1FAFF}\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF]/gu,
+    '',
+  ); // emoji / 装饰符号
+  s = s.replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  if (s.length <= limit) return s;
+  const head = s.slice(0, limit);
+  const boundary = Math.max(
+    head.lastIndexOf('。'),
+    head.lastIndexOf('！'),
+    head.lastIndexOf('？'),
+    head.lastIndexOf('；'),
+    head.lastIndexOf('，'),
+    head.lastIndexOf('. '),
+  );
+  return (boundary >= limit * 0.6 ? head.slice(0, boundary + 1) : head)
+    .trimEnd();
 }

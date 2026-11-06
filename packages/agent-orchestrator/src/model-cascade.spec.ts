@@ -11,6 +11,7 @@ import {
   providerForModel,
   resolveModelCandidates,
   resolveZhipuCredentials,
+  zhipuChatSamplingParam,
   zhipuThinkingParam,
   type ModelCascadeConfig,
 } from './model-cascade';
@@ -464,6 +465,44 @@ describe('模型分层：配置与凭据', () => {
     expect(zhipuThinkingParam()).toEqual({ thinking: { type: 'disabled' } });
     process.env.CHAT_GLM_THINKING = 'true';
     expect(zhipuThinkingParam()).toEqual({ thinking: { type: 'enabled' } });
+  });
+
+  it('问答档采样：按任务分档，可用环境变量覆盖，非法值回落档位预设', () => {
+    const prevT = process.env.CHAT_GLM_TEMPERATURE;
+    const prevP = process.env.CHAT_GLM_TOP_P;
+    try {
+      delete process.env.CHAT_GLM_TEMPERATURE;
+      delete process.env.CHAT_GLM_TOP_P;
+      expect(zhipuChatSamplingParam()).toEqual({
+        temperature: 0.7,
+        top_p: 0.8,
+      });
+      expect(zhipuChatSamplingParam('knowledge')).toEqual({
+        temperature: 0.4,
+        top_p: 0.8,
+      });
+      expect(zhipuChatSamplingParam('live')).toEqual({
+        temperature: 0.5,
+        top_p: 0.8,
+      });
+      process.env.CHAT_GLM_TEMPERATURE = '0.9';
+      process.env.CHAT_GLM_TOP_P = '0.6';
+      expect(zhipuChatSamplingParam('knowledge')).toEqual({
+        temperature: 0.9,
+        top_p: 0.6,
+      });
+      process.env.CHAT_GLM_TEMPERATURE = '9';
+      process.env.CHAT_GLM_TOP_P = 'abc';
+      expect(zhipuChatSamplingParam('knowledge')).toEqual({
+        temperature: 0.4,
+        top_p: 0.8,
+      });
+    } finally {
+      if (prevT === undefined) delete process.env.CHAT_GLM_TEMPERATURE;
+      else process.env.CHAT_GLM_TEMPERATURE = prevT;
+      if (prevP === undefined) delete process.env.CHAT_GLM_TOP_P;
+      else process.env.CHAT_GLM_TOP_P = prevP;
+    }
   });
 });
 
