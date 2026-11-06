@@ -46,7 +46,10 @@ function streamOf(text: string) {
   })();
 }
 
-function mkService(create: () => Promise<any>) {
+function mkService(
+  create: () => Promise<any>,
+  showRoutingThought = false,
+) {
   const prisma = {
     message: {
       create: vi.fn().mockResolvedValue({}),
@@ -67,7 +70,7 @@ function mkService(create: () => Promise<any>) {
   const orchestrator = new AgentOrchestrator({
     getClient: (provider) => clients.getClient(provider),
     modelConfig: loadModelCascadeConfig(),
-    showRoutingThought: false,
+    showRoutingThought,
     rateLimitRetries: 0,
     zhipuLock: new SimpleLock(),
   });
@@ -108,6 +111,21 @@ describe('离线回放：预录数据', () => {
     const events = demoReplayEvents(entry);
     expect(events.some(([type]) => type === 'tool_call')).toBe(true);
     expect(events.some(([type]) => type === 'tool_result')).toBe(true);
+    const thoughts = events
+      .filter((event): event is ['thought', string] => event[0] === 'thought')
+      .map(([, payload]) => payload);
+    expect(thoughts).toContain('🔧 调用 fetchWeatherInfo');
+    expect(thoughts.some((t) => t.startsWith('↩️ fetchWeatherInfo：'))).toBe(
+      true,
+    );
+    const callTextAt = events.findIndex(
+      ([type, payload]) =>
+        type === 'thought' && payload === '🔧 调用 fetchWeatherInfo',
+    );
+    expect(callTextAt).toBeGreaterThanOrEqual(0);
+    expect(callTextAt).toBeLessThan(
+      events.findIndex(([type]) => type === 'tool_call'),
+    );
     expect(
       events
         .filter((event): event is ['content', string] => event[0] === 'content')
@@ -139,6 +157,13 @@ describe('离线回放：ChatService 集成', () => {
     expect(create).not.toHaveBeenCalled();
     expect(events.some((e) => e.type === 'tool_call')).toBe(true);
     expect(events.some((e) => e.type === 'tool_result')).toBe(true);
+    expect(
+      events.some(
+        (e) =>
+          e.type === 'thought' &&
+          String(e.payload).includes('🔧 调用 fetchWeatherInfo'),
+      ),
+    ).toBe(true);
     expect(
       events
         .filter((e) => e.type === 'content')
@@ -197,5 +222,33 @@ describe('离线回放：ChatService 集成', () => {
 
     expect(events.some((e) => e.type === 'error')).toBe(true);
     expect(events.some((e) => e.type === 'content')).toBe(false);
+  });
+});
+
+describe('APP 端模型路由决策展示', () => {
+  it('platform=ios 时同样推「模型选择：…」给前端思考流', async () => {
+    const create = vi.fn(async () => streamOf('你好'));
+    const { service } = mkService(create, true);
+    const events: Array<{ type: string; payload: any }> = [];
+
+    await service.sendMessageStream(
+      'sess-1',
+      '你好',
+      (type, payload) => events.push({ type, payload }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'ios',
+    );
+
+    expect(
+      events.some(
+        (e) =>
+          e.type === 'thought' && String(e.payload).includes('模型选择：'),
+      ),
+    ).toBe(true);
   });
 });

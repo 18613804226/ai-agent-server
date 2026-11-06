@@ -107,7 +107,7 @@ pnpm --filter @repo/server exec prisma generate
 - 回复额外做排版兜底清洗：流式逐 chunk 与落库全文都会把连续空行（含跨 chunk 边界、CRLF、只夹空格的伪空行）压成单个换行并去掉首尾空白，避免手机上一屏只显示几行字。
 
 Web / 桌面端或不传 `platform` 时不叠加 APP 排版规范与排版清洗。提示词与清洗逻辑在 `apps/server/src/chat/chat-prompt.ts`，单测见 `apps/server/src/chat/chat-prompt.spec.ts`。
-APP 端只收掉模型路由决策、长度上限这类调试提示；`🔧 调用工具`、`↩️ 工具结果`、`🔎 已联网检索`、附件解析与降级提示全部保留展示，方便演示 Agent 的工具调用链。
+APP 端同样展示模型路由决策（`模型选择：…`），`🔧 调用工具`、`↩️ 工具结果`、`🔎 已联网检索`、附件解析与降级提示也全部保留，面试 Demo 能完整呈现模型分层和 Agent 工具链；只收掉「回答达到长度上限」这类异常警告。
 
 #### 流式事件（SSE）
 
@@ -281,7 +281,7 @@ pnpm --filter @repo/server start:dev
 
 #### 面试 Demo 稳定性：离线回放 / 会话保护 / 语音朗读
 
-- **离线回放**：`CHAT_DEMO_REPLAY` 三态。留空（默认）只在主链路（模型、联网检索、数据库）失败时兜底回放；`true` 完全不请求模型，纯离线演示；`off` 关闭。回放按预录顺序重放 `thought` → `tool_call` → `tool_result` → `content` → `sources`，`done.model` 标为 `demo-replay`，现场断网、限流、余额不足都能把流程走完。回放只演示流程，不编造事实、URL 或来源；原始错误仍写后端日志。参数校验这类 400 错误不回放。
+- **离线回放**：`CHAT_DEMO_REPLAY` 三态。留空（默认）只在主链路（模型、联网检索、数据库）失败时兜底回放；`true` 完全不请求模型，纯离线演示；`off` 关闭。回放按预录顺序重放 `thought` → `tool_call` → `tool_result` → `content` → `sources`，`done.model` 标为 `demo-replay`，现场断网、限流、余额不足都能把流程走完。回放只演示流程，不编造事实、URL 或来源；原始错误仍写后端日志。参数校验这类 400 错误不回放。回放里的结构化工具事件与真实链路一样，会同时双推 `🔧 调用 …` / `↩️ …` 文本 `thought`，老版 APP 纯离线演示时也能看到工具链。
 - **固定问题**：`GET /chat/demo/questions` 返回 5 条预置问题（工具调用 / 联网检索 / 知识库 RAG / 多轮追问 / 闲聊身份），演示面板可一键填入。
 - **会话保护**：每设备 20 条上限触发自动清理时跳过 24 小时内更新过的会话，避免提前准备的演示历史被静默删掉；跳过时打日志。重置现场用 `DELETE /chat/sessions/:id/messages`，只清空消息、保留会话 ID 与知识库绑定。
 - **语音朗读**：`POST /chat/tts` 先把回答里的 Markdown 标题、粗斜体、代码块、链接（只留锚文本）、裸 URL、emoji 与来源标注清洗成口语文本，再按句边界截断到 300 字，避免符号被逐字念出或断在半句。
@@ -309,7 +309,7 @@ CHAT_GLM_TOP_P=""                            # 留空用 0.8；填值则覆盖�
 CHAT_DEMO_REPLAY=""                          # 留空=失败时兜底回放；true=纯离线演示；off=关闭
 CHAT_RATE_LIMIT_RETRIES="2"                  # 免费层 429 限流时的原地重试次数
 CHAT_ZHIPU_LOCK_TIMEOUT_MS="30000"           # 智谱串行锁最长等待（ms）；超时自动降级到下一个候选
-CHAT_SHOW_ROUTING_THOUGHT="true"             # 是否把模型选择推给前端思考流
+CHAT_SHOW_ROUTING_THOUGHT="true"             # 是否把模型选择推给前端思考流（含 APP 端）
 ```
 
 调试时可看日志判断实际走了哪条链路：

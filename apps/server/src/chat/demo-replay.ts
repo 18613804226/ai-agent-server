@@ -164,12 +164,32 @@ export function demoQuestions(): Array<{ question: string; label: string }> {
 /**
  * 展开成可回放的事件序列：先工具链，再把回答切成小段模拟流式打字。
  * 不塞真实 sleep，回放保持确定性、可单测；打字观感由 SSE 逐帧送达产生。
+ *
+ * 结构化 tool_call / tool_result 前补一条与真实链路同格式的文本 thought：
+ * 老版 APP 只渲染 thought 时，纯离线演示也能看到「调用了什么工具、结果是什么」。
  */
 export function demoReplayEvents(entry: DemoReplayEntry): DemoEvent[] {
+  const lead: DemoEvent[] = [];
+  for (const event of entry.lead) {
+    const [type, payload] = event;
+    if (payload !== null && typeof payload === 'object') {
+      const name = typeof payload.name === 'string' ? payload.name : '';
+      if (type === 'tool_call') {
+        lead.push(['thought', `🔧 调用 ${name}`]);
+      } else if (type === 'tool_result') {
+        const result = typeof payload.result === 'string' ? payload.result : '';
+        const raw = result.replace(/\s+/g, ' ').trim();
+        const preview = raw.length > 60 ? `${raw.slice(0, 60).trimEnd()}…` : raw;
+        lead.push(['thought', `↩️ ${name}：${preview}`]);
+      }
+    }
+    lead.push(event);
+  }
+
   const content: DemoEvent[] = [];
   const chunkSize = 12;
   for (let i = 0; i < entry.reply.length; i += chunkSize) {
     content.push(['content', entry.reply.slice(i, i + chunkSize)]);
   }
-  return [...entry.lead, ...content];
+  return [...lead, ...content];
 }

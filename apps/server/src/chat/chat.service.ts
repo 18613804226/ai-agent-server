@@ -685,13 +685,9 @@ export class ChatService {
       );
 
       // ✅ 把路由决策推给前端思考流：用户能直接看到"为什么选了这个模型"。
-      //    APP 端收掉这条纯调试信息；工具调用 / 联网检索 / 附件解析 / 降级提示
-      //    一律原样保留，Demo 要向面试官展示 Agent 的工具链能力。
-      if (
-        !isApp &&
-        this.orchestrator.showRoutingThought &&
-        candidates.length
-      ) {
+      //    APP 端同样展示，面试 Demo 要完整呈现模型分层；工具调用 / 联网检索 /
+      //    附件解析 / 降级提示也一律原样保留。
+      if (this.orchestrator.showRoutingThought && candidates.length) {
         onChunk(
           'thought',
           formatRoutingThought(
