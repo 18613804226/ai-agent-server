@@ -1,5 +1,8 @@
 # 基于镜像：用官方名，加速交互（ECS 的 Docker 构建进程 registry-mirrors 代理）
-FROM node:20-slim
+# Node 20 已于 2026-04 结束维护（不再有安全更新）→ 用当前 LTS 24。
+# 依赖都已声明支持 24：@prisma/client 7.10（^20.19 || ^22.12 || >=24.0）、
+# @nestjs/core 12（>=20）、vitest 4（^20 || ^22 || >=24）。
+FROM node:24-slim
 WORKDIR /app
 
 # 仅用于构建期 `prisma generate` 的占位连接串（prisma.config.ts 会读取 DATABASE_URL）。
@@ -9,6 +12,10 @@ ARG BUILD_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ai-agent"
 # 1. 设置国内镜像源与网络超时参数
 #    pnpm 固定到 9：锁文件是 lockfileVersion 9.0（pnpm 9 生成），
 #    --frozen-lockfile 与 --allow-build 都是 pnpm 9 语法。
+#    ⚠️ 别顺手升 pnpm 10：pnpm 10 默认屏蔽所有 postinstall，要靠仓库根 .npmrc 的
+#       only-built-dependencies 白名单放行，而 .npmrc 没有 COPY 进镜像 →
+#       @prisma/engines / ffmpeg-static 的二进制就不会下载（6.5 步会存到空目录）。
+#       要升 pnpm 10，必须同时把 .npmrc 复制进镜像。
 RUN npm config set registry https://registry.npmmirror.com \
     && npm config set fetch-retry-mintimeout 20000 \
     && npm config set fetch-retry-maxtimeout 120000 \

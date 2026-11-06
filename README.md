@@ -809,7 +809,9 @@ docker compose -f docker-compose.4001.yml --env-file apps/server/.env up -d --no
 ### 2 核 2G 小机器建议
 
 - **构建是 CPU 密集型**：`pnpm install` + `tsc` + `prisma generate` 会跑满 2 核。如果部署时机器卡死，建议在 CI（ubuntu-latest）里构建并推送到镜像仓库，ECS 只 `docker pull`。
-- **Prisma 的 OpenSSL 告警**：构建时会出现 `Prisma failed to detect the libssl/openssl version ... Defaulting to "openssl-1.1.x"`。`node:20-slim` 里 node 自带 libssl3，Prisma 引擎实际可用，这个告警无害；真报引擎错误时再在 Dockerfile 里加 `apt-get install -y --no-install-recommends openssl`。
+- **Prisma 的 OpenSSL 告警**：构建时会出现 `Prisma failed to detect the libssl/openssl version ... Defaulting to "openssl-1.1.x"`。`node:24-slim` 里 node 自带 libssl3，Prisma 7 的 schema diff 走 WASM（`@prisma/prisma-schema-wasm`），引擎实际可用（`prisma db push` 已在生产验证跑通），这个告警无害；真报引擎错误时再在 Dockerfile 里加 `apt-get install -y --no-install-recommends openssl`（国内 apt 源慢，会拖构建，所以默认不加）。
+- **Node 版本**：基础镜像用 `node:24-slim`（Node 20 已于 2026-04 结束维护，不再有安全更新）。依赖都已声明支持 24：`@prisma/client` 7.10（`^20.19 || ^22.12 || >=24.0`）、`@nestjs/core` 12（`>=20`）、`vitest` 4（`^20 || ^22 || >=24`）。CI 里**没有 `setup-node`**（workflow 只做 checkout + SSH，Node 全在服务器/镜像里），所以不存在「CI 与镜像版本要一致」的问题。
+- **镜像里的 pnpm 固定在 9**：pnpm 10 默认屏蔽所有 postinstall，要靠仓库根 `.npmrc` 的 `only-built-dependencies` 白名单放行，而 `.npmrc` 没有 COPY 进镜像 → `@prisma/engines` / `ffmpeg-static` 的二进制不会下载（`/opt/bin-assets` 会是空的，prod 树里也就没有 ffmpeg）。要升 pnpm 10，必须同时把 `.npmrc` 复制进镜像。
 - **运行时资源已在 compose 里限制**：postgres `0.8 核 / 512M`，backend `1.2 核 / 768M`，Node 堆 `--max-old-space-size=512`，postgres 参数已调小。
 - **加 swap**：`fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile`，避免内存尖峰直接触发 OOM。
 - **监控**：`docker stats` / `htop` 看是构建还是运行时吃 CPU；`docker logs -f ai-agent-backend` 看是否崩溃重启。
