@@ -37,6 +37,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.CHAT_DEMO_REPLAY;
+  delete process.env.CHAT_MAX_INPUT_TOKENS;
   vi.restoreAllMocks();
 });
 
@@ -60,6 +61,10 @@ function mkService(
       update: vi.fn().mockResolvedValue({}),
     },
     knowledgeFile: { findMany: vi.fn().mockResolvedValue([]) },
+    device: {
+      findUnique: vi.fn().mockResolvedValue({ preferences: null }),
+      update: vi.fn().mockResolvedValue({}),
+    },
     $queryRaw: vi.fn().mockResolvedValue([]),
   };
   const vectorService = { searchSimilar: vi.fn().mockResolvedValue([]) };
@@ -79,7 +84,7 @@ function mkService(
     vectorService as never,
     orchestrator,
   );
-  return { service, prisma };
+  return { service, prisma, vectorService };
 }
 
 describe('离线回放：预录数据', () => {
@@ -250,5 +255,142 @@ describe('APP 端模型路由决策展示', () => {
           e.type === 'thought' && String(e.payload).includes('模型选择：'),
       ),
     ).toBe(true);
+  });
+});
+
+describe('上下文记忆：滚动摘要与可观测指标', () => {
+  it('长历史被预算裁掉时启用摘要，并回报记忆指标', async () => {
+    const create = vi.fn(async () => streamOf('好的'));
+    const { service, prisma } = mkService(create);
+    const longHistory = Array.from({ length: 40 }, (_, i) => ({
+      id: `m-${i}`,
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content:
+        i === 0
+          ? '以后温度都用摄氏度，别用华氏度'
+          : `第 ${i} 轮聊过的内容`.repeat(30),
+      images: null,
+      sources: null,
+    }));
+    prisma.message.findMany.mockResolvedValue(longHistory);
+
+    const result = await service.sendMessageStream(
+      'sess-1',
+      '你好',
+      () => {},
+    );
+
+    expect(result?.historyKept).toBeGreaterThan(0);
+    expect(result?.historyDropped).toBeGreaterThan(0);
+    expect(result?.digestUsed).toBe(true);
+  });
+});
+
+describe('上下文记忆：RAG 追问缓存与预算同源', () => {
+  const longHistory = Array.from({ length: 40 }, (_, i) => ({
+    id: `m-${i}`,
+    role: i % 2 === 0 ? 'user' : 'assistant',
+    content: `第 ${i} 轮聊过的内容`.repeat(30),
+    images: null,
+    sources: null,
+  }));
+
+  it('指代类追问复用上一轮 RAG 结果，不重复检索', async () => {
+    const create = vi.fn(async () => streamOf('好的'));
+    const { service, vectorService } = mkService(create);
+    vectorService.searchSimilar.mockResolvedValue([
+      {
+        similarity: 0.9,
+        content: '资料内容',
+        metadata: { fileId: 'f1', fileName: 'a.pdf' },
+      },
+    ]);
+
+    await service.sendMessageStream(
+      'sess-1',
+      '帮我总结一下知识库文档',
+      () => {},
+    );
+    expect(vectorService.searchSimilar).toHaveBeenCalledTimes(1);
+
+    const thoughts: string[] = [];
+    await service.sendMessageStream(
+      'sess-1',
+      '刚才那点再说清楚一点',
+      (type, payload) => {
+        if (type === 'thought' && typeof payload === 'string') {
+          thoughts.push(payload);
+        }
+      },
+    );
+    expect(vectorService.searchSimilar).toHaveBeenCalledTimes(1);
+    expect(thoughts).toContain('📚 沿用上一轮检索到的知识库资料。');
+  });
+
+  it('CHAT_MAX_INPUT_TOKENS 调小后保留的历史条数随之下降', async () => {
+    const create = vi.fn(async () => streamOf('好的'));
+    const { service, prisma } = mkService(create);
+    prisma.message.findMany.mockResolvedValue(longHistory);
+
+    const normal = await service.sendMessageStream('sess-1', '你好', () => {});
+    process.env.CHAT_MAX_INPUT_TOKENS = '1200';
+    const smaller = await service.sendMessageStream(
+      'sess-1',
+      '你好',
+      () => {},
+    );
+
+    expect(normal?.historyKept).toBeGreaterThan(0);
+    expect(smaller?.historyKept).toBeLessThan(normal!.historyKept);
+  });
+});
+
+describe('用户画像：显式声明即记录', () => {
+  it('用户显式说「记住…」时记录偏好并推提示帧', async () => {
+    const create = vi.fn(async () => streamOf('好的'));
+    const { service, prisma } = mkService(create);
+    const thoughts: string[] = [];
+
+    await service.sendMessageStream(
+      'sess-1',
+      '记住：以后回答用要点式',
+      (type, payload) => {
+        if (type === 'thought' && typeof payload === 'string') {
+          thoughts.push(payload);
+        }
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'dev-1',
+    );
+
+    expect(thoughts).toContain('🧠 已记住偏好：输出格式=要点式');
+    expect(prisma.device.update).toHaveBeenCalled();
+  });
+
+  it('普通闲聊不会写画像', async () => {
+    const create = vi.fn(async () => streamOf('好的'));
+    const { service, prisma } = mkService(create);
+
+    await service.sendMessageStream(
+      'sess-1',
+      '帮我看看这个方案',
+      () => {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'dev-1',
+    );
+
+    expect(prisma.device.update).not.toHaveBeenCalled();
   });
 });

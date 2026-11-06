@@ -84,6 +84,18 @@ export class ChatController {
     return this.sessionService.clearMessages(id, device?.id);
   }
 
+  // ---------------- 用户画像（只存用户明确要求记住的白名单偏好） ----------------
+  @Get('profile/preferences')
+  async getUserPreferences(@CurrentDevice() device: any) {
+    return this.chatService.getUserPreferences(device?.id);
+  }
+
+  @Delete('profile/preferences')
+  @HttpCode(204)
+  async clearUserPreferences(@CurrentDevice() device: any) {
+    await this.chatService.clearUserPreferences(device?.id);
+  }
+
   // ✅ 演示面板用：离线回放的固定问题清单
   @Get('demo/questions')
   async getDemoQuestions() {
@@ -419,6 +431,7 @@ export class ChatController {
             inlineAttachments, // 随本条消息直传的附件（已当场解析）
             rawQuery, // ✅ 落库用用户原文：只传文件时补的默认指令不进聊天记录
             platform, // ✅ APP 端专用提示词 / 排版清洗的开关
+            device?.id, // ✅ 设备 ID：读写该设备的用户画像（只存白名单偏好）
           );
 
           if (!isClientDisconnected) {
@@ -437,6 +450,10 @@ export class ChatController {
                 ttftMs: result?.ttftMs ?? null,
                 durationMs: result?.durationMs ?? 0,
                 sourcesCount: result?.sourcesCount ?? 0,
+                // ✅ 记忆可观测：面试官能直接看到本轮用了多少历史、是否启用摘要
+                historyKept: result?.historyKept ?? 0,
+                historyDropped: result?.historyDropped ?? 0,
+                digestUsed: result?.digestUsed === true,
               },
             } as MessageEvent);
             subscriber.complete();

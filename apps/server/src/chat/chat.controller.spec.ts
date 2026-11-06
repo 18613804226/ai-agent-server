@@ -229,6 +229,9 @@ describe('ChatController.streamMessage：只有文件没有 query', () => {
           ttftMs: 300,
           durationMs: 900,
           sourcesCount: 2,
+          historyKept: 3,
+          historyDropped: 2,
+          digestUsed: true,
         };
       },
     );
@@ -268,6 +271,9 @@ describe('ChatController.streamMessage：只有文件没有 query', () => {
       ttftMs: 300,
       durationMs: 900,
       sourcesCount: 2,
+      historyKept: 3,
+      historyDropped: 2,
+      digestUsed: true,
     });
   });
 

@@ -47,6 +47,15 @@ RUN pnpm --filter @repo/agent-orchestrator build \
     && pnpm --filter @repo/general-agent build \
     && pnpm --filter @repo/server build
 
+# 6.5 单独留一份 prisma CLI 到 /opt/prisma-cli：
+#     运行时 compose 的「一次性 db-push 服务」要用它同步表结构（项目无 migrations，只有 db push）。
+#     prisma CLI 属于 devDependencies，第 7 步裁剪 dev 依赖后就没了，
+#     所以提前装到独立目录：不污染 package.json，也不影响 lockfile。
+#     cp -rL 解引用 symlink：pnpm 虚拟 store 里全是相对链接，直接 cp -r 会拷成断链。
+RUN mkdir -p /tmp/prisma-cli \
+    && DATABASE_URL="$BUILD_DATABASE_URL" pnpm --dir /tmp/prisma-cli add prisma@7.10.0 --ignore-scripts \
+    && cp -rL /tmp/prisma-cli/node_modules /opt/prisma-cli/node_modules
+
 # 7. 裁剪开发依赖：从 dev 安装切到 prod 安装。
 #    ⚠️ 不能用 `pnpm prune --prod`：在 `--filter` 安装后它会把生产依赖也误删（已实测）。
 #    CI=true 让 pnpm 非交互地重建 modules，否则会卡在「是否清空 node_modules」的确认提示。
@@ -54,7 +63,7 @@ ENV CI=true
 RUN DATABASE_URL="$BUILD_DATABASE_URL" pnpm install --prod --frozen-lockfile --filter @repo/server... --ignore-scripts
 
 # 7.1 prod 安装会重建 @prisma/client，之前生成的 client 会丢，必须再生成一次。
-#     （@prisma/engines 的 engine 二进制不受影响，实测保留，`prisma db push` 可用）
+#     （@prisma/engines 的 engine 二进制不受影响，实测保留；运行时同步表结构用 6.5 步留的 CLI）
 RUN DATABASE_URL="$BUILD_DATABASE_URL" pnpm --filter @repo/server exec prisma generate
 
 # 8. 构建期自检：运行时依赖与 Prisma client 必须真的可用

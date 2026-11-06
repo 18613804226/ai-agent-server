@@ -30,6 +30,8 @@ import {
   type AttachmentKind,
 } from './attachment-store.js';
 import {
+  buildAttachmentDigest,
+  buildConversationDigest,
   buildSystemPrompt,
   createAppReplyFormatter,
   estimateTokens,
@@ -47,11 +49,47 @@ import {
   findDemoReplay,
   type DemoReplayEntry,
 } from './demo-replay.js';
+import {
+  extractUserPreferences,
+  formatUserPreferences,
+  mergeUserPreferences,
+  parseUserPreferences,
+  type UserPreference,
+} from './user-profile.js';
 
 // ✅ 一次最多 2 张图进模型上下文（当前轮优先，剩余名额从最新历史消息补）
 const MAX_MODEL_IMAGES = 2;
 // ✅ 单图预算（压缩后长边上限 1280 时实测 1095 token），取整留余量做保守估算
 const MODEL_IMAGE_TOKEN_COST = 1200;
+// ✅ 滚动摘要上限与预算预留：两段摘要都是本地提取、不调模型，但要给 system prompt 留 token
+const DIGEST_MAX_CHARS = 300;
+const ATTACHMENT_DIGEST_MAX_CHARS = 400;
+const DIGEST_TOKEN_RESERVE = 760;
+// ✅ 初始上下文窗口：与编排器工具循环预算同源（见 orchestrator.factory.ts）
+const DEFAULT_MAX_INPUT_TOKENS = 6000;
+function readMaxInputTokens(): number {
+  const value = Number(process.env.CHAT_MAX_INPUT_TOKENS);
+  return Number.isFinite(value) && value >= 1000
+    ? Math.min(100_000, Math.floor(value))
+    : DEFAULT_MAX_INPUT_TOKENS;
+}
+// ✅ 实时查询保留的历史消息条数（默认 6 轮），长会话由 token 预算兜底
+const DEFAULT_LIVE_HISTORY_MESSAGES = 12;
+// ✅ 指代类追问复用上一轮 RAG 结果，省掉重复 embedding + 向量检索
+const RAG_CACHE_TTL_MS = 5 * 60 * 1000;
+const RAG_FOLLOWUP_HINT =
+  /刚才|前面|上面|再说|展开|详细|继续|这点|那段|上述|第一点|第二点/;
+
+/**
+ * 用户画像开关：默认开启，但只记「用户明确要求记住」的白名单四类偏好。
+ * 设 CHAT_USER_PROFILE=off 即完全不记、不注入。
+ */
+function userProfileEnabled(): boolean {
+  return (process.env.CHAT_USER_PROFILE ?? 'on').toLowerCase() !== 'off';
+}
+// ✅ 纯文本追问历史图的指代词：命中后强制走视觉档并还原历史图
+const HISTORY_IMAGE_HINT =
+  /刚才(那|这)?张图|之前(那|的)?图|上(一)?张图|上面(那|的)?图|这张图|那张图|图(片)?里|图(片)?上/;
 
 /** 流式回调：文本类传 content，结构化事件传对象，sources 传数组 */
 export type StreamEmit = (
@@ -77,6 +115,8 @@ export class ChatService {
   private readonly imageService: ImageService;
   /** 本 agent 注册的工具集（与 general agent 共用同一份实现） */
   private readonly tools: RegisteredTool[] = createChatTools();
+  /** 会话内 RAG 结果缓存：指代类追问直接复用，TTL 到期自动失效 */
+  private readonly ragCache = new Map<string, { docs: any[]; at: number }>();
 
   constructor(
     private prisma: PrismaService,
@@ -189,7 +229,55 @@ export class ChatService {
       ttftMs: 0,
       durationMs: Date.now() - startTime,
       sourcesCount: entry.sources.length,
+      historyKept: 0,
+      historyDropped: 0,
+      digestUsed: false,
     };
+  }
+
+  /** 读取该设备已保存的用户画像；失败一律当「没有偏好」，绝不阻断主链路 */
+  async getUserPreferences(deviceId?: string): Promise<UserPreference[]> {
+    if (!deviceId) return [];
+    if (!userProfileEnabled()) return [];
+    try {
+      const device = await this.prisma.device.findUnique({
+        where: { id: deviceId },
+        select: { preferences: true },
+      });
+      return parseUserPreferences(device?.preferences);
+    } catch {
+      return [];
+    }
+  }
+
+  /** 清空该设备的用户画像（用户随时可以「忘掉我」） */
+  async clearUserPreferences(deviceId?: string): Promise<void> {
+    if (!deviceId) return;
+    try {
+      await this.prisma.device.update({
+        where: { id: deviceId },
+        data: { preferences: [] },
+      });
+    } catch (err) {
+      console.warn('[画像] 清空失败：', err);
+    }
+  }
+
+  /** 写回用户画像；失败只记日志，不影响本轮回答 */
+  private async saveUserPreferences(
+    deviceId: string | undefined,
+    prefs: UserPreference[],
+  ): Promise<void> {
+    if (!deviceId || !prefs.length) return;
+    try {
+      await this.prisma.device.update({
+        where: { id: deviceId },
+        // ✅ Prisma 的 Json 字段要求 InputJsonValue，这里存的是我们自己的窄结构
+        data: { preferences: prefs as any },
+      });
+    } catch (err) {
+      console.warn('[画像] 写入失败：', err);
+    }
   }
 
   //  核心：支持 Function Calling 与流式（Streaming）输出的对话方法
@@ -220,6 +308,10 @@ export class ChatService {
      * 放末尾可选位，不影响现有调用方。
      */
     platform?: string,
+    /**
+     * 设备 ID：用于读写该设备的用户画像（只存用户明确要求记住的白名单偏好）。
+     */
+    deviceId?: string,
   ) {
     const overallStartTime = Date.now();
     const aborted = () => signal?.aborted === true;
@@ -275,6 +367,8 @@ export class ChatService {
         kind: a.kind,
         charCount: a.charCount,
         durationSec: a.durationSec,
+        // ✅ 只落 300 字要点：原文仍在临时存储里、到期即弃，但下一轮追问能接上
+        summary: a.text.replace(/\s+/g, ' ').trim().slice(0, 300),
         // 原始文件已落盘，历史消息靠这两个字段回看/重新提问
         fileRef: a.fileRef,
         url: a.fileRef ? `/chat/attachments/${a.fileRef}` : undefined,
@@ -288,12 +382,25 @@ export class ChatService {
 //         console.log(`📎 附件已注入本轮上下文: ${attachmentContext.length} 字`);
       }
 
+      // ✅ 指代类追问（「刚才那点再说清楚一点」）直接复用上一轮命中，
+      //    结果高度重合却要重跑一次 embedding + 向量检索，白花延迟和 token。
+      const ragKey = `${sessionId}:${(fileIds ?? []).slice().sort().join(',')}`;
+      const cachedRag = this.ragCache.get(ragKey);
+      const reuseRag =
+        !isCasualChat &&
+        !liveInfoQuery &&
+        RAG_FOLLOWUP_HINT.test(userQuery) &&
+        userQuery.length <= 30 &&
+        !!cachedRag &&
+        Date.now() - cachedRag.at < RAG_CACHE_TTL_MS;
+
       const parallelStartTime = Date.now();
       const [
         createdUserMessage,
         relevantDocs,
         historyMessages,
         webSearchResults,
+        userPreferences,
       ] = await Promise.all([
           this.prisma.message.create({
             data: {
@@ -303,12 +410,13 @@ export class ChatService {
               content: persistContent ?? userQuery,
               // ✅ 图片 URL 一起落库，历史会话才能还原出图
               images: hasImages ? images : undefined,
-              // ✅ 附件只落元数据（名称/类型/字数），原文仍在临时存储里、到期即弃
               attachments: attachmentMeta.length ? attachmentMeta : undefined,
             },
           }),
-          isCasualChat || liveInfoQuery
-            ? Promise.resolve([] as any[])
+          reuseRag || isCasualChat || liveInfoQuery
+            ? Promise.resolve(
+                (reuseRag ? cachedRag!.docs : []) as any[],
+              )
             : fileIds && fileIds.length
               ? this.vectorService
                   .searchSimilarByFile(userQuery, fileIds, 3)
@@ -350,7 +458,42 @@ export class ChatService {
                 return r;
               })
             : Promise.resolve([]),
+          // ✅ 读该设备的用户画像（只读；失败就当没有，不影响主链路）
+          deviceId
+            ? this.getUserPreferences(deviceId)
+            : Promise.resolve([] as UserPreference[]),
         ]);
+      if (reuseRag) {
+        onChunk('thought', '📚 沿用上一轮检索到的知识库资料。');
+      } else if (!isCasualChat && !liveInfoQuery && relevantDocs.length) {
+        // 顺手清掉过期项，避免长跑进程里 Map 无限增长
+        for (const [key, value] of this.ragCache) {
+          if (Date.now() - value.at >= RAG_CACHE_TTL_MS) {
+            this.ragCache.delete(key);
+          }
+        }
+        this.ragCache.set(ragKey, {
+          docs: relevantDocs as any[],
+          at: Date.now(),
+        });
+      }
+      // ✅ 用户画像：只有用户显式说「记住…/以后…/统一用…」才记，且只认白名单四类；
+      //    不调模型、不猜意图，记错了可以随时清空。
+      const declaredPreferences = userProfileEnabled()
+        ? extractUserPreferences(userQuery)
+        : [];
+      const effectivePreferences = declaredPreferences.length
+        ? mergeUserPreferences(userPreferences, declaredPreferences)
+        : userPreferences;
+      if (declaredPreferences.length) {
+        void this.saveUserPreferences(deviceId, effectivePreferences);
+        onChunk(
+          'thought',
+          `🧠 已记住偏好：${declaredPreferences
+            .map((item) => `${item.type}=${item.value}`)
+            .join('、')}`,
+        );
+      }
       const parallelDuration = Date.now() - parallelStartTime;
 //       console.log(
 //         `⏱️ [性能监控] 数据库写入 + 向量库检索(${relevantDocs.length}条) + 历史消息查询，总耗时: ${parallelDuration}ms`,
@@ -382,10 +525,25 @@ export class ChatService {
           typeof m.content === 'string' ? m.content.trim() !== '' : true,
         );
 
-      // ✅ 实时查询本轮已有联网结果，只带最近 3 轮对话：既保留「汇率越来越低啊」
-      //    这种追问上下文，又避免长历史把首字延迟拉长（之前是整段历史全塞进去）。
-      if (liveInfoQuery && historyForModel.length > 6) {
-        historyForModel.splice(0, historyForModel.length - 6);
+      // ✅ 来源状态按裁剪前的完整历史算，避免更早回答引用过的停用文档被漏掉。
+      const historyForSources = historyForModel.slice();
+      // ✅ 被窗口裁掉的旧消息留作「此前对话要点」，避免长会话里约束被一次性忘光。
+      const trimmedForDigest: Array<{ role: string; content: string }> = [];
+      // ✅ 实时查询窗口可配（默认 6 轮）；下面还有 6000 token 预算兜底，不必硬砍到 3 轮。
+      const envLimit = Number(process.env.CHAT_LIVE_HISTORY_MESSAGES);
+      const liveHistoryLimit =
+        Number.isFinite(envLimit) && envLimit >= 6
+          ? Math.min(30, Math.floor(envLimit))
+          : DEFAULT_LIVE_HISTORY_MESSAGES;
+      if (liveInfoQuery && historyForModel.length > liveHistoryLimit) {
+        trimmedForDigest.push(
+          ...historyForModel
+            .splice(0, historyForModel.length - liveHistoryLimit)
+            .map((m: any) => ({
+              role: typeof m.role === 'string' ? m.role : 'user',
+              content: typeof m.content === 'string' ? m.content : '',
+            })),
+        );
       }
 
       const MAX_CONTEXT_TOKENS = 800;
@@ -483,7 +641,7 @@ export class ChatService {
       // ✅ 历史来源状态改为「系统提示里统一说明」：不再逐条拼进历史回答正文。
       //    原实现把 `【历史回答来源：…】` 追加到每条历史 assistant 消息后，
       //    模型会模仿这个格式，把它原样吐进本轮回答（线上已复现），污染聊天记录。
-      const historySourceLabels = historyForModel
+      const historySourceLabels = historyForSources
         .filter(
           (m: any) =>
             m.role === 'assistant' &&
@@ -524,23 +682,39 @@ export class ChatService {
       // ✅ 本轮是否基于给定资料作答：决定采样用「严谨档」还是「活泼档」
       const groundedTurn = !!context || (usedAttachments?.length ?? 0) > 0;
 
-      const systemPrompt = buildSystemPrompt({
+      // ✅ 历史附件要点按裁剪前的完整历史算，附件原文到期后仍能承接追问
+      const attachmentDigest = buildAttachmentDigest(
+        historyForSources,
+        ATTACHMENT_DIGEST_MAX_CHARS,
+      );
+      const promptNow = new Date();
+      const promptParts = {
         context,
         historySourceSummary,
         webSearchContext,
         festivalContext,
         platform,
-        promptProfile: casualTurn ? 'chat' : 'full',
-      });
+        promptProfile: casualTurn ? ('chat' as const) : ('full' as const),
+        now: promptNow,
+        attachmentDigest,
+        userProfile: formatUserPreferences(effectivePreferences),
+      };
+      // 预算按不含摘要的基准 prompt 算，摘要开销单独预留（见 DIGEST_TOKEN_RESERVE）
+      const baseSystemPrompt = buildSystemPrompt(promptParts);
 
       // ✅ 分配图片名额：当前轮优先，剩余名额从最新的历史消息往前补。
-      //   这样「刚才那张红图再帮我看看」能接上，又不会让 token 随对话轮数无限膨胀。
       const currentRefs = (hasImages ? images! : []).slice(0, MAX_MODEL_IMAGES);
-      // ✅ 只有本轮也带图（走视觉模型 qwen）时才还原历史图；
-      //    纯文本请求会路由到免费层 GLM（仅支持 text），带上 image_url 会 400。
-      const slotsForHistory = hasImages
-        ? Math.max(0, MAX_MODEL_IMAGES - currentRefs.length)
-        : 0;
+      // ✅ 纯文本追问历史图（「刚才那张图里的字」）时也要走视觉档并还原历史图，
+      //    否则会路由到只支持 text 的免费层 GLM，模型完全看不到图只能瞎答。
+      const hasHistoryImages = historyForModel.some(
+        (m: any) => Array.isArray(m.images) && m.images.length > 0,
+      );
+      let needsHistoryImages =
+        !hasImages && hasHistoryImages && HISTORY_IMAGE_HINT.test(userQuery);
+      const slotsForHistory =
+        hasImages || needsHistoryImages
+          ? Math.max(0, MAX_MODEL_IMAGES - currentRefs.length)
+          : 0;
       const historyImageRefs: string[] = [];
       for (let i = historyForModel.length - 1; i >= 0; i--) {
         if (historyImageRefs.length >= slotsForHistory) break;
@@ -564,6 +738,10 @@ export class ChatService {
           }
         }),
       );
+      // 一张历史图都没取到时别白走视觉档
+      if (needsHistoryImages && historyImageUrls.size === 0) {
+        needsHistoryImages = false;
+      }
 
       const imageParts = (urls: string[]) =>
         urls.map((dataUrl) => ({
@@ -575,15 +753,21 @@ export class ChatService {
       const userText = attachmentContext
         ? `${attachmentContext}\n\n${userQuery}`
         : userQuery;
-      const MAX_INPUT_TOKENS = 6000;
-      const systemTokens = estimateTokens(systemPrompt);
+      const MAX_INPUT_TOKENS = readMaxInputTokens();
+      const systemTokens = estimateTokens(baseSystemPrompt);
       const queryTokens = estimateTokens(userText);
       const currentImageUrls = await Promise.all(
         currentRefs.map((ref) => this.imageService.toDataURL(ref)),
       );
       // ✅ 当前轮的图在这里扣；历史图的费用由下面的装配循环按条扣，避免重复计费
       const imageTokens = currentImageUrls.length * MODEL_IMAGE_TOKEN_COST;
-      let budget = MAX_INPUT_TOKENS - systemTokens - queryTokens - imageTokens;
+      // 摘要要占 system prompt，固定预留一小段预算；本地生成，不额外请求模型
+      let budget =
+        MAX_INPUT_TOKENS -
+        systemTokens -
+        queryTokens -
+        imageTokens -
+        DIGEST_TOKEN_RESERVE;
 
       const formattedMessages = historyForModel.map((msg: any) => {
         const role = ['user', 'assistant', 'system', 'tool'].includes(msg.role)
@@ -611,8 +795,9 @@ export class ChatService {
           content: msg.content ?? '',
         } as any;
       });
-      // 从最新一条往前装，装不下就停（旧消息直接丢）
+      // 从最新一条往前装，装不下就停；被丢掉的部分压成「此前对话要点」
       const keptMessages: any[] = [];
+      let firstKeptIndex = formattedMessages.length;
       for (let i = formattedMessages.length - 1; i >= 0; i--) {
         const msg = formattedMessages[i];
         const parts = Array.isArray(msg.content) ? msg.content : null;
@@ -630,7 +815,9 @@ export class ChatService {
         if (budget - t < 0) break;
         budget -= t;
         keptMessages.unshift(msg);
+        firstKeptIndex = i;
       }
+      const budgetDropped = historyForModel.slice(0, firstKeptIndex);
 
       // ✅ 附件正文放进「当前用户消息」而不是系统提示：默认指令是「请概括上面的内容。」，
       //    只有把附件放在用户轮里，模型才会把它当作「上面的内容」来总结。放 system 里时，
@@ -664,16 +851,34 @@ export class ChatService {
 //         `🧮 [Token] system=${systemTokens}, query=${queryTokens}, 历史保留 ${keptMessages.length} 条, 剩余预算=${budget}`,
 //       );
 
+      // ✅ 被窗口/预算裁掉的旧消息压成本地摘要，注入 system prompt 承接上下文；
+      //    不调模型、不加首字延迟；没有裁剪时模板与原来一字不差。
+      const droppedForDigest = [
+        ...trimmedForDigest,
+        ...budgetDropped.map((m: any) => ({
+          role: typeof m.role === 'string' ? m.role : 'user',
+          content: typeof m.content === 'string' ? m.content : '',
+        })),
+      ];
+      const conversationDigest = buildConversationDigest(
+        droppedForDigest,
+        DIGEST_MAX_CHARS,
+      );
+      const systemPrompt = buildSystemPrompt({
+        ...promptParts,
+        conversationDigest,
+      });
+
       // ✅ 单轮流式 + 工具循环：全部交给共享编排器
       const messages: any[] = [
         { role: 'system', content: systemPrompt },
         ...keptMessages,
       ];
 
-      // ✅ 选择本轮候选链：含图片走视觉，否则按规则判复杂度决定免费/付费起点
+      // ✅ 选择本轮候选链：含图片（含纯文本追历史图）走视觉，否则按复杂度决定起点
       const complexity = classifyComplexity({
         userQuery,
-        hasImages,
+        hasImages: hasImages || needsHistoryImages,
         liveInfo: liveInfoQuery,
         threshold: this.orchestrator.modelConfig.threshold,
         expertThreshold: this.orchestrator.modelConfig.expertThreshold,
@@ -876,6 +1081,10 @@ export class ChatService {
           : undefined,
         durationMs: Date.now() - overallStartTime,
         sourcesCount: replySources.length,
+        // ✅ 记忆可观测：本轮实际带了多少历史、裁掉多少、有没有启用摘要
+        historyKept: keptMessages.length,
+        historyDropped: droppedForDigest.length,
+        digestUsed: conversationDigest.length > 0,
       };
     } catch (error: any) {
       const totalDuration = Date.now() - overallStartTime;
@@ -901,6 +1110,9 @@ export class ChatService {
           ttftMs: undefined,
           durationMs: totalDuration,
           sourcesCount: 0,
+          historyKept: 0,
+          historyDropped: 0,
+          digestUsed: false,
         };
       }
 

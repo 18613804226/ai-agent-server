@@ -81,9 +81,9 @@ pnpm --filter @repo/server exec prisma generate
 
 用户查询微博热搜、新闻、股价、汇率等实时信息时，后端识别实时查询并主动调用 Tavily Search，再把本轮搜索摘要和来源链接交给大模型整理。此流程由后端触发，不依赖模型自行决定是否联网，也不是大模型的 Function Calling。
 
-实时查询不会使用知识库文档或之前的对话回答作为事实来源。模型应根据本轮搜索结果回答并引用来源链接；若搜索未返回可用结果，会提示“没有获取到实时结果”，不让模型根据旧知识猜测。搜索服务未配置或不可用时会返回明确错误。
+实时查询不会使用知识库文档或之前的对话回答作为事实来源。模型应根据本轮搜索结果回答并引用来源链接；若搜索未返回可用结果，会提示"没有获取到实时结果"，不让模型根据旧知识猜测。搜索服务未配置或不可用时会返回明确错误。
 
-当前通过关键词识别实时查询，包括“实时、现在、今天、最新、热搜、热榜、新闻、微博、股价、汇率、TOP N”等。
+当前通过关键词识别实时查询，包括"实时、现在、今天、最新、热搜、热榜、新闻、微博、股价、汇率、TOP N"等。
 
 > Tavily 搜索的是可检索的公开网页，不保证微博等平台的官方榜单完整性或实时排名。若需要准确的官方 TOP 榜单，应接入对应平台的官方或授权数据接口。
 
@@ -117,10 +117,22 @@ APP 端同样展示模型路由决策（`模型选择：…`），`🔧 调用�
 - `sources`：`sources` 为引用来源数组。
 - `tool_call`：`{ name, args, index }`，`args` 是入参摘要（最长 500 字）。
 - `tool_result`：`{ name, index, result, resultLength, durationMs, status }`；`result` 为 200 字预览、`resultLength` 为原长、`durationMs` 为从 call 到 result 的墙钟耗时，`status` 取 `success | error | cached | denied`。按 `index` 与 `tool_call` 配对即可渲染可展开的工具卡片。
-- `done`：`{ tokens, model, completionTokens, finishReason, truncated, ttftMs, durationMs, sourcesCount }`，其中 `ttftMs` 是首字延迟。
+- `done`：`{ tokens, model, completionTokens, finishReason, truncated, ttftMs, durationMs, sourcesCount, historyKept, historyDropped, digestUsed }`，其中 `ttftMs` 是首字延迟；后三项是上下文记忆指标（本轮带入的历史条数、被裁掉的条数、是否启用滚动摘要）。
 - `ping`：每 15 秒一帧心跳，避免长静默期被网关断开，客户端忽略即可。
 
 兼容性：结构化 `tool_call` / `tool_result` 是新增事件，原有的 `🔧 调用 …` / `↩️ …` 文本 `thought` 仍同时推送，老版 APP 无需改动也能展示工具链。出错时推一帧收敛文案后正常结束流，不再用 `subscriber.error()` 触发 EventSource 反复重连。
+
+#### 上下文记忆：滚动摘要与窗口治理
+
+- 历史取最近 30 条，再按 `CHAT_MAX_INPUT_TOKENS`（默认 6000）从最新往前装；装不下的旧消息不再直接丢弃，而是本地提取成 `【此前对话要点】` 注入 system prompt，优先保留用户给过的约束（「以后都…」「别…」「用摄氏度」），最多 300 字。纯本地生成，不额外请求模型、不增加首字延迟；没有裁剪时 system prompt 与原来一字不差。
+- 实时查询的历史窗口由 `CHAT_LIVE_HISTORY_MESSAGES` 控制（默认 12 条 ≈ 6 轮，最小 6、最大 30），长会话仍由 token 预算兜底。
+- 历史来源状态按裁剪前的完整历史统计，更早回答引用过的停用文档不会被漏掉。
+- 附件元数据里额外落 300 字要点，注入 `【此前附件要点】`；原文依旧只在临时存储里、到期即弃，但下一轮「再展开第二点」能接上。同一附件按摘要去重，无字段变更、不需要 migration。
+- 指代类追问（「刚才那点再说清楚一点」）复用上一轮 RAG 命中，5 分钟内不再重复 embedding + 向量检索，并推一帧 `📚 沿用上一轮检索到的知识库资料。`
+- 纯文本追问历史图（「刚才那张图里的字」）会识别指代并强制走视觉档、还原历史图；历史图已清理时自动退回文本档，不白走付费视觉模型。
+- 两套预算同源但语义不同：宿主 `CHAT_MAX_INPUT_TOKENS` 是初始窗口，编排器是「初始窗口 + 18000 工具循环余量」，可用 `CHAT_CONTEXT_MAX_INPUT_TOKENS` 显式覆盖。改的是服务端 `orchestrator.factory.ts` 的注入值，**编辑器有自己的 `AgentOrchestrator` 实例且不传 `contextOptions`，不受影响**；包内默认值也没动。
+- `done` 事件里的 `historyKept` / `historyDropped` / `digestUsed` 让面试官能直接看到本轮用了多少历史、是否启用了摘要。
+- **用户画像（跨会话）**：只有用户显式说「记住…」「以后…」「统一用…」才记录，且只认四类白名单——称呼 / 输出格式 / 语言 / 单位；事实类内容一律不记，否定句（「别用列表」）也不记。本地正则抽取、不调模型，同类型覆盖、最多 4 条，存 `Device.preferences`（新增字段，部署前跑 `prisma db push`）。命中时推一帧 `🧠 已记住偏好：…`；`GET /chat/profile/preferences` 可查看、`DELETE /chat/profile/preferences` 一键清空；设 `CHAT_USER_PROFILE=off` 则完全不记不注入。
 
 ### 项目结构
 
@@ -307,9 +319,13 @@ CHAT_GLM_THINKING="false"                    # 是否保留思考链（默认关
 CHAT_GLM_TEMPERATURE=""                      # 留空按任务分档 0.7/0.4/0.5；填值则覆盖所有档位
 CHAT_GLM_TOP_P=""                            # 留空用 0.8；填值则覆盖所有档位
 CHAT_DEMO_REPLAY=""                          # 留空=失败时兜底回放；true=纯离线演示；off=关闭
+CHAT_LIVE_HISTORY_MESSAGES="12"              # 实时查询保留的历史消息条数（6~30，默认 12 ≈ 6 轮）
+CHAT_MAX_INPUT_TOKENS="6000"                 # 初始上下文窗口基准；编排器预算 = 该值 + 18000
+CHAT_CONTEXT_MAX_INPUT_TOKENS=""             # 留空随上面推导；填值直接覆盖编排器工具循环预算
 CHAT_RATE_LIMIT_RETRIES="2"                  # 免费层 429 限流时的原地重试次数
-CHAT_ZHIPU_LOCK_TIMEOUT_MS="30000"           # 智谱串行锁最长等待（ms）；超时自动降级到下一个候选
+CHAT_ZHIPU_LOCK_TIMEOUT_MS="5000"            # 智谱串行锁最长等待（ms）；超时自动降级到下一个候选
 CHAT_SHOW_ROUTING_THOUGHT="true"             # 是否把模型选择推给前端思考流（含 APP 端）
+CHAT_USER_PROFILE="on"                       # 用户画像：on=只记用户明确声明的白名单偏好；off=完全不记不注入
 ```
 
 调试时可看日志判断实际走了哪条链路：
@@ -551,9 +567,10 @@ Content-Type: application/json
 | `src/auth/auth.service.spec.ts` | 单元 | 设备/管理员登录、token 校验、每日配额与跨天重置、用量记账 |
 | `src/auth/admin.controller.spec.ts` | 单元 | 管理后台：非管理员 403、设备分页、用量统计 |
 | `src/chat/chat.service.spec.ts` | 单元 | 会话 CRUD 契约（不存在返回 null、标题更新、删除）、演示会话 24h 保护与清空消息 |
-| `src/chat/chat-prompt.spec.ts` | 单元 | APP 端提示词与排版清洗、两档共用完整工具/引用规则、错误收敛、朗读文本清洗 |
+| `src/chat/chat-prompt.spec.ts` | 单元 | APP 端提示词与排版清洗、两档共用完整工具/引用规则、滚动摘要与附件要点、模板注入、错误收敛、朗读文本清洗 |
+| `src/chat/user-profile.spec.ts` | 单元 | 用户画像：显式声明才记、四类白名单、否定句不记、同类型覆盖、脏数据丢弃 |
 | `src/chat/chat.controller.spec.ts` | 单元 | SSE 事件透传、done 指标、错误帧、演示辅助接口 |
-| `src/chat/demo-replay.spec.ts` | 单元 | 回放三态、预录事件与不编造兜底，forced / 失败兜底 / off 的服务集成 |
+| `src/chat/demo-replay.spec.ts` | 单元 | 回放三态、预录事件与不编造兜底，forced / 失败兜底 / off 的服务集成；RAG 追问缓存、预算同源与记忆指标 |
 | `src/chat/kb-upload.spec.ts` | 单元 | 知识库上传：类型/大小拒绝、状态流转、删除（mock Prisma） |
 | `src/chat/web-search.spec.ts` | 单元 | 实时查询识别、Tavily 结果格式化 |
 | `src/vector/vector.service.spec.ts` | 单元 | 向量写入 NUL 清洗、metadata 删除过滤 |
@@ -752,11 +769,30 @@ Docker 构建上下文是仓库根（要拿到 `packages/`）：
 # 构建（限制 buildkit 内存，避免小机器 OOM）
 docker buildx build --memory 1500m -t my-backend-app:latest .
 
-# 启动
+# 启动：postgres → 一次性 db-push（同步表结构）→ backend
 docker compose -f docker-compose.4001.yml --env-file apps/server/.env up -d --no-build
 ```
 
 > 注意：`.env` 位于 `apps/server/.env`，不是仓库根。
+
+### 表结构怎么同步的
+
+项目**没有 migrations**，只有 `prisma db push`。compose 里为此加了一个一次性服务 `db-push`：跑完即退出，`backend` 等它 `service_completed_successfully` 才启动，所以不会再出现「服务起来了但 Prisma 报列不存在」。
+
+- `prisma` CLI 属于 `devDependencies`，镜像裁剪 dev 依赖后就没了，所以 Dockerfile 第 6.5 步把它单独装到 `/opt/prisma-cli`，compose 用那个路径执行 `prisma db push`。
+- **改了 `schema.prisma` 之后**：`db-push` 是「跑一次就退出」的一次性任务，单纯再 `up` 不会重跑它，二选一：
+
+```bash
+# 方式一：只重跑表结构同步
+docker compose -f docker-compose.4001.yml --env-file apps/server/.env run --rm db-push
+
+# 方式二：重建所有容器（会顺带重启 backend）
+docker compose -f docker-compose.4001.yml --env-file apps/server/.env up -d --no-build --force-recreate
+```
+
+- **本地开发**不走 compose：在仓库根跑 `pnpm --filter @repo/server exec prisma db push`，直连 `apps/server/.env` 里的 DATABASE_URL。
+- ⚠️ 端口坑：compose 把 postgres 映射成宿主 `5433:5432`，容器内必须用服务名 `postgres:5432`；`db-push` 的 DATABASE_URL 由 compose 用 `DB_USER` / `DB_PASSWORD` / `DB_NAME` 现场拼，不依赖 `.env` 里那个 `localhost` 地址。
+
 
 ### 2 核 2G 小机器建议
 

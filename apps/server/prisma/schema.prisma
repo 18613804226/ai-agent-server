@@ -32,6 +32,9 @@ model Device {
     usedDate    DateTime @default(now()) // usedToday/usedTokensToday 所属日期，跨天自动重置
     totalCount   Int      @default(0) // 累计请求次数
     totalTokens  BigInt   @default(0) // 累计大模型 token 消耗
+    // ✅ 用户画像：只存用户明确要求记住的四类偏好（称呼/输出格式/语言/单位），
+    //    JSON 数组，同类型覆盖、最多 5 条；不记事实类内容，用户可随时查看与清空
+    preferences Json?
     createdAt   DateTime @default(now())
     lastSeenAt  DateTime @updatedAt
     sessions    ChatSession[]
@@ -59,8 +62,9 @@ model Message {
     content   String      @db.Text
     images    Json?
     sources   Json?
-    // ✅ 本轮附件元数据（name/kind/charCount/durationSec）：原文只在临时存储里、到期即弃，
-    //    不落库也不走向量库，避免聊天附件污染知识库
+    // ✅ 本轮附件元数据（name/kind/charCount/durationSec/fileRef/url/summary）：
+    //    原文只在临时存储里、到期即弃，不落库也不走向量库，避免聊天附件污染知识库；
+    //    summary 是 300 字要点，供后续轮次在原文过期后仍能承接追问。
     attachments Json?
     createdAt DateTime    @default(now())
 }

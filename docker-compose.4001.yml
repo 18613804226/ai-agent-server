@@ -36,6 +36,25 @@ services:
     networks:
       - app-network
 
+  # 1.5 一次性任务：把 Prisma schema 同步到数据库（项目无 migrations，只有 db push）。
+  #     跑完即退出；backend 等它成功后才启动，避免启动瞬间 Prisma 报「列不存在」。
+  #     prisma CLI 由 Dockerfile 第 6.5 步留在镜像的 /opt/prisma-cli 里。
+  db-push:
+    image: my-backend-app:latest
+    container_name: ai-agent-db-push
+    restart: "no"
+    entrypoint: ["/opt/prisma-cli/node_modules/.bin/prisma"]
+    command: ["db", "push"]
+    working_dir: /app/apps/server
+    environment:
+      # 容器内用服务名连库；变量来自 --env-file apps/server/.env
+      DATABASE_URL: "postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}?schema=public"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app-network
+
   # 2. NestJS 后端服务（monorepo 根目录作为构建上下文）
   backend:
     build: .
@@ -59,6 +78,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-push:
+        # ✅ 表结构同步成功后才启动后端；db push 失败（比如有破坏性变更）就别硬起
+        condition: service_completed_successfully
     healthcheck:
       test:
         ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]

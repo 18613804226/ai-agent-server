@@ -12,6 +12,102 @@ export function estimateTokens(text: string): number {
   return Math.ceil(cjk + (text.length - cjk) / 3.5);
 }
 
+/**
+ * 把被窗口裁掉的旧消息压成「此前对话要点」。
+ * 纯本地提取式：不调模型、不增加首字延迟；优先保留用户给过的约束，
+ * 再补最近几条普通消息，整体按字符上限截断。
+ */
+export function buildConversationDigest(
+  messages: Array<{ role?: string; content?: unknown }>,
+  maxChars = 300,
+): string {
+  const CONSTRAINT =
+    /只|别|不要|记得|记住|以后|必须|一律|默认|保持|改成|换成|用中文|用英文|摄氏度|华氏度/;
+  const toText = (content: unknown): string => {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      return content
+        .filter(
+          (part): part is { type: string; text?: string } =>
+            part !== null &&
+            typeof part === 'object' &&
+            (part as { type?: unknown }).type === 'text',
+        )
+        .map((part) => String(part.text ?? ''))
+        .join('');
+    }
+    return '';
+  };
+  const clip = (text: string, n: number): string =>
+    text.length > n ? `${text.slice(0, n).trimEnd()}…` : text;
+  const firstSentence = (text: string): string => {
+    const hit = text.search(/[。！？!?\n]/);
+    return hit >= 0 ? text.slice(0, hit + 1) : text;
+  };
+
+  const picked: Array<{ index: number; line: string; primary: boolean }> = [];
+  messages.forEach((message, index) => {
+    const text = toText(message.content).replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    if (message.role === 'user') {
+      picked.push({
+        index,
+        line: `- 用户：${clip(text, 80)}`,
+        primary: CONSTRAINT.test(text),
+      });
+    } else if (message.role === 'assistant') {
+      picked.push({
+        index,
+        line: `- 助手：${clip(firstSentence(text), 60)}`,
+        primary: false,
+      });
+    }
+  });
+
+  const primary = picked.filter((item) => item.primary).slice(-4);
+  const rest = picked.filter((item) => !item.primary).slice(-2);
+  const selected = [...primary, ...rest].sort((a, b) => a.index - b.index);
+
+  const lines: string[] = [];
+  let used = 0;
+  for (const { line } of selected) {
+    if (used + line.length > maxChars) break;
+    lines.push(line);
+    used += line.length + 1;
+  }
+  return lines.join('\n');
+}
+
+/**
+ * 从历史消息里落过库的附件要点拼成「此前附件要点」。
+ * 附件原文不进库，只留 300 字摘录；同一附件多轮引用时按摘要去重。
+ */
+export function buildAttachmentDigest(
+  messages: Array<{ attachments?: unknown }>,
+  maxChars = 400,
+): string {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  let used = 0;
+  for (const message of messages) {
+    if (!Array.isArray(message.attachments)) continue;
+    for (const item of message.attachments) {
+      if (item === null || typeof item !== 'object') continue;
+      const record = item as { name?: unknown; summary?: unknown };
+      const name = typeof record.name === 'string' ? record.name : '附件';
+      const summary =
+        typeof record.summary === 'string' ? record.summary.trim() : '';
+      if (!summary || seen.has(summary)) continue;
+      seen.add(summary);
+      const line = `- ${name}：${summary}`;
+      if (used + line.length > maxChars) return lines.join('\n');
+      lines.push(line);
+      used += line.length + 1;
+    }
+  }
+  return lines.join('\n');
+}
+
 export interface SystemPromptParts {
   /** RAG 参考资料；空串表示本轮没有 */
   context: string;
@@ -21,6 +117,15 @@ export interface SystemPromptParts {
   webSearchContext: string;
   /** 本轮算好的传统节日/农历日期；空串表示本轮未涉及 */
   festivalContext?: string;
+  /**
+   * 更早对话被窗口裁掉后压成的「此前对话要点」。
+   * 空串表示没有裁剪，此时模板一字不变（保证旧行为可快照）。
+   */
+  conversationDigest?: string;
+  /** 历史消息里落过库的附件要点（附件原文不进库，只留 300 字摘录） */
+  attachmentDigest?: string;
+  /** 用户明确要求记住的偏好（白名单四类，可随时查看与清空） */
+  userProfile?: string;
   /** 可注入当前时间，便于测试；默认取 now */
   now?: Date;
   /**
@@ -116,7 +221,7 @@ function buildFullPrompt(
 
      【历史对话来源状态】：
       ${parts.historySourceSummary}
-${parts.festivalContext ? `\n     ${parts.festivalContext}\n` : ''}
+${parts.conversationDigest ? `\n     【此前对话要点】（更早对话的压缩摘要，仅供承接上下文，不要在回答里复述）：\n      ${parts.conversationDigest}\n` : ''}${parts.attachmentDigest ? `\n     【此前附件要点】（更早对话上传过的附件摘录，本轮没有重新上传附件）：\n      ${parts.attachmentDigest}\n` : ''}${parts.userProfile ? `\n     【用户偏好】（用户明确要求记住的偏好，请遵循；不要在回答里复述这些偏好）：\n      ${parts.userProfile}\n` : ''}${parts.festivalContext ? `\n     ${parts.festivalContext}\n` : ''}
      【本轮联网搜索结果】：
       ${parts.webSearchContext || '本轮未执行联网搜索。'}
       

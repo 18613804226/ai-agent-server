@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildAttachmentDigest,
+  buildConversationDigest,
   buildSystemPrompt,
   createAppReplyFormatter,
   estimateTokens,
@@ -8,6 +10,123 @@ import {
   isAppPlatform,
   toSpeakableText,
 } from './chat-prompt.js';
+
+describe('buildAttachmentDigest：历史附件要点', () => {
+  it('去重同一附件、按上限截断，空输入返回空串', () => {
+    expect(buildAttachmentDigest([])).toBe('');
+    const digest = buildAttachmentDigest(
+      [
+        { attachments: [{ name: '周报.pdf', summary: '本季度营收增长 12%' }] },
+        { attachments: [{ name: '周报.pdf', summary: '本季度营收增长 12%' }] },
+      ],
+      200,
+    );
+    expect(digest).toBe('- 周报.pdf：本季度营收增长 12%');
+  });
+
+  it('没有 summary 的旧附件自动跳过', () => {
+    expect(
+      buildAttachmentDigest([{ attachments: [{ name: '旧文件.pdf' }] }]),
+    ).toBe('');
+  });
+
+  it('提示词注入独立段落，且不裁剪工具/引用规则', () => {
+    const prompt = buildSystemPrompt({
+      context: '',
+      historySourceSummary: '此前对话未引用知识库资料。',
+      webSearchContext: '',
+      now: new Date('2026-01-02T03:04:05Z'),
+      attachmentDigest: '- 周报.pdf：本季度营收增长 12%',
+    });
+    expect(prompt).toContain('【此前附件要点】');
+    expect(prompt).toContain('- 周报.pdf：本季度营收增长 12%');
+    expect(prompt).toContain('【引用规则】');
+  });
+});
+
+describe('buildConversationDigest：被裁历史的本地摘要', () => {
+  it('空输入返回空串，空摘要不改变模板', () => {
+    expect(buildConversationDigest([])).toBe('');
+    const base = {
+      context: '',
+      historySourceSummary: '此前对话未引用知识库资料。',
+      webSearchContext: '',
+      now: new Date('2026-01-02T03:04:05Z'),
+    };
+    expect(buildSystemPrompt(base)).toBe(
+      buildSystemPrompt({ ...base, conversationDigest: '' }),
+    );
+  });
+
+  it('优先保留用户给过的约束，按时间顺序输出', () => {
+    const digest = buildConversationDigest([
+      { role: 'user', content: '以后温度都用摄氏度，别用华氏度' },
+      { role: 'assistant', content: '好的，我记住了。后面都按摄氏度说。' },
+      { role: 'user', content: '今天天气怎么样？' },
+      { role: 'assistant', content: '晴，26℃。' },
+    ]);
+    expect(digest).toContain('以后温度都用摄氏度');
+    expect(digest.indexOf('以后温度')).toBeLessThan(
+      digest.indexOf('今天天气'),
+    );
+  });
+
+  it('按字符上限截断，不把助手长回答整段搬进来', () => {
+    const digest = buildConversationDigest(
+      [
+        { role: 'user', content: '以后都别用列表' },
+        { role: 'assistant', content: '答案内容'.repeat(100) },
+      ],
+      60,
+    );
+    expect(digest.length).toBeLessThanOrEqual(60);
+    expect(digest).toContain('以后都别用列表');
+  });
+
+  it('多模态 content 也能取到文本', () => {
+    const digest = buildConversationDigest([
+      {
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: 'data:...' } },
+          { type: 'text', text: '记住以后用中文回答' },
+        ],
+      },
+    ]);
+    expect(digest).toContain('记住以后用中文回答');
+  });
+});
+
+describe('buildSystemPrompt：此前对话要点注入', () => {
+  const base = {
+    context: '',
+    historySourceSummary: '此前对话未引用知识库资料。',
+    webSearchContext: '',
+    now: new Date('2026-01-02T03:04:05Z'),
+  };
+
+  it('出现独立段落，且不裁剪工具/引用规则', () => {
+    const prompt = buildSystemPrompt({
+      ...base,
+      conversationDigest: '- 用户：以后用摄氏度',
+    });
+    expect(prompt).toContain('【此前对话要点】');
+    expect(prompt).toContain('- 用户：以后用摄氏度');
+    expect(prompt).toContain('【搜索结果与工具规则】');
+    expect(prompt).toContain('【引用规则】');
+  });
+
+  it('闲聊档与完整档都带上摘要', () => {
+    for (const promptProfile of ['chat', 'full'] as const) {
+      const prompt = buildSystemPrompt({
+        ...base,
+        promptProfile,
+        conversationDigest: '- 用户：以后用摄氏度',
+      });
+      expect(prompt).toContain('- 用户：以后用摄氏度');
+    }
+  });
+});
 
 describe('estimateTokens', () => {
   it('空串返回 0', () => {
