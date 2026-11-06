@@ -240,14 +240,18 @@ describe('按端区分提示词', () => {
     expect(isAppPlatform(null)).toBe(false);
   });
 
-  it('APP 端前置移动端输出规范，同时保留原有工具与引用规则', () => {
+  it('APP 端只压空白行排版，不限制内容长度与形式', () => {
     const web = buildSystemPrompt({ ...base, platform: 'web' });
     const app = buildSystemPrompt({ ...base, platform: 'ios' });
     expect(app.startsWith('【APP 端输出规范')).toBe(true);
     expect(app).toContain('任意位置最多 1 个换行符');
     expect(app).toContain('不复述用户问题');
-    expect(app).toContain('不要插入多余空格');
-    expect(app).toContain('一般 3～6 句');
+    expect(app).toContain('长度、形式都不设限');
+    // 历史版本压过内容与排版（字数上限、空格/Markdown 禁令），防止回归
+    expect(app).not.toContain('一般 3～6 句');
+    expect(app).not.toContain('80～200');
+    expect(app).not.toContain('不要插入多余空格');
+    expect(app).not.toContain('不要用 Markdown');
     expect(app).not.toContain('一般 1～3 句');
     expect(app).not.toContain('能一句说清就不展开');
     expect(app).toContain('你的名字叫toto');
