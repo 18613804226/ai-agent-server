@@ -3,7 +3,12 @@ datasource db {
 }
 
 generator client {
-    provider = "prisma-client-js"
+    provider = "prisma-client"
+    output   = "../src/generated/prisma"
+    runtime  = "nodejs"
+    moduleFormat = "esm"
+    generatedFileExtension = "ts"
+    importFileExtension = "js"
 }
 
 model ChatSession {

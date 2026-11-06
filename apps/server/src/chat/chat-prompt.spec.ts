@@ -246,7 +246,10 @@ describe('按端区分提示词', () => {
     expect(app.startsWith('【APP 端输出规范')).toBe(true);
     expect(app).toContain('任意位置最多 1 个换行符');
     expect(app).toContain('不复述用户问题');
-    expect(app).toContain('推理少写、能省就省');
+    expect(app).toContain('不要插入多余空格');
+    expect(app).toContain('一般 3～6 句');
+    expect(app).not.toContain('一般 1～3 句');
+    expect(app).not.toContain('能一句说清就不展开');
     expect(app).toContain('你的名字叫toto');
     expect(app).toContain('fetchWeatherInfo');
     expect(app).toContain('【引用规则】');
@@ -269,6 +272,7 @@ describe('按端区分提示词', () => {
     expect(chat).toContain('【引用规则】');
     expect(chat).toContain('【历史对话来源状态】');
     expect(chat).toContain('【本轮对话风格】');
+    expect(chat).toContain('别只回一两个词');
     expect(chat.length).toBeGreaterThan(full.length);
     // 规则部分与完整档一字不差，只是前置了一段对话风格要求
     expect(chat.endsWith(full)).toBe(true);
