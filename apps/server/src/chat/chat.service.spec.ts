@@ -174,7 +174,7 @@ describe('ChatService createSession 超额清理', () => {
 });
 
 describe('ChatService deleteChatAttachment', () => {
-  const mkService = (prisma: any) => new AttachmentService(prisma as never, {} as never);
+  const mkService = (prisma: any) => new AttachmentService(prisma as never);
 
   it('拒绝非法文件名（400）', async () => {
     const prisma = { $queryRaw: vi.fn().mockResolvedValue([]) };
@@ -230,7 +230,7 @@ async function buildDocx(paragraphs: string[]): Promise<Buffer> {
 }
 
 describe('ChatService getAttachmentHtml（docx 在线预览）', () => {
-  const mkService = () => new AttachmentService({} as never, {} as never);
+  const mkService = () => new AttachmentService({} as never);
   const dir = join(process.cwd(), 'files', 'chat-attachments');
   const validDocxRef = '00000000-0000-4000-8000-000000000003.docx';
 
@@ -312,7 +312,7 @@ describe('ChatService validateChatAttachment：xlsx 放行', () => {
     }) as never;
 
   it('xlsx 通过校验（不再被「不支持」拒绝）', () => {
-    const service = new AttachmentService({} as never, {} as never);
+    const service = new AttachmentService({} as never);
     expect(() =>
       service.validateChatAttachment(
         mkFile(
@@ -324,7 +324,7 @@ describe('ChatService validateChatAttachment：xlsx 放行', () => {
   });
 
   it('xls 仍被拒绝（exceljs 不支持老版 BIFF）', () => {
-    const service = new AttachmentService({} as never, {} as never);
+    const service = new AttachmentService({} as never);
     expect(() =>
       service.validateChatAttachment(
         mkFile('data.xls', 'application/vnd.ms-excel'),
@@ -344,7 +344,7 @@ describe('ChatService parseChatAttachment：xlsx 默认走检查', () => {
     ws.addRow(['甲', 100]); // 与上一行完全相同 → DUPLICATE_ROW
     const buf = Buffer.from(await wb.xlsx.writeBuffer());
 
-    const service = new AttachmentService({} as never, {} as never);
+    const service = new AttachmentService({} as never);
     const parsed = await service.parseChatAttachment({
       originalname: '报表.xlsx',
       mimetype:

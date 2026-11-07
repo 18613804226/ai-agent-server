@@ -207,7 +207,10 @@ describe('editor 文件工具安全', () => {
     const read = getAgent('editor')!.tools.find(
       (t) => t.definition.function.name === 'read_file',
     )!;
-    const result = await read.handler({ path: '../../etc/passwd' });
+    const result = await read.handler(
+      { path: '../../etc/passwd' },
+      { toolName: 'read_file' },
+    );
     expect(result).toContain('越界');
   });
 
@@ -215,7 +218,10 @@ describe('editor 文件工具安全', () => {
     const run = getAgent('editor')!.tools.find(
       (t) => t.definition.function.name === 'run_terminal',
     )!;
-    const result = await run.handler({ command: 'rm -rf /' });
+    const result = await run.handler(
+      { command: 'rm -rf /' },
+      { toolName: 'run_terminal' },
+    );
     expect(result).toContain('拒绝');
   });
 });

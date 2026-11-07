@@ -28,6 +28,11 @@ ffmpeg.setFfmpegPath(ffmpegPath as string);
 //    （省 56%），而图里的文字内容模型照样读得出来。原始高清图仍留在 uploads 供前端展示。
 const MODEL_IMAGE_MAX_EDGE = 1280;
 
+// ✅ 图片解码后的大小上限：超过给用户看得懂的报错。
+//    body 层有路由级 12mb 限宽兜底（见 main.ts），超大的 base64 在那里就被 413 挡掉，
+//    但 8MB～9MB 这段「常见手机直拍」区间必须由这里给出友好提示，而不是裸 413。
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
 /**
  * 图片上传、压缩、安全校验与孤儿清理。
  * 从 ChatService 抽出来，避免核心流水线文件继续膨胀。
@@ -57,6 +62,11 @@ export class ImageService {
     }
     const mime = match[1];
     const base64 = match[2];
+    // 解码一次，校验大小和写盘共用
+    const buffer = Buffer.from(base64, 'base64');
+    if (buffer.byteLength > MAX_IMAGE_BYTES) {
+      throw new BadRequestException('图片过大，请压缩到 8MB 以内');
+    }
     const ext = mime.replace('image/', '');
 
     const uploadDir = join(process.cwd(), 'uploads');
@@ -65,7 +75,7 @@ export class ImageService {
     const filename = `img-${Date.now()}-${randomUUID()}.${ext}`;
     const filepath = join(uploadDir, filename);
     // ✅ 异步写盘：同步写会把这段时间整个事件循环占死，所有 SSE 用户的流式输出一起卡顿
-    await writeFile(filepath, Buffer.from(base64, 'base64'));
+    await writeFile(filepath, buffer);
 
     const trimmedHost = host ? host.replace(/\/+$/, '') : '';
     const url = trimmedHost

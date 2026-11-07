@@ -30,6 +30,7 @@ function mkController() {
     getSessionDetail: vi.fn(),
     updateSessionTitle: vi.fn(),
     deleteSession: vi.fn(),
+    clearMessages: vi.fn(),
   };
   const imageService = {
     uploadImage: vi.fn(),
