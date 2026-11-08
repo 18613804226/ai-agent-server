@@ -408,6 +408,27 @@ export function providerForModel(model: string): ModelProvider {
 }
 
 /**
+ * 前端展示用的模型短名。
+ *
+ * 完整 Model-Id（modelscope:Qwen/Qwen3.8-Flash-Next，36 字符）在 APP 底部模型徽标、
+ * 思考流一行里会被截成省略号；展示时去掉 provider 前缀和 ModelScope 命名空间
+ * （Qwen/Qwen3.8-Flash-Next → Qwen3.8-Flash-Next，顺带去掉重复的那个 Qwen）。
+ *
+ * ⚠️ 仅用于展示：请求体的 model 必须是完整 Model-Id，否则 ModelScope 找不到模型，
+ *    且 providerForModel() 会因为少了斜杠把它误判成 dashscope。
+ */
+export function displayModelName(model: string): string {
+  const name = (model || '').trim();
+  if (!name) return '';
+  const withoutProvider = name.includes(':')
+    ? name.slice(name.lastIndexOf(':') + 1)
+    : name;
+  return withoutProvider.includes('/')
+    ? withoutProvider.slice(withoutProvider.lastIndexOf('/') + 1)
+    : withoutProvider;
+}
+
+/**
  * 按复杂度生成有序候选链（去重、去未配置 provider）。
  * zhipu 未配置 key 时只剩 dashscope，等价于旧版单模型行为。
  */
@@ -544,7 +565,7 @@ export function formatRoutingThought(
       : defaultTierText;
   const backups = candidates
     .slice(1)
-    .map((c) => c.model)
+    .map((c) => displayModelName(c.model))
     .filter(Boolean);
   // 首选模型不参与评分、直接插到链首。不显式说明的话，括号里的「复杂度评分 X/阈值」
   // 容易被误读成「按评分选了首选模型」，所以把这条决策也写进思考流。
@@ -554,7 +575,7 @@ export function formatRoutingThought(
     ? '；本轮优先走不参与评分的首选模型（用尽/429 直接降级）'
     : '';
   return (
-    `模型选择：${candidates[0].model}（${tierText}，复杂度评分 ` +
+    `模型选择：${displayModelName(candidates[0].model)}（${tierText}，复杂度评分 ` +
     `${complexity.score}/${config.threshold}）` +
     priorityNote +
     (backups.length ? `，备用 ${backups.join('、')}。` : '，无备用。') +

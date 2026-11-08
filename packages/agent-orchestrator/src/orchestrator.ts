@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import {
+  displayModelName,
   errorMessage,
   errorStatus,
   isDegradableError,
@@ -246,7 +247,9 @@ export class AgentOrchestrator {
       } catch (err: any) {
         // 锁等待超时：不阻塞在这里，直接降级到下一个候选
         lastError = err;
-        onThought?.(`${candidate.model} 并发已满，切换备用模型…`);
+        onThought?.(
+          `${displayModelName(candidate.model)} 并发已满，切换备用模型…`,
+        );
         console.warn(
           `🧠 [模型分层] ${candidate.provider}:${candidate.model} 获取并发锁超时，切换下一个候选`,
         );
@@ -318,8 +321,9 @@ export class AgentOrchestrator {
 
           // 只有真正排在链首的首选模型才这么称呼，普通候选失败不要误报
           const label = isPriorityModel ? '首选模型' : '模型';
+          const shown = displayModelName(candidate.model);
           onThought?.(
-            `${label} ${candidate.model} 暂时不可用，正在切换备用模型…`,
+            `${label} ${shown} 暂时不可用，正在切换备用模型…`,
           );
           // 401/403/402 这类配置错误不降级，避免白试所有候选
           if (!isDegradableError(err)) {

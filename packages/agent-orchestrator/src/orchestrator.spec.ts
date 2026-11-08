@@ -170,7 +170,9 @@ describe('AgentOrchestrator.run', () => {
       events.some(
         (e) =>
           e.type === 'thought' &&
-          String(e.content).includes(`首选模型 ${priority} 暂时不可用`),
+          String(e.content).includes(
+            '首选模型 Qwen3.8-Flash-Next 暂时不可用',
+          ),
       ),
     ).toBe(true);
   });

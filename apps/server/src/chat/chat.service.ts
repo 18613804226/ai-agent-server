@@ -11,6 +11,7 @@ import { createOrchestrator } from '../agent/orchestrator.factory.js';
 import {
   AgentOrchestrator,
   classifyComplexity,
+  displayModelName,
   formatRoutingThought,
   isAttachmentRefusal,
   resolveModelCandidates,
@@ -1086,7 +1087,8 @@ export class ChatService {
         fullReply,
         sources: relevantAndPassingDocs,
         tokens: usedTokens,
-        model: usedModel,
+        // done 事件的模型徽标在 APP 底部一行，完整 Model-Id 会被截成省略号
+        model: displayModelName(usedModel),
         truncated,
         completionTokens,
         finishReason,
@@ -1118,7 +1120,8 @@ export class ChatService {
           fullReply: '',
           sources: [],
           tokens: 0,
-          model: usedModel,
+          // done 事件的模型徽标在 APP 底部一行，完整 Model-Id 会被截成省略号
+          model: displayModelName(usedModel),
           truncated: false,
           completionTokens: 0,
           finishReason: '',

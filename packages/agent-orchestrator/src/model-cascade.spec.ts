@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   classifyComplexity,
   DEFAULT_MODELS,
+  displayModelName,
   errorMessage,
   errorStatus,
   formatRoutingThought,
@@ -668,7 +669,8 @@ describe('模型分层：路由思考文案', () => {
     const text = formatRoutingThought(complexity, candidates, cfg);
 
     expect(candidates[0]).toEqual({ provider: 'modelscope', model: priority });
-    expect(text).toContain(`模型选择：${priority}`);
+    expect(text).toContain('模型选择：Qwen3.8-Flash-Next');
+    expect(text).not.toContain('Qwen/Qwen');
     expect(text).toContain('不参与评分的首选模型');
     expect(text).toContain('用尽/429 直接降级');
     expect(text).toContain('，备用 ');
@@ -683,5 +685,34 @@ describe('模型分层：路由思考文案', () => {
 
     expect(text).toContain(`模型选择：${cfg.visionPrimary}`);
     expect(text).not.toContain('首选模型');
+  });
+});
+
+describe('展示短名（APP 徽标 / 思考流放得下）', () => {
+  it('去掉 provider 前缀与 ModelScope 命名空间，只留一个 Qwen', () => {
+    expect(displayModelName('modelscope:Qwen/Qwen3.8-Flash-Next')).toBe(
+      'Qwen3.8-Flash-Next',
+    );
+    expect(displayModelName('Qwen/Qwen3.8-Flash-Next')).toBe(
+      'Qwen3.8-Flash-Next',
+    );
+  });
+
+  it('普通模型名与 demo 标记原样保留', () => {
+    expect(displayModelName('dashscope:qwen3.7-flash')).toBe('qwen3.7-flash');
+    expect(displayModelName('zhipu:glm-4.5-flash')).toBe('glm-4.5-flash');
+    expect(displayModelName('demo-replay')).toBe('demo-replay');
+    expect(displayModelName('')).toBe('');
+  });
+
+  it('候选链仍保留完整 Model-Id，短名只影响展示', () => {
+    const priority = 'Qwen/Qwen3.8-Flash-Next';
+    const cfg = { ...scoringOnlyConfig(), priorityModel: priority };
+    const candidates = resolveModelCandidates(
+      { tier: 'vision', complexity: 'simple', score: 1, reasons: [] },
+      cfg,
+      { zhipuAvailable: true },
+    );
+    expect(candidates[0]).toEqual({ provider: 'modelscope', model: priority });
   });
 });
