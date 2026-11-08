@@ -4,6 +4,7 @@ import {
   DEFAULT_MODELS,
   errorMessage,
   errorStatus,
+  formatRoutingThought,
   isAttachmentRefusal,
   isDegradableError,
   isRateLimitError,
@@ -13,6 +14,7 @@ import {
   resolveZhipuCredentials,
   zhipuChatSamplingParam,
   zhipuThinkingParam,
+  type Complexity,
   type ModelCascadeConfig,
 } from './model-cascade';
 
@@ -37,6 +39,12 @@ function clearModelEnv() {
   for (const k of Object.keys(process.env)) {
     if (/^CHAT_(MODEL|COMPLEXITY|EXPERT|GLM)/.test(k)) delete process.env[k];
   }
+}
+
+/** 验证旧版「按评分选档」时显式关掉首选模型；首选模型有独立的 describe */
+function scoringOnlyConfig(): ModelCascadeConfig {
+  const base = loadModelCascadeConfig();
+  return { ...base, priorityModel: '' };
 }
 
 describe('模型分层：复杂度判定', () => {
@@ -184,12 +192,14 @@ describe('模型分层：档位与平台匹配', () => {
     expect(providerForModel('qwen3.7-flash')).toBe('dashscope');
     expect(providerForModel('qwen3.8-max')).toBe('dashscope');
     expect(providerForModel(' text-embedding-v4 ')).toBe('dashscope');
+    // ModelScope Model-Id 带命名空间斜杠，必须走独立端点
+    expect(providerForModel('Qwen/Qwen3.8-Flash-Next')).toBe('modelscope');
   });
 
   it('复杂档默认是 qwen → 必须路由到阿里云（曾因硬编码发错平台报 400）', () => {
     const list = resolveModelCandidates(
       { tier: 'text', complexity: 'complex', score: 4, reasons: [] },
-      loadModelCascadeConfig(),
+      scoringOnlyConfig(),
       { zhipuAvailable: true },
     );
     expect(list).toEqual([{ provider: 'dashscope', model: 'qwen3.7-flash' }]);
@@ -202,7 +212,7 @@ describe('模型分层：档位与平台匹配', () => {
     process.env.CHAT_MODEL_COMPLEX_FALLBACK = 'qwen3.8-max-0902';
     const list = resolveModelCandidates(
       { tier: 'text', complexity: 'complex', score: 4, reasons: [] },
-      loadModelCascadeConfig(),
+      scoringOnlyConfig(),
       { zhipuAvailable: true },
     );
     expect(list.map((c) => c.model)).toEqual([
@@ -214,7 +224,7 @@ describe('模型分层：档位与平台匹配', () => {
 
   it('expert 档默认模型也在阿里云，且与复杂档是不同模型', () => {
     clearModelEnv();
-    const cfg = loadModelCascadeConfig();
+    const cfg = scoringOnlyConfig();
     // 档位必须真的分开了，否则三级路由没意义
     expect(cfg.textExpert).not.toBe(cfg.textComplex);
     const list = resolveModelCandidates(
@@ -231,7 +241,7 @@ describe('模型分层：档位与平台匹配', () => {
   it('视觉档默认 qwen3.7-flash 同样归阿里云', () => {
     const list = resolveModelCandidates(
       { tier: 'vision', complexity: 'simple', score: 1, reasons: [] },
-      loadModelCascadeConfig(),
+      scoringOnlyConfig(),
       { zhipuAvailable: true },
     );
     expect(list).toEqual([{ provider: 'dashscope', model: 'qwen3.7-flash' }]);
@@ -241,10 +251,93 @@ describe('模型分层：档位与平台匹配', () => {
     process.env.CHAT_MODEL_TEXT_COMPLEX = 'glm-4.6';
     const list = resolveModelCandidates(
       { tier: 'text', complexity: 'complex', score: 4, reasons: [] },
-      loadModelCascadeConfig(),
+      scoringOnlyConfig(),
       { zhipuAvailable: true },
     );
     expect(list[0]).toEqual({ provider: 'zhipu', model: 'glm-4.6' });
+  });
+});
+
+describe('模型分层：首选模型（不参与评分）', () => {
+  const priority = 'Qwen/Qwen3.8-Flash-Next';
+  const withPriority: ModelCascadeConfig = {
+    ...CONFIG,
+    priorityModel: priority,
+    textSimple: 'glm-4.5-flash',
+  };
+
+  it.each(['simple', 'complex', 'expert'] as const)(
+    '纯文本 %s 档：首选插到链首，其次固定回 4.5-Flash，评分链路仍在后面',
+    (level) => {
+      const score = level === 'simple' ? 0 : level === 'complex' ? 4 : 7;
+      const list = resolveModelCandidates(
+        { tier: 'text', complexity: level, score, reasons: [] },
+        withPriority,
+        { zhipuAvailable: true },
+      );
+      expect(list[0]).toEqual({ provider: 'modelscope', model: priority });
+      expect(list[1]).toEqual({ provider: 'zhipu', model: 'glm-4.5-flash' });
+      expect(list.length).toBeGreaterThanOrEqual(3);
+    },
+  );
+
+  it('vision 档：首选也插队，跳过纯文本 4.5-Flash 直接回视觉模型', () => {
+    const list = resolveModelCandidates(
+      { tier: 'vision', complexity: 'simple', score: 1, reasons: [] },
+      withPriority,
+      { zhipuAvailable: true },
+    );
+    expect(list[0]).toEqual({ provider: 'modelscope', model: priority });
+    expect(list[1]).toEqual({ provider: 'zhipu', model: 'GLM-4.6V-Flash' });
+    expect(list.some((c) => c.model === 'glm-4.5-flash')).toBe(false);
+  });
+
+  it('图片请求：默认配置下 3.8 出错直接回退到 3.7-Flash', () => {
+    clearModelEnv();
+    const cfg = loadModelCascadeConfig();
+    const list = resolveModelCandidates(
+      { tier: 'vision', complexity: 'simple', score: 1, reasons: [] },
+      cfg,
+      { zhipuAvailable: true },
+    );
+    expect(list).toEqual([
+      { provider: 'modelscope', model: 'Qwen/Qwen3.8-Flash-Next' },
+      { provider: 'dashscope', model: 'qwen3.7-flash' },
+    ]);
+  });
+
+  it('未配置 GLM key：首选仍可用，4.5-Flash 自动跳过', () => {
+    const list = resolveModelCandidates(
+      { tier: 'text', complexity: 'simple', score: 0, reasons: [] },
+      withPriority,
+      { zhipuAvailable: false },
+    );
+    expect(list[0]).toEqual({ provider: 'modelscope', model: priority });
+    expect(list.some((c) => c.provider === 'zhipu')).toBe(false);
+  });
+
+  it('未设置 priorityModel 时行为与旧版一致', () => {
+    const list = resolveModelCandidates(
+      { tier: 'text', complexity: 'simple', score: 0, reasons: [] },
+      CONFIG,
+      { zhipuAvailable: true },
+    );
+    expect(list[0]).toEqual({ provider: 'zhipu', model: 'GLM-4.7-Flash' });
+  });
+
+  it('CHAT_MODEL_PRIORITY 可覆盖，设 off 则禁用', () => {
+    clearModelEnv();
+    process.env.CHAT_MODEL_PRIORITY = 'my-flash-next';
+    expect(loadModelCascadeConfig().priorityModel).toBe('my-flash-next');
+    process.env.CHAT_MODEL_PRIORITY = 'off';
+    const cfg = loadModelCascadeConfig();
+    expect(cfg.priorityModel).toBe('');
+    const list = resolveModelCandidates(
+      { tier: 'text', complexity: 'simple', score: 0, reasons: [] },
+      { ...cfg, textSimple: 'glm-4.5-flash' },
+      { zhipuAvailable: true },
+    );
+    expect(list.some((c) => c.model === 'my-flash-next')).toBe(false);
   });
 });
 
@@ -409,6 +502,7 @@ describe('模型分层：配置与凭据', () => {
   it('默认值覆盖三大路由（不写死型号，改默认值不应让测试变红）', () => {
     clearModelEnv();
     const cfg = loadModelCascadeConfig();
+    expect(cfg.priorityModel).toBe(DEFAULT_MODELS.priorityModel);
     expect(cfg.visionPrimary).toBe(DEFAULT_MODELS.visionPrimary);
     expect(cfg.textSimple).toBe(DEFAULT_MODELS.textSimple);
     expect(cfg.textComplex).toBe(DEFAULT_MODELS.textComplex);
@@ -554,5 +648,40 @@ describe('loadModelCascadeConfig overrides', () => {
     expect(cfg.textSimple).toBe('my-model');
     expect(cfg.fallback).toBe('my-model');
     expect(cfg.textComplex).toBe(DEFAULT_MODELS.textComplex);
+  });
+});
+
+describe('模型分层：路由思考文案', () => {
+  const complexity: Complexity = {
+    tier: 'vision',
+    complexity: 'simple',
+    score: 1,
+    reasons: ['含图片输入走视觉模型(+1)'],
+  };
+
+  it('首选模型排在链首时，思考流说明它不参与评分且 429 直接降级', () => {
+    const priority = 'Qwen/Qwen3.8-Flash-Next';
+    const cfg = { ...scoringOnlyConfig(), priorityModel: priority };
+    const candidates = resolveModelCandidates(complexity, cfg, {
+      zhipuAvailable: true,
+    });
+    const text = formatRoutingThought(complexity, candidates, cfg);
+
+    expect(candidates[0]).toEqual({ provider: 'modelscope', model: priority });
+    expect(text).toContain(`模型选择：${priority}`);
+    expect(text).toContain('不参与评分的首选模型');
+    expect(text).toContain('用尽/429 直接降级');
+    expect(text).toContain('，备用 ');
+  });
+
+  it('未启用首选模型时保持原评分档位文案', () => {
+    const cfg = scoringOnlyConfig();
+    const candidates = resolveModelCandidates(complexity, cfg, {
+      zhipuAvailable: true,
+    });
+    const text = formatRoutingThought(complexity, candidates, cfg);
+
+    expect(text).toContain(`模型选择：${cfg.visionPrimary}`);
+    expect(text).not.toContain('首选模型');
   });
 });

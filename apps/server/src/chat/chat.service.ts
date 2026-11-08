@@ -141,18 +141,22 @@ export class ChatService {
     this.attachmentService.setAsrRunner((wavPath) =>
       this.speechService.transcribeWav(wavPath),
     );
-    if (this.orchestrator.zhipuAvailable) {
-      const cfg = this.orchestrator.modelConfig;
-      console.log(
-        `🧠 [模型分层] GLM 免费层已启用，首选 ${cfg.textSimple} / ${cfg.visionPrimary}；` +
-          `复杂 ${cfg.textComplex} → ${cfg.textComplexFallback}；` +
-          `专家 ${cfg.textExpert}；兜底 ${cfg.fallback}`,
-      );
-    } else {
-      console.log(
-        '🧠 [模型分层] 未配置 GLM_API_KEY，全部请求走 qwen（未开启级联）',
-      );
-    }
+    const cfg = this.orchestrator.modelConfig;
+    console.log(
+      `🧠 [模型分层] 档位：视觉 ${cfg.visionPrimary} / 简单 ${cfg.textSimple} / ` +
+        `复杂 ${cfg.textComplex} → ${cfg.textComplexFallback} / ` +
+        `专家 ${cfg.textExpert} / 兜底 ${cfg.fallback}`,
+    );
+    console.log(
+      cfg.priorityModel
+        ? `🧠 [模型分层] 全局首选（不参与评分，插到所有档位链首）：${cfg.priorityModel}`
+        : '🧠 [模型分层] 未启用全局首选模型，按评分档位路由',
+    );
+    console.log(
+      this.orchestrator.zhipuAvailable
+        ? '🧠 [模型分层] GLM 免费层已启用'
+        : '🧠 [模型分层] 未配置 GLM_API_KEY，glm-* 候选自动剔除',
+    );
   }
 
   /**

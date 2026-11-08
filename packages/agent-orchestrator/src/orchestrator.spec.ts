@@ -66,7 +66,7 @@ describe('AgentOrchestrator.run', () => {
     expect(done?.fullReply).toBe('你好');
   });
 
-  it('采样参数只下发给智谱候选，qwen 与不传时保持服务端默认', async () => {
+  it('采样参数下发给所有候选，thinking 只给智谱；不传时保持服务端默认', async () => {
     const chunks = [{ choices: [{ delta: { content: 'ok' } }] }];
     const zhipu = fakeClient([chunks]);
     await collect(
@@ -80,6 +80,7 @@ describe('AgentOrchestrator.run', () => {
     expect(zhipu.create.mock.calls[0][0]).toMatchObject({
       temperature: 0.7,
       top_p: 0.8,
+      thinking: expect.any(Object),
     });
 
     const dash = fakeClient([[...chunks]]);
@@ -91,8 +92,11 @@ describe('AgentOrchestrator.run', () => {
         sampling: { temperature: 0.7, top_p: 0.8 },
       },
     );
-    expect(dash.create.mock.calls[0][0].temperature).toBeUndefined();
-    expect(dash.create.mock.calls[0][0].top_p).toBeUndefined();
+    expect(dash.create.mock.calls[0][0]).toMatchObject({
+      temperature: 0.7,
+      top_p: 0.8,
+    });
+    expect(dash.create.mock.calls[0][0].thinking).toBeUndefined();
 
     const plain = fakeClient([[...chunks]]);
     await collect(
@@ -105,7 +109,7 @@ describe('AgentOrchestrator.run', () => {
     expect(plain.create.mock.calls[0][0].temperature).toBeUndefined();
   });
 
-  it('宿主注入 max_tokens 时只下发给智谱候选', async () => {
+  it('宿主注入 max_tokens 时下发给所有候选', async () => {
     const chunks = [{ choices: [{ delta: { content: 'ok' } }] }];
     const sampling = { temperature: 0.85, top_p: 0.9, max_tokens: 200 };
 
@@ -129,7 +133,112 @@ describe('AgentOrchestrator.run', () => {
       new AgentOrchestrator(config({ getClient: () => dash.client })),
       { messages: [], candidates: [dashscope('qwen')], sampling },
     );
-    expect(dash.create.mock.calls[0][0].max_tokens).toBeUndefined();
+    expect(dash.create.mock.calls[0][0]).toMatchObject({ max_tokens: 200 });
+  });
+
+  it('首选模型次数用尽(429) 直接降级，不做退避重试', async () => {
+    const priority = 'Qwen/Qwen3.8-Flash-Next';
+    const dashCreate = vi.fn(async () => {
+      throw Object.assign(new Error('quota exhausted'), { status: 429 });
+    });
+    const dash = {
+      chat: { completions: { create: dashCreate } },
+    } as unknown as OpenAI;
+    const { client: zhipu } = fakeClient([
+      [{ choices: [{ delta: { content: '4.5 兜底' } }] }],
+    ]);
+    const orch = new AgentOrchestrator(
+      config({
+        getClient: (p) => (p === 'zhipu' ? zhipu : dash),
+        modelConfig: { ...loadModelCascadeConfig(), priorityModel: priority },
+        rateLimitRetries: 2, // 打开重试才能验证「首选不重试」
+        showRoutingThought: true,
+      }),
+    );
+
+    const events = await collect(orch, {
+      messages: [],
+      candidates: [
+        { provider: 'modelscope', model: priority },
+        { provider: 'zhipu', model: 'glm-4.5-flash' },
+      ],
+    });
+
+    expect(dashCreate).toHaveBeenCalledTimes(1);
+    expect(events.at(-1)?.fullReply).toBe('4.5 兜底');
+    expect(
+      events.some(
+        (e) =>
+          e.type === 'thought' &&
+          String(e.content).includes(`首选模型 ${priority} 暂时不可用`),
+      ),
+    ).toBe(true);
+  });
+
+  it('非首选候选失败时降级提示不误称「首选模型」', async () => {
+    const create = vi.fn(async () => {
+      throw Object.assign(new Error('model not found'), { status: 404 });
+    });
+    const failing = {
+      chat: { completions: { create } },
+    } as unknown as OpenAI;
+    const { client: ok } = fakeClient([
+      [{ choices: [{ delta: { content: '兜底成功' } }] }],
+    ]);
+    const orch = new AgentOrchestrator(
+      config({
+        getClient: (p) => (p === 'dashscope' ? failing : ok),
+        modelConfig: { ...loadModelCascadeConfig(), priorityModel: '' },
+        showRoutingThought: true,
+      }),
+    );
+
+    const events = await collect(orch, {
+      messages: [],
+      candidates: [
+        dashscope('qwen3.8-max'),
+        { provider: 'zhipu', model: 'glm-4.5-flash' },
+      ],
+    });
+
+    expect(events.at(-1)?.fullReply).toBe('兜底成功');
+    const thoughts = events
+      .filter((e) => e.type === 'thought')
+      .map((e) => String(e.content))
+      .join('\n');
+    expect(thoughts).toContain('模型 qwen3.8-max 暂时不可用');
+    expect(thoughts).not.toContain('首选模型');
+  });
+
+  it('非首选模型 429 仍按原逻辑退避重试', async () => {
+    let calls = 0;
+    const create = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw Object.assign(new Error('busy'), { status: 429 });
+      }
+      return (async function* () {
+        yield { choices: [{ delta: { content: '重试成功' } }] };
+      })();
+    });
+    const client = {
+      chat: { completions: { create } },
+    } as unknown as OpenAI;
+    const orch = new AgentOrchestrator(
+      config({
+        getClient: () => client,
+        modelConfig: { ...loadModelCascadeConfig(), priorityModel: '' },
+        rateLimitRetries: 1,
+      }),
+    );
+
+    const events = await collect(orch, {
+      messages: [],
+      candidates: [dashscope('qwen3.7-flash')],
+    });
+
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(events.at(-1)?.fullReply).toBe('重试成功');
   });
 
   it('工具调用：先 tool_call/tool_result，再跑下一轮出最终回答', async () => {

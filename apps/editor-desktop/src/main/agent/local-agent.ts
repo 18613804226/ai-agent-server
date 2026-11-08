@@ -334,7 +334,8 @@ export class LocalAgent {
     });
     const candidates = resolveModelCandidates(
       complexity,
-      orchestrator.modelConfig,
+      // 本地编辑器用设置里选的固定模型，不参与问答链路的首选模型调度
+      { ...orchestrator.modelConfig, priorityModel: '' },
       { zhipuAvailable: orchestrator.zhipuAvailable },
     );
 

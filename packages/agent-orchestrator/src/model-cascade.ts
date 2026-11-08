@@ -12,7 +12,7 @@
  * 4. 未配置 GLM key 时自动退化为单一 qwen 模型，行为与旧版完全一致。
  */
 
-export type ModelProvider = 'zhipu' | 'dashscope';
+export type ModelProvider = 'zhipu' | 'dashscope' | 'modelscope';
 
 export interface ModelCandidate {
   provider: ModelProvider;
@@ -30,6 +30,12 @@ export interface Complexity {
 }
 
 export interface ModelCascadeConfig {
+  /**
+   * 不参与复杂度评分、优先级最高的首选模型（有调用次数限制）。
+   * 所有档位都插到链首；纯文本挂了先回 textSimple 再走评分链路，
+   * vision 挂了直接回视觉模型。留空或 'off' 表示禁用，恢复纯评分路由。
+   */
+  priorityModel?: string;
   /** 含图片/视频时的首选（多模态） */
   visionPrimary: string;
   /** 纯文本-简单 首选 */
@@ -63,6 +69,8 @@ function envNumber(name: string, fallback: number): number {
  * 测试也引用这个常量，避免默认值一调测试就红。
  */
 export const DEFAULT_MODELS = {
+  // ModelScope Model-Id（命名空间/名称），走 MODELSCOPE_API_KEY 的独立端点
+  priorityModel: 'Qwen/Qwen3.8-Flash-Next',
   visionPrimary: 'qwen3.7-flash',
   textSimple: 'glm-4.5-flash',
   textComplex: 'qwen3.7-flash',
@@ -79,7 +87,15 @@ export function loadModelCascadeConfig(
 ): ModelCascadeConfig {
   const threshold =
     overrides.threshold ?? envNumber('CHAT_COMPLEXITY_THRESHOLD', 3);
+  const priorityRaw =
+    overrides.priorityModel ??
+    env('CHAT_MODEL_PRIORITY', DEFAULT_MODELS.priorityModel);
+  // 次数用尽时可以设 off 临时摘掉首选，恢复纯评分路由
+  const priorityModel = /^(off|none|disabled)$/i.test(priorityRaw.trim())
+    ? ''
+    : priorityRaw;
   return {
+    priorityModel,
     // ⚠️ GLM-4.6V-Flash（免费视觉款）实测指令遵循弱：会把图片问题
     //    胡编成不存在的工具调用（如 fetchImageContent），回答质量不可用，
     //    因此视觉与复杂文本默认都走 qwen3.7-flash（全模态，付费但稳定）。
@@ -376,16 +392,19 @@ export function isAttachmentRefusal(text: string): boolean {
 /**
  * 按模型名推导它属于哪个平台：
  * 智谱的模型都以 glm 开头（视觉系列 cogview、charglm 也归智谱），
- * 阿里云 DashScope 的都是 qwen 系列、text-embedding、paraformer 等。
+ * ModelScope 的 Model-Id 带命名空间斜杠（Qwen/Qwen3.8-Flash-Next），
+ * 其余归阿里云 DashScope（qwen 系列、text-embedding、paraformer 等）。
  *
  * 之前按「档位」硬编码 provider，结果把默认值改成 qwen3.7-flash 后，
  * 模型被发到智谱端点，直接 400 模型不存在（靠降级才兜住）。
  * 改成按模型名推导后，用户改任何 CHAT_MODEL_* 都不会再发错平台。
  */
 export function providerForModel(model: string): ModelProvider {
-  return /^(glm|chatglm|cogview|charglm)/i.test(model.trim())
-    ? 'zhipu'
-    : 'dashscope';
+  const name = model.trim();
+  if (/^(glm|chatglm|cogview|charglm)/i.test(name)) return 'zhipu';
+  // ModelScope 需要独立端点 + 独立 Token，发到 DashScope 会 404
+  if (name.includes('/')) return 'modelscope';
+  return 'dashscope';
 }
 
 /**
@@ -406,6 +425,14 @@ export function resolveModelCandidates(
     if (list.some((c) => c.provider === provider && c.model === model)) return;
     list.push({ provider, model });
   };
+
+  // 有次数限制的首选模型：不受评分影响，所有档位都插到链首。
+  // 纯文本档挂了先回免费层 4.5-Flash，再按评分走原来的三级链路；
+  // vision 档跳过纯文本 4.5-Flash，直接回视觉模型（首选本身支持图片）。
+  if (config.priorityModel) {
+    add(config.priorityModel);
+    if (complexity.tier !== 'vision') add(config.textSimple);
+  }
 
   if (complexity.tier === 'vision') {
     add(config.visionPrimary);
@@ -519,9 +546,17 @@ export function formatRoutingThought(
     .slice(1)
     .map((c) => c.model)
     .filter(Boolean);
+  // 首选模型不参与评分、直接插到链首。不显式说明的话，括号里的「复杂度评分 X/阈值」
+  // 容易被误读成「按评分选了首选模型」，所以把这条决策也写进思考流。
+  const isPriorityFirst =
+    !!config.priorityModel && candidates[0].model === config.priorityModel;
+  const priorityNote = isPriorityFirst
+    ? '；本轮优先走不参与评分的首选模型（用尽/429 直接降级）'
+    : '';
   return (
     `模型选择：${candidates[0].model}（${tierText}，复杂度评分 ` +
     `${complexity.score}/${config.threshold}）` +
+    priorityNote +
     (backups.length ? `，备用 ${backups.join('、')}。` : '，无备用。') +
     (complexity.reasons.length
       ? `判定依据：${complexity.reasons.join('、')}`

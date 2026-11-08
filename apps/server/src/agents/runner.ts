@@ -81,9 +81,12 @@ export class AgentRunner {
             model: input.modelOverride,
           },
         ]
-      : resolveModelCandidates(complexity, this.orchestrator.modelConfig, {
-          zhipuAvailable: this.orchestrator.zhipuAvailable,
-        });
+      : resolveModelCandidates(
+          complexity,
+          // 编辑器用固定模型，不参与问答链路「有次数限制的首选模型」调度
+          { ...this.orchestrator.modelConfig, priorityModel: '' },
+          { zhipuAvailable: this.orchestrator.zhipuAvailable },
+        );
 
     // 编辑器是固定模型（用户选定），只提示当前使用的模型与循环上限；
     // 其他 agent（如问答）保留完整的模型选择路由思考。

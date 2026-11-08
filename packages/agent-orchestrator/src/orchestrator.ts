@@ -267,17 +267,14 @@ export class AgentOrchestrator {
       const maxTries = this.config.rateLimitRetries + 1;
       for (let attempt = 1; attempt <= maxTries; attempt++) {
         try {
-          // 智谱：默认关思考链（首字从 50s+ 降到秒级）；问答链路可再叠加采样参数。
-          // qwen 不适用这两个参数，降级到 qwen 时保持服务端默认。
-          const body =
-            candidate.provider === 'zhipu'
-              ? {
-                  ...payload,
-                  model: candidate.model,
-                  ...zhipuThinkingParam(),
-                  ...sampling,
-                }
-              : { ...payload, model: candidate.model };
+          // thinking 是智谱私有参数，只给智谱；temperature/top_p/max_tokens 各平台通用，
+          // 首选换成 qwen 后四档采样（含情绪档）仍要生效，所以对所有候选都下发。
+          const body = {
+            ...payload,
+            model: candidate.model,
+            ...(candidate.provider === 'zhipu' ? zhipuThinkingParam() : {}),
+            ...sampling,
+          };
           const stream = await withTimeout(
             client.chat.completions.create(body as any, {
               signal: controller.signal,
@@ -298,7 +295,12 @@ export class AgentOrchestrator {
           const status = errorStatus(err);
           const serverMsg = errorMessage(err);
           const rateLimited = isRateLimitError(err);
-          const canRetry = rateLimited && attempt < maxTries;
+          // 首选模型有次数限制：429 基本等于配额用尽，原地重试没意义，
+          // 直接切下一个候选，省掉退避等待（其余候选仍按原逻辑重试）。
+          const isPriorityModel =
+            !!this.config.modelConfig.priorityModel &&
+            candidate.model === this.config.modelConfig.priorityModel;
+          const canRetry = rateLimited && attempt < maxTries && !isPriorityModel;
 
           console.warn(
             `🧠 [模型分层] ${candidate.provider}:${candidate.model} 建流失败，` +
@@ -314,8 +316,10 @@ export class AgentOrchestrator {
             continue;
           }
 
+          // 只有真正排在链首的首选模型才这么称呼，普通候选失败不要误报
+          const label = isPriorityModel ? '首选模型' : '模型';
           onThought?.(
-            `首选模型 ${candidate.model} 暂时不可用，正在切换备用模型…`,
+            `${label} ${candidate.model} 暂时不可用，正在切换备用模型…`,
           );
           // 401/403/402 这类配置错误不降级，避免白试所有候选
           if (!isDegradableError(err)) {

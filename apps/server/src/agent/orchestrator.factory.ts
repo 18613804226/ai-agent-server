@@ -22,7 +22,10 @@ function envInt(name: string, fallback: number): number {
 export function createOrchestrator(clients: ModelClients): AgentOrchestrator {
   return new AgentOrchestrator({
     getClient: (provider) => clients.getClient(provider),
-    modelConfig: loadModelCascadeConfig(),
+    // 没配 ModelScope Token 时摘掉首选模型，避免展示一条根本连不上的候选
+    modelConfig: loadModelCascadeConfig(
+      clients.modelscope ? {} : { priorityModel: '' },
+    ),
     showRoutingThought: process.env.CHAT_SHOW_ROUTING_THOUGHT !== 'false',
     rateLimitRetries: Math.max(
       0,
