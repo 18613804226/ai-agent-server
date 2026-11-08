@@ -221,7 +221,7 @@ export class AgentOrchestrator {
     signal?: AbortSignal,
     onThought?: (text: string) => void,
     /** 由宿主按场景注入，只对智谱候选生效 */
-    sampling?: { temperature?: number; top_p?: number },
+    sampling?: { temperature?: number; top_p?: number; max_tokens?: number },
   ): Promise<{
     stream: any;
     candidate: ModelCandidate;

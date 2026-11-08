@@ -34,7 +34,7 @@ export const weatherTool: RegisteredTool = {
     function: {
       name: 'fetchWeatherInfo',
       description:
-        '当用户明确询问某个城市或地区的实时天气、气温情况时调用。只在问天气时用。',
+        '仅当用户明确询问某个城市或地区的实时天气、气温时调用。不用于：情绪倾诉、闲聊、日期/农历查询、开放式提问；拿不准时不调用。',
       parameters: {
         type: 'object',
         properties: {
@@ -58,7 +58,7 @@ export const calculatorTool: RegisteredTool = {
     function: {
       name: 'calculator',
       description:
-        '数学计算器，用于加减乘除、百分比、折扣、单位换算等纯数值计算。只要涉及数值计算就必须使用，禁止心算。注意：日期差/剩余天数不是数值表达式，本工具算不了，请直接使用 prompt 或 festival_info 已给出的天数。',
+        '仅用于加减乘除、百分比、折扣、单位换算等纯数值计算。只要涉及数值计算就必须使用，禁止心算。不用于：情绪倾诉、闲聊、观点建议、开放式提问。注意：日期差/剩余天数不是数值表达式，本工具算不了，请直接使用 prompt 或 festival_info 已给出的天数。',
       parameters: {
         type: 'object',
         properties: {
@@ -82,7 +82,7 @@ export const webSearchTool: RegisteredTool = {
     function: {
       name: 'web_search',
       description:
-        '搜索实时网页信息（新闻、热搜、股价、汇率等）。当用户的问题依赖最新事实时使用。',
+        '仅用于用户明确要求查询实时/外部事实（新闻、热搜、股价、汇率、公告等），且该事实无法凭常识回答时调用。不用于：情绪倾诉、闲聊、观点建议、安慰、开放式提问；拿不准时不调用。反例：用户说「今天面试不太顺」→ 不调用本工具。',
       parameters: {
         type: 'object',
         properties: {

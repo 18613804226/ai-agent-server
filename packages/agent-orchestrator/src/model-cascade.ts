@@ -130,37 +130,55 @@ export function zhipuThinkingParam(): Record<string, unknown> {
   };
 }
 
-/** 问答档位：闲聊要活泼，基于资料/附件的回答要严谨，实时信息居中 */
-export type ChatSamplingProfile = 'casual' | 'knowledge' | 'live';
+/** 问答档位：闲聊要活泼，基于资料/附件的回答要严谨，实时信息居中，倾诉要松弛 */
+export type ChatSamplingProfile =
+  | 'casual'
+  | 'knowledge'
+  | 'live'
+  | 'emotional';
 
 const CHAT_SAMPLING_PRESETS: Record<
   ChatSamplingProfile,
-  { temperature: number; top_p: number }
+  { temperature: number; top_p: number; canLimitOutput?: boolean }
 > = {
   casual: { temperature: 0.7, top_p: 0.8 },
   knowledge: { temperature: 0.4, top_p: 0.8 },
   live: { temperature: 0.5, top_p: 0.8 },
+  emotional: { temperature: 0.85, top_p: 0.9, canLimitOutput: true },
 };
 
 /**
  * 按任务分档的采样参数：只由问答链路传入，代码 Agent 链路保持服务端默认。
  *
- * top_p 统一 0.8 用于收敛候选词，避免温度升高后发散、乱加空行和冗余文字。
+ * top_p 用于收敛候选词，避免温度升高后发散；emotional 档放宽到 0.9 让措辞更自然。
  * `CHAT_GLM_TEMPERATURE` / `CHAT_GLM_TOP_P` 可覆盖所有档位；越界或非法值
  * 回落到当前档位的预设，避免脏配置直接发给上游。
+ *
+ * 情绪档的 `max_tokens` 默认不下发：Demo 链路各分支都保留工具调用展示，
+ * 限长可能截断 tool_calls 让前端看不到完整调用。需要演示短回复时再显式设置
+ * `CHAT_EMOTIONAL_MAX_TOKENS=200`；其它档位永不下发，不打穿资料题的长回答。
  */
 export function zhipuChatSamplingParam(
   profile: ChatSamplingProfile = 'casual',
-): { temperature: number; top_p: number } {
+): { temperature: number; top_p: number; max_tokens?: number } {
   const preset = CHAT_SAMPLING_PRESETS[profile] ?? CHAT_SAMPLING_PRESETS.casual;
   const sampling = (name: string, fallback: number): number => {
     const n = envNumber(name, fallback);
     return n > 0 && n <= 1 ? n : fallback;
   };
-  return {
+  const params: {
+    temperature: number;
+    top_p: number;
+    max_tokens?: number;
+  } = {
     temperature: sampling('CHAT_GLM_TEMPERATURE', preset.temperature),
     top_p: sampling('CHAT_GLM_TOP_P', preset.top_p),
   };
+  if (preset.canLimitOutput) {
+    const limit = envNumber('CHAT_EMOTIONAL_MAX_TOKENS', 0);
+    if (Number.isInteger(limit) && limit > 0) params.max_tokens = limit;
+  }
+  return params;
 }
 
 /** 智谱客户端的 key / baseUrl：单独一套，缺 key 时返回 null（自动退化为单模型） */

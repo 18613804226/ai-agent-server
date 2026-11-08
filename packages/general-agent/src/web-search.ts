@@ -16,18 +16,49 @@ interface TavilySearchResponse {
   }>;
 }
 
+/** 情绪倾诉 / 收尾：这类句子不联网、不查资料，交给普通对话处理 */
+const EMOTIONAL_TALK =
+  /^(算了|不聊|不想|罢了|哎|唉|嗯|哦|好吧|行吧)|不聊了|不说了|心累|好累|好烦|难受|难过|沮丧|崩溃|emo|不顺|不太顺|没过|凉了|烦死|累死|压力大|心情|情绪|吐槽|安慰/i;
+
+/** 明确的检索 / 办理意图：情绪句里夹了任务时不短路，只处理任务部分 */
+const EXPLICIT_TASK =
+  /帮我|请|麻烦|查一下|查下|查查|查询|搜索|搜一下|搜搜|top\s*\d+/i;
+
+/** 求助式发问没有可查证的外部对象，即使带了「查一下」也不该联网 */
+const HELPLESS_TALK = /怎么办|咋办|如何是好|不知道该|不知道怎么/i;
+
+/**
+ * 本轮是否为纯倾诉 / 求助（不夹带明确任务）。
+ * 供主链路复用：选情绪采样档、以及后续关闭工具轮次都用它，避免判意漂移。
+ */
+export const isEmotionalTurn = (query: string): boolean => {
+  const trimmed = query.trim();
+  if (HELPLESS_TALK.test(trimmed)) return true;
+  return EMOTIONAL_TALK.test(trimmed) && !EXPLICIT_TASK.test(trimmed);
+};
+
+/** 强检索信号：出现即按实时查询处理 */
+const STRONG_LIVE_SIGNAL =
+  /实时|热搜|热榜|热点|热度|新闻|榜单|排行榜|微博|股价|汇率|搜索|搜一下|搜搜|帮我搜|查一下|查查|查询|帮我查|top\s*\d+/i;
+
+/**
+ * 「今天 / 最近 / 现在」只是时间词，本身不构成检索意图：
+ * 「今天面试不太顺」「最近怎么样」不该触发联网。只有同时出现查询动作或
+ * 可查证的时限状态时才算实时查询（「现在几点」「最近有什么进展」）。
+ * 实时对象词（新闻/股价/汇率等）已在强信号里，这里不重复。
+ */
+const WEAK_TIME = /今天|今日|现在|当前|最近|近期|最新/i;
+const QUERY_SIGNAL =
+  /查|搜|几点|什么时候|多少|有没有|开了没|开没|截止|进展|消息|行情|价格|通知|公告|名单|成绩|结果/i;
+
 export const isLiveInfoQuery = (query: string): boolean => {
   const trimmed = query.trim();
   // 天气查询由 fetchWeatherInfo 处理，不走 Tavily
   if (/天气/.test(trimmed)) return false;
-  // 显式关键词命中
-  if (
-    /实时|现在|当前|今天|今日|最新|近期|最近|热搜|热榜|热点|热度|新闻|榜单|排行榜|微博|股价|汇率|搜索|搜一下|搜搜|帮我搜|查一下|查查|查询|帮我查|top\s*\d+/i.test(
-      trimmed,
-    )
-  ) {
-    return true;
-  }
+  // 倾诉短路放在关键词之前：否则「今天面试不太顺」会被「今天」抢去联网
+  if (isEmotionalTurn(trimmed)) return false;
+  if (STRONG_LIVE_SIGNAL.test(trimmed)) return true;
+  if (WEAK_TIME.test(trimmed) && QUERY_SIGNAL.test(trimmed)) return true;
   // 短查询兜底：默认不搜，只有「像实体/术语」的短输入才按实时查询处理。
   // 正向信号：含数字/字母/书名号（型号、榜单、作品名），或 2-6 个汉字。
   // 反向过滤：命中问候/确认/请求句式、叠词拟声，或含句法成分（语气词、代词、疑问词、能愿动词等），

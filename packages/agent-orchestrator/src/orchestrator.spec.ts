@@ -105,6 +105,33 @@ describe('AgentOrchestrator.run', () => {
     expect(plain.create.mock.calls[0][0].temperature).toBeUndefined();
   });
 
+  it('宿主注入 max_tokens 时只下发给智谱候选', async () => {
+    const chunks = [{ choices: [{ delta: { content: 'ok' } }] }];
+    const sampling = { temperature: 0.85, top_p: 0.9, max_tokens: 200 };
+
+    const zhipu = fakeClient([chunks]);
+    await collect(
+      new AgentOrchestrator(config({ getClient: () => zhipu.client })),
+      {
+        messages: [],
+        candidates: [{ provider: 'zhipu', model: 'glm-4.5-flash' }],
+        sampling,
+      },
+    );
+    expect(zhipu.create.mock.calls[0][0]).toMatchObject({
+      temperature: 0.85,
+      top_p: 0.9,
+      max_tokens: 200,
+    });
+
+    const dash = fakeClient([[...chunks]]);
+    await collect(
+      new AgentOrchestrator(config({ getClient: () => dash.client })),
+      { messages: [], candidates: [dashscope('qwen')], sampling },
+    );
+    expect(dash.create.mock.calls[0][0].max_tokens).toBeUndefined();
+  });
+
   it('工具调用：先 tool_call/tool_result，再跑下一轮出最终回答', async () => {
     const toolDelta = {
       choices: [

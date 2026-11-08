@@ -22,6 +22,7 @@ import {
   buildFestivalContext,
   createChatTools,
   formatWebSearchContext,
+  isEmotionalTurn,
   isLiveInfoQuery,
   searchTavily,
 } from '@repo/general-agent';
@@ -681,6 +682,9 @@ export class ChatService {
         !hasImages;
       // ✅ 本轮是否基于给定资料作答：决定采样用「严谨档」还是「活泼档」
       const groundedTurn = !!context || (usedAttachments?.length ?? 0) > 0;
+      // ✅ 纯倾诉轮次额外走「松弛」的情绪档：复用 casualTurn 的排除条件，
+      //    资料/附件/联网/图片轮次一律不进这一档
+      const emotionalTurn = casualTurn && isEmotionalTurn(userQuery);
 
       // ✅ 历史附件要点按裁剪前的完整历史算，附件原文到期后仍能承接追问
       const attachmentDigest = buildAttachmentDigest(
@@ -965,8 +969,15 @@ export class ChatService {
           includeTools:
             !liveInfoQuery || needsToolsForLiveQuery || liveSearchEmpty,
           // ✅ 按任务分档采样：只作用于免费层 GLM-4.5-Flash，代码 Agent 链路不传
+          //    情绪档优先级最高，且只在 casualTurn 允许的纯闲聊轮次生效
           sampling: zhipuChatSamplingParam(
-            liveInfoQuery ? 'live' : groundedTurn ? 'knowledge' : 'casual',
+            emotionalTurn
+              ? 'emotional'
+              : liveInfoQuery
+                ? 'live'
+                : groundedTurn
+                  ? 'knowledge'
+                  : 'casual',
           ),
           signal,
         },

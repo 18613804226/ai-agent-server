@@ -2,6 +2,7 @@ import axios, { AxiosHeaders, type AxiosResponse } from 'axios';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   formatWebSearchContext,
+  isEmotionalTurn,
   isLiveInfoQuery,
   searchTavily,
   type WebSearchResult,
@@ -25,6 +26,11 @@ describe('isLiveInfoQuery', () => {
     '特朗普',
     'iPhone 16',
     '《三体》',
+    // 验收：明确检索任务、情绪句里夹任务、时间词 + 查询动作
+    '帮我查下 XX 公司校招开了没',
+    '面试不顺，帮我查下这家公司',
+    '现在几点',
+    '今天有啥新闻',
   ])('识别实时查询：%s', (query) => {
     expect(isLiveInfoQuery(query)).toBe(true);
   });
@@ -48,8 +54,37 @@ describe('isLiveInfoQuery', () => {
     '嘻嘻哈哈',
     '笑嘻嘻',
     '好不好',
+    // 验收：倾诉、收尾、叙述句，以及「今天/最近/现在」不再单独当成检索信号
+    '今天面试不太顺',
+    '算了不聊这个了',
+    '今天看了个电影',
+    '最近怎么样',
+    '最近心情很差',
+    '今天好累',
+    '现在很难受',
+    '难过',
+    '查一下我该怎么办',
   ])('不将一般查询识别为实时查询：%s', (query) => {
     expect(isLiveInfoQuery(query)).toBe(false);
+  });
+});
+
+describe('isEmotionalTurn', () => {
+  it.each([
+    '今天面试不太顺',
+    '算了不聊这个了',
+    '最近心情很差',
+    '查一下我该怎么办',
+  ])('识别纯倾诉/求助：%s', (query) => {
+    expect(isEmotionalTurn(query)).toBe(true);
+  });
+
+  it.each([
+    '帮我查下 XX 公司校招开了没',
+    '面试不顺，帮我查下这家公司',
+    '今天的新闻',
+  ])('夹带明确任务或纯事实查询时不算倾诉：%s', (query) => {
+    expect(isEmotionalTurn(query)).toBe(false);
   });
 });
 

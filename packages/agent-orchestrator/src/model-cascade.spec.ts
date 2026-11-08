@@ -470,9 +470,11 @@ describe('模型分层：配置与凭据', () => {
   it('问答档采样：按任务分档，可用环境变量覆盖，非法值回落档位预设', () => {
     const prevT = process.env.CHAT_GLM_TEMPERATURE;
     const prevP = process.env.CHAT_GLM_TOP_P;
+    const prevLimit = process.env.CHAT_EMOTIONAL_MAX_TOKENS;
     try {
       delete process.env.CHAT_GLM_TEMPERATURE;
       delete process.env.CHAT_GLM_TOP_P;
+      delete process.env.CHAT_EMOTIONAL_MAX_TOKENS;
       expect(zhipuChatSamplingParam()).toEqual({
         temperature: 0.7,
         top_p: 0.8,
@@ -485,6 +487,14 @@ describe('模型分层：配置与凭据', () => {
         temperature: 0.5,
         top_p: 0.8,
       });
+      // 默认不限长：各分支的工具调用展示不能被 max_tokens 截断
+      expect(zhipuChatSamplingParam('emotional')).toEqual({
+        temperature: 0.85,
+        top_p: 0.9,
+      });
+      expect(zhipuChatSamplingParam('emotional')).not.toHaveProperty(
+        'max_tokens',
+      );
       process.env.CHAT_GLM_TEMPERATURE = '0.9';
       process.env.CHAT_GLM_TOP_P = '0.6';
       expect(zhipuChatSamplingParam('knowledge')).toEqual({
@@ -502,6 +512,35 @@ describe('模型分层：配置与凭据', () => {
       else process.env.CHAT_GLM_TEMPERATURE = prevT;
       if (prevP === undefined) delete process.env.CHAT_GLM_TOP_P;
       else process.env.CHAT_GLM_TOP_P = prevP;
+      if (prevLimit === undefined) delete process.env.CHAT_EMOTIONAL_MAX_TOKENS;
+      else process.env.CHAT_EMOTIONAL_MAX_TOKENS = prevLimit;
+    }
+  });
+
+  it('情绪档限长默认关闭：显式配置后才下发 max_tokens', () => {
+    const prev = process.env.CHAT_EMOTIONAL_MAX_TOKENS;
+    try {
+      delete process.env.CHAT_EMOTIONAL_MAX_TOKENS;
+      expect(zhipuChatSamplingParam('emotional')).not.toHaveProperty(
+        'max_tokens',
+      );
+      process.env.CHAT_EMOTIONAL_MAX_TOKENS = '200';
+      expect(zhipuChatSamplingParam('emotional').max_tokens).toBe(200);
+      // 其它档位永不下发，避免打穿资料/附件题的长回答
+      expect(zhipuChatSamplingParam('knowledge')).not.toHaveProperty(
+        'max_tokens',
+      );
+      process.env.CHAT_EMOTIONAL_MAX_TOKENS = 'abc';
+      expect(zhipuChatSamplingParam('emotional')).not.toHaveProperty(
+        'max_tokens',
+      );
+      process.env.CHAT_EMOTIONAL_MAX_TOKENS = '0';
+      expect(zhipuChatSamplingParam('emotional')).not.toHaveProperty(
+        'max_tokens',
+      );
+    } finally {
+      if (prev === undefined) delete process.env.CHAT_EMOTIONAL_MAX_TOKENS;
+      else process.env.CHAT_EMOTIONAL_MAX_TOKENS = prev;
     }
   });
 });

@@ -265,7 +265,11 @@ export interface AgentInput {
    * 采样参数覆盖，仅下发给智谱候选（qwen 与代码 Agent 链路不受影响）。
    * 不传则用模型服务端默认值。
    */
-  sampling?: { temperature?: number; top_p?: number };
+  sampling?: {
+    temperature?: number;
+    top_p?: number;
+    max_tokens?: number;
+  };
   /** 客户端中断信号 */
   signal?: AbortSignal;
 }
