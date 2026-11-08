@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # 基于镜像：用官方名，加速交互（ECS 的 Docker 构建进程 registry-mirrors 代理）
 # Node 20 已于 2026-04 结束维护（不再有安全更新）→ 用当前 LTS 24。
 # 依赖都已声明支持 24：@prisma/client 7.10（^20.19 || ^22.12 || >=24.0）、
@@ -25,12 +26,19 @@ RUN pnpm config set registry https://registry.npmmirror.com \
     && pnpm config set fetch-timeout 60000 \
     && pnpm config set fetch-retries 5
 
-# 2. 复制 workspace 清单与所有包/应用的 package.json，先装依赖（利用层缓存）
-#    ⚠️ apps/editor-desktop 也在 pnpm-workspace 里，必须把它的 package.json 一起复制，
-#       否则 --frozen-lockfile 会因「workspace 与锁文件不一致」直接失败。
+# 2. 复制 workspace 清单与「所有」包/应用的 package.json，先装依赖（利用层缓存）
+#    ⚠️ 只复制 package.json，绝不复制源码：以前这里 COPY packages/ 会把全部 .ts 带进来，
+#       改一行业务代码就会让下面 pnpm install 的层缓存失效，等于每次全量重装依赖。
+#       源码统一放到第 4 步再复制。
+#    ⚠️ pnpm-workspace.yaml 是 apps/* + packages/*，每个 workspace 包的 package.json
+#       都必须列全（含 editor-desktop、agent-types），否则 --frozen-lockfile
+#       会因「workspace 与锁文件不一致」直接失败。
 #       但只装 server 的依赖子图（--filter @repo/server...），不会拉 electron/react。
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
-COPY packages/ ./packages/
+COPY packages/agent-orchestrator/package.json ./packages/agent-orchestrator/package.json
+COPY packages/agent-types/package.json ./packages/agent-types/package.json
+COPY packages/editor-agent/package.json ./packages/editor-agent/package.json
+COPY packages/general-agent/package.json ./packages/general-agent/package.json
 COPY apps/server/package.json ./apps/server/package.json
 COPY apps/editor-desktop/package.json ./apps/editor-desktop/package.json
 
@@ -38,10 +46,19 @@ ENV FFMPEG_BINARIES_URL=https://registry.npmmirror.com/-/binary/ffmpeg-static
 
 # 3. 只安装 @repo/server 及其依赖（orchestrator/agent-types），含 devDependencies
 #    （Prisma CLI、typescript 等编译期需要）
-RUN DATABASE_URL="$BUILD_DATABASE_URL" pnpm install --frozen-lockfile --filter @repo/server...
+#    --mount=type=cache 把 pnpm store 挂成构建期缓存（不进镜像层），
+#    即使这一层真要重跑也不必重新下载包。
+#    ⚠️ 若 ECS 的 Docker 太老、拉不到 docker/dockerfile:1 前端导致 --mount 报错，
+#       删掉首行 # syntax 与两处 --mount=... / --store-dir 即可；第 2 步的分层仍有效。
+RUN --mount=type=cache,target=/pnpm/store \
+    DATABASE_URL="$BUILD_DATABASE_URL" \
+    pnpm install --frozen-lockfile --filter @repo/server... --store-dir /pnpm/store
 
-# 4. 复制 server 源码（packages 已在第 2 步复制）
+# 4. 复制服务端与 workspace 包源码（必须在装依赖之后，依赖层才不会被源码改动打穿）
+#    分两层：改 packages 不会让 apps/server 这层重新传输，反之亦然。
+#    .dockerignore 已排除 **/node_modules 与 **/dist，不会覆盖刚装好的依赖。
 COPY apps/server/ ./apps/server/
+COPY packages/ ./packages/
 
 # 5. 生成 Prisma 客户端（在 server 包内执行，读 apps/server/prisma/schema.prisma）
 RUN DATABASE_URL="$BUILD_DATABASE_URL" pnpm --filter @repo/server exec prisma generate
@@ -70,7 +87,9 @@ RUN mkdir -p /opt/bin-assets \
 #    ⚠️ 不能用 `pnpm prune --prod`：在 `--filter` 安装后它会把生产依赖也误删（已实测）。
 #    CI=true 让 pnpm 非交互地重建 modules，否则会卡在「是否清空 node_modules」的确认提示。
 ENV CI=true
-RUN DATABASE_URL="$BUILD_DATABASE_URL" pnpm install --prod --frozen-lockfile --filter @repo/server... --ignore-scripts
+RUN --mount=type=cache,target=/pnpm/store \
+    DATABASE_URL="$BUILD_DATABASE_URL" \
+    pnpm install --prod --frozen-lockfile --filter @repo/server... --ignore-scripts --store-dir /pnpm/store
 
 # 7.1 prod 安装会重建 @prisma/client，之前生成的 client 会丢，必须再生成一次。
 #     （prisma CLI 是 @repo/server 的运行时依赖，prod 安装后依然在 apps/server/node_modules/prisma，
