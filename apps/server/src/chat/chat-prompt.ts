@@ -328,13 +328,15 @@ ${runtime}`;
 }
 
 /**
- * 连续换行（3 个及以上，含只夹空格/制表符的伪空行）压成两个：
+ * 连续换行（3 个及以上，含只夹空白字符的伪空行）压成两个：
  * 保留段落间的一个空行（窄屏分条目靠它），只收大片留白。
+ * [^\S\n] = 除换行外的所有空白（含全角空格 U+3000 / NBSP）——
+ * 小模型爱用全角空格造「伪空行」，只认半角空格会整段漏过去。
  */
 function collapseBlankLines(text: string): string {
   return text
     .replace(/\r\n?/g, '\n')
-    .replace(/(?:\n[ \t]*){3,}/g, '\n\n');
+    .replace(/(?:\n[^\S\n]*){3,}/g, '\n\n');
 }
 
 /**
@@ -353,7 +355,8 @@ function stripInlineUrls(text: string): string {
     .replace(/(?<!!)\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1')
     .replace(APP_RAW_URL, '')
     .replace(/\[\s*\]/g, '')
-    .replace(/[ \t]+\n/g, '\n')
+    // 行尾空白（含全角空格）一并收掉：伪空行先变真空行，collapseBlankLines 才接得住
+    .replace(/[^\S\n]+\n/g, '\n')
     .replace(/[ \t]{2,}/g, ' ');
 }
 

@@ -369,6 +369,20 @@ describe('APP 端排版兜底清洗', () => {
     expect(formatAppReply('a\r\n\r\nb')).toBe('a\n\nb');
   });
 
+  it('全角空格 / NBSP 造的伪空行也算空行，大片留白收成一个空行', () => {
+    // 模型常见变体：伪空行由全角空格（U+3000）或 NBSP 组成，肉眼看不见字符
+    expect(formatAppReply('第一句\n\n　\n\n第二句')).toBe('第一句\n\n第二句');
+    expect(formatAppReply('第一句\n\u00a0\n\u00a0\n\u00a0\n第二句')).toBe(
+      '第一句\n\n第二句',
+    );
+    // 行尾全角空格先收掉，伪空行才能被识别为真空行
+    expect(formatAppReply('第一句　\n　\n　\n第二句')).toBe(
+      '第一句\n\n第二句',
+    );
+    // 单个伪空行标准化成真空行（视觉不变，都是段间一个空行）
+    expect(formatAppReply('第一句\n　\n第二句')).toBe('第一句\n\n第二句');
+  });
+
   it('单个合法换行保留', () => {
     expect(formatAppReply('第一句\n第二句')).toBe('第一句\n第二句');
   });
