@@ -140,6 +140,8 @@ export class SessionService {
         ...message,
         sources: Array.isArray(message.sources)
           ? message.sources.map((source: any) => {
+              // ✅ 联网来源（kind: 'web'）没有 fileId，不能套用知识库文件的启用/删除状态
+              if (typeof source?.fileId !== 'string') return source;
               const currentFile = sourceFilesById.get(source?.fileId);
               return {
                 ...source,

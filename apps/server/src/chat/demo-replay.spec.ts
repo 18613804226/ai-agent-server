@@ -230,6 +230,45 @@ describe('离线回放：ChatService 集成', () => {
   });
 });
 
+describe('联网检索失败自动降级（P0）', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('联网 API 失败不拖垮整轮：推提示帧、照常请求模型、不触发离线回放', async () => {
+    // 让 searchWeb 必然失败；同时关掉回放，避免把「降级」误判成「回放兜底」
+    vi.stubEnv('WEB_SEARCH_PROVIDER', 'tavily');
+    vi.stubEnv('TAVILY_API_KEY', '');
+    process.env.CHAT_DEMO_REPLAY = 'off';
+    const create = vi.fn(async () => streamOf('暂未查到，我如实说明。'));
+    const { service } = mkService(create);
+    const events: Array<{ type: string; payload: any }> = [];
+
+    const result = await service.sendMessageStream(
+      'sess-1',
+      '今天的新闻',
+      (type, payload) => events.push({ type, payload }),
+    );
+
+    expect(create).toHaveBeenCalled();
+    expect(result?.model).not.toBe('demo-replay');
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    expect(
+      events.some(
+        (e) =>
+          e.type === 'thought' &&
+          String(e.payload).includes('联网检索暂不可用'),
+      ),
+    ).toBe(true);
+    expect(
+      events
+        .filter((e) => e.type === 'content')
+        .map((e) => e.payload)
+        .join(''),
+    ).toContain('暂未查到');
+  });
+});
+
 describe('APP 端模型路由决策展示', () => {
   it('platform=ios 时同样推「模型选择：…」给前端思考流', async () => {
     const create = vi.fn(async () => streamOf('你好'));

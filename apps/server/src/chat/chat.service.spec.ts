@@ -116,6 +116,59 @@ describe('ChatService session source metadata', () => {
     });
   });
 
+  it('历史消息里的 images 原样返回（图片回显的服务端链路不能被清洗掉）', async () => {
+    const images = [
+      'http://host/uploads/img-1.png',
+      'http://host/uploads/img-2.png',
+    ];
+    const prisma = {
+      chatSession: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'session-1',
+          messages: [
+            {
+              id: 'message-1',
+              role: 'user',
+              content: '看图',
+              images,
+              sources: [],
+            },
+          ],
+        }),
+      },
+      knowledgeFile: { findMany: vi.fn().mockResolvedValue([]) },
+    };
+    const service = new SessionService(prisma as never);
+
+    const result = await service.getSessionDetail('session-1');
+
+    expect(result?.messages[0].images).toEqual(images);
+  });
+
+  it('联网来源（无 fileId）不套用知识库文件的启用/删除状态', async () => {
+    const webSource = {
+      kind: 'web',
+      index: 1,
+      title: '新浪财经',
+      url: 'https://a.com/x',
+    };
+    const prisma = {
+      chatSession: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'session-1',
+          messages: [{ id: 'message-1', sources: [webSource] }],
+        }),
+      },
+      knowledgeFile: { findMany: vi.fn().mockResolvedValue([]) },
+    };
+    const service = new SessionService(prisma as never);
+
+    const result = await service.getSessionDetail('session-1');
+
+    expect(result?.messages[0].sources).toEqual([webSource]);
+    expect(prisma.knowledgeFile.findMany).not.toHaveBeenCalled();
+  });
+
   it('returns null without querying source files when the session does not exist', async () => {
     const prisma = {
       chatSession: { findUnique: vi.fn().mockResolvedValue(null) },

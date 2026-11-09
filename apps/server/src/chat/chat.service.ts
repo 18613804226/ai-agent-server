@@ -25,7 +25,7 @@ import {
   formatWebSearchContext,
   isEmotionalTurn,
   isLiveInfoQuery,
-  searchTavily,
+  searchWeb,
 } from '@repo/general-agent';
 import {
   ATTACHMENT_TTL_MS,
@@ -459,10 +459,25 @@ export class ChatService {
             take: 30,
           }),
           liveInfoQuery
-            ? searchTavily(userQuery, signal).then((r) => {
-                onChunk('thought', `🔎 已联网检索：${r.length} 条结果。`);
-                return r;
-              })
+            ? searchWeb(userQuery, signal)
+                .then((r) => {
+                  onChunk('thought', `🔎 已联网检索：${r.length} 条结果。`);
+                  return r;
+                })
+                // ✅ P0 降级：联网 API 超时/限流/欠费不该拖垮整轮对话。
+                //    以前这个 Promise 在 Promise.all 里 reject，会直接跳到 demo-replay
+                //    兜底（用户问实时信息却收到一段预录答案）或推一帧 error 就结束。
+                //    现在返回空数组，交给下面已有的 liveSearchEmpty 分支照常走模型，
+                //    由模型如实说明无法查证，不再编造来源。
+                .catch(() => {
+                  if (!aborted()) {
+                    onChunk(
+                      'thought',
+                      '⚠️ 联网检索暂不可用，以下回答未包含实时信息。',
+                    );
+                  }
+                  return [];
+                })
             : Promise.resolve([]),
           // ✅ 读该设备的用户画像（只读；失败就当没有，不影响主链路）
           deviceId
@@ -558,7 +573,22 @@ export class ChatService {
       const relevantAndPassingDocs = (relevantDocs as any[]).filter(
         (doc: any) => doc.similarity >= SIMILARITY_THRESHOLD,
       );
-      const replySources = [
+      // ✅ 联网结果在模型出第一个字之前就在服务端手里：把 URL 结构化下发，
+      //    不再依赖模型把链接写进正文（APP 窄屏上会被折成好几行，且不可点）。
+      //    kind 用来和知识库来源区分，老客户端忽略新字段也不会崩。
+      const webSources = webSearchResults
+        .filter((result) => typeof result?.url === 'string' && !!result.url)
+        .slice(0, 10)
+        .map((result, index) => ({
+          kind: 'web' as const,
+          index: index + 1,
+          title: result.title || '联网来源',
+          url: result.url,
+          ...(result.publishedDate
+            ? { publishedDate: result.publishedDate }
+            : {}),
+        }));
+      const replySources: any[] = [
         ...new Map(
           relevantAndPassingDocs
             .filter((doc: any) => typeof doc.metadata?.fileId === 'string')
@@ -570,6 +600,7 @@ export class ChatService {
               },
             ]),
         ).values(),
+        ...webSources,
       ];
       const hasRelevantDocs =
         !isCasualChat && relevantAndPassingDocs.length > 0;
@@ -655,16 +686,19 @@ export class ChatService {
             m.sources.length,
         )
         .flatMap((m: any) =>
-          (m.sources as any[]).map((source: any) => {
-            const enabled = historySourceEnabled.get(source?.fileId);
-            const status =
-              enabled === undefined
-                ? '文档已删除'
-                : enabled
-                  ? '当前启用，但本轮未重新检索'
-                  : '当前已停用';
-            return `${source?.fileName || '知识库'}（${status}）`;
-          }),
+          (m.sources as any[])
+            // ✅ 联网来源没有 fileId，不能拿知识库文件的启用状态去标注它
+            .filter((source: any) => typeof source?.fileId === 'string')
+            .map((source: any) => {
+              const enabled = historySourceEnabled.get(source?.fileId);
+              const status =
+                enabled === undefined
+                  ? '文档已删除'
+                  : enabled
+                    ? '当前启用，但本轮未重新检索'
+                    : '当前已停用';
+              return `${source?.fileName || '知识库'}（${status}）`;
+            }),
         );
       const historySourceSummary = historySourceLabels.length
         ? [...new Set(historySourceLabels)].join('、')
@@ -912,7 +946,7 @@ export class ChatService {
         );
       }
 
-      // 实时检索的提示已挪到实际搜索的并行阶段（见上方 searchTavily），
+      // 实时检索的提示已挪到实际搜索的并行阶段（见上方 searchWeb），
       // 这里不再补一条「调用 web_search」——那是后端预检索，不是模型的工具调用。
 
       // ✅ 免费层 GLM 对「上传的附件」有拒答反射（见 isAttachmentRefusal）：
@@ -1053,6 +1087,15 @@ export class ChatService {
             finishReason = ev.finishReason ?? '';
             break;
         }
+      }
+
+      // ✅ 流式清洗器收尾：丢掉尾部空白/结尾裸链接，但把以 Markdown 图片结尾的
+      //    正常内容补回来（助手消息的图片只能存在 content 里，吞了历史就不回显了）。
+      //    必须在 done 之前推：done 由 controller 在本方法返回后才发。
+      const tail = appReplyFormatter?.flush();
+      if (tail) {
+        firstContentAt ??= Date.now();
+        onChunk('content', tail);
       }
 
       // APP 端不推这条内部警告；工具调用相关的 thought 不受影响

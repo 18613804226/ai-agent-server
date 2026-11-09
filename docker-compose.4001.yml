@@ -75,6 +75,12 @@ services:
           memory: 384M
     ports:
       - "4001:3000"
+    volumes:
+      # ⚠️ 图片和聊天附件都写在容器可写层；不挂卷的话每次重建 backend 容器
+      #    （每次部署都会 Recreate）文件就没了，但 DB 里的 URL 还在 → 历史图片 404。
+      #    路径对应 main.ts / image.service.ts 的 process.cwd() = /app/apps/server。
+      - uploads:/app/apps/server/uploads
+      - chat-files:/app/apps/server/files
     env_file:
       - apps/server/.env
     depends_on:
@@ -95,6 +101,8 @@ services:
 
 volumes:
   pgdata:
+  uploads:
+  chat-files:
 
 networks:
   app-network:

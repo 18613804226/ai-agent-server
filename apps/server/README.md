@@ -1,6 +1,6 @@
 # AI Agent Server (Toto Backend)
 
-一个基于 **NestJS**、**Prisma** 和 OpenAI 兼容大模型 API 构建的 AI 助手后端。支持 RAG 知识库、Tavily 实时网页搜索、天气查询、计算器、语音和图片处理、多轮对话及 SSE 流式响应。
+一个基于 **NestJS**、**Prisma** 和 OpenAI 兼容大模型 API 构建的 AI 助手后端。支持 RAG 知识库、实时网页搜索（Tavily / 博查可切换）、天气查询、计算器、语音和图片处理、多轮对话及 SSE 流式响应。
 
 ## 核心技术
 
@@ -8,7 +8,7 @@
 - PostgreSQL + Prisma ORM
 - OpenAI SDK（兼容通义千问等 OpenAI 兼容 API）
 - pgvector 语义检索与 RAG
-- Tavily Search 实时网页搜索
+- 实时网页搜索（Tavily / 博查可切换，失败自动降级）
 - Server-Sent Events（SSE）流式响应
 - 共享 agent 编排器（`@repo/agent-orchestrator`：模型级联 + 工具循环）
 - 多 agent 路由（`editor` / `general`，工具集可插拔）
@@ -17,11 +17,31 @@
 
 ### 实时搜索
 
-用户查询微博热搜、新闻、股价、汇率等实时信息时，后端识别实时查询并主动调用 Tavily Search，再把本轮搜索摘要和来源链接交给大模型整理。此流程由后端触发，不依赖模型自行决定是否联网，也不是大模型的 Function Calling。
+用户查询微博热搜、新闻、股价、汇率等实时信息时，后端识别实时查询并主动调用联网搜索，再把本轮搜索摘要和来源链接交给大模型整理。此流程由后端触发，不依赖模型自行决定是否联网，也不是大模型的 Function Calling。
 
-实时查询不会使用知识库文档或之前的对话回答作为事实来源。模型应根据本轮搜索结果回答并引用来源链接；若搜索未返回可用结果，会提示“没有获取到实时结果”，不让模型根据旧知识猜测。搜索服务未配置或不可用时会返回明确错误。
+实时查询不会使用知识库文档或之前的对话回答作为事实来源。模型应根据本轮搜索结果回答并引用来源链接；若搜索未返回可用结果，会如实说明无法查证，不让模型根据旧知识猜测。
 
 当前通过关键词识别实时查询，包括“实时、现在、今天、最新、热搜、热榜、新闻、微博、股价、汇率、TOP N”等。
+
+**联网 provider 可切换**（`WEB_SEARCH_PROVIDER`，默认 `tavily`）：
+
+| provider | 说明 | 必填 |
+|---|---|---|
+| `tavily` | 默认，境外 Tavily，保持既有行为 | `TAVILY_API_KEY` |
+| `bocha` | 国内博查，中文源更全、跨境延迟更低 | `BOCHA_API_KEY` |
+
+两者都归一化成同一份 `WebSearchResult { title, url, content, publishedDate? }`，`formatWebSearchContext`、`sources` 事件和提示词都不用改。博查按官方开放平台 `POST https://api.bochaai.com/v1/web-search` + `Authorization: Bearer`，把响应 `webPages.value[]` 的 `name / url / summary|snippet / datePublished` 映射过来；`BOCHA_API_URL` 可覆盖 endpoint（换域名或走代理），`WEB_SEARCH_TIMEOUT_MS` 控制单次超时（默认 15000）。未配 provider 或写了未知值一律回落 `tavily`。
+
+**失败自动降级，不再拖垮整轮**：`searchWeb()` 统一打点并抛错，主链路对联网这一支做了 `.catch(() => [])`，推一帧 `⚠️ 联网检索暂不可用，以下回答未包含实时信息。`，再走已有的 `liveSearchEmpty` 分支照常请求模型（并打开工具让模型如实说明）；模型主动调 `web_search` 工具失败时，工具也返回「本轮没有可引用的实时资料」而不是抛错打断工具循环。以前联网 API 一超时整轮就抛错，默认还会切成离线演示回放，用户问实时问题却收到预录答案。
+
+日志格式（不打印 query 和 API Key）：
+
+```text
+[web-search] {"provider":"tavily","ok":true,"results":8,"durationMs":1234}
+[web-search] {"provider":"bocha","ok":false,"results":0,"durationMs":15001,"code":"ECONNABORTED","reason":"..."}
+```
+
+按 `ok` 统计失败率、按 `durationMs` 看 P95，跑一周再决定要不要把默认切到国内。
 
 > Tavily 搜索的是可检索的公开网页，不保证微博等平台的官方榜单完整性或实时排名。若需要准确的官方 TOP 榜单，应接入对应平台的官方或授权数据接口。
 
@@ -42,7 +62,8 @@
 `/chat/:id/stream` 按客户端平台选择提示词：登录时上报 `platform: 'ios' | 'android'`（也识别 `app` / `mobile` 等别名），或直接在请求体带 `platform`，请求体优先。判定为 APP 端时：
 
 - 系统提示词前置一段移动端输出规范：**只压空白行，不压内容**——直给答案、不复述问题；排版上仅要求「任意位置最多 1 个换行、禁连续空行和大片留白」，内容长度与形式（分点、代码、步骤）一律不设限，把问题讲透、不要刻意压短或只回结论，补充内容必须有依据、不编细节。原有的工具、附件、知识库来源与联网引用规则全部保留。
-- 回复额外做排版兜底清洗：流式逐 chunk 与落库全文都会把连续空行（含跨 chunk 边界、CRLF、只夹空格的伪空行）压成单个换行并去掉首尾空白，避免手机上一屏只显示几行字。
+- **联网 URL 不再贴进正文**：APP 规范明确禁止裸 URL 和 `[https://…]` 这种方括号包链接，改用 `[1]` / `[2]` 数字角标（对应【本轮联网搜索结果】的序号）；服务端在模型出第一个字之前就把结果的 `url` / `title` 放进 `sources` 事件和 `Message.sources`（`kind: 'web'`），客户端要渲染可点击链接从这里取。Web / 桌面端仍用 `[来源标题](URL)` 形式的 Markdown 链接。
+- 回复额外做排版兜底清洗：流式逐 chunk 与落库全文都会把连续空行（含跨 chunk 边界、CRLF、只夹空格的伪空行）压成单个换行并去掉首尾空白；流式清洗器还会把**尾部空白扣住不发**，所以末尾不会再偶发多出一行空白。APP 正文里残留的裸 URL / 方括号包 URL 由同一套清洗兜底收掉，Markdown 图片 `![alt](…)` 会原样保留，不会洗坏历史图片。
 
 Web / 桌面端或不传 `platform` 时不叠加 APP 排版规范与排版清洗。提示词与清洗逻辑在 `src/chat/chat-prompt.ts`，单测见 `src/chat/chat-prompt.spec.ts`。
 APP 端同样展示模型路由决策（`模型选择：…`），`🔧 调用工具`、`↩️ 工具结果`、`🔎 已联网检索`、附件解析与降级提示也全部保留，面试 Demo 能完整呈现模型分层和 Agent 工具链；只收掉「回答达到长度上限」这类异常警告。
@@ -52,7 +73,7 @@ APP 端同样展示模型路由决策（`模型选择：…`），`🔧 调用�
 `/chat/:id/stream` 每帧 `data` 是一个 JSON 对象，`type` 取值：
 
 - `thought` / `content` / `error`：`content` 为文本；错误文案已收敛，不含内部报错原文。
-- `sources`：`sources` 为引用来源数组。
+- `sources`：`sources` 为引用来源数组。知识库来源形如 `{ fileId, fileName }`；联网来源形如 `{ kind: 'web', index, title, url, publishedDate? }`，`index` 对应正文里的 `[1]` / `[2]` 角标。
 - `tool_call`：`{ name, args, index }`，`args` 是入参摘要（最长 500 字）。
 - `tool_result`：`{ name, index, result, resultLength, durationMs, status }`；`result` 为 200 字预览、`resultLength` 为原长、`durationMs` 为从 call 到 result 的墙钟耗时，`status` 取 `success | error | cached | denied`。按 `index` 与 `tool_call` 配对即可渲染可展开的工具卡片。
 - `done`：`{ tokens, model, completionTokens, finishReason, truncated, ttftMs, durationMs, sourcesCount, historyKept, historyDropped, digestUsed }`，其中 `ttftMs` 是首字延迟；后三项是上下文记忆指标（本轮带入的历史条数、被裁掉的条数、是否启用滚动摘要）。
@@ -169,7 +190,7 @@ pnpm --filter @repo/server exec prisma generate
 DATABASE_URL="你的 PostgreSQL 连接字符串"
 OPENAI_API_KEY="你的大模型 API Key"
 OPENAI_BASE_URL="你的 OpenAI 兼容 API 地址"
-TAVILY_API_KEY="你的 Tavily API Key"
+TAVILY_API_KEY="你的 Tavily API Key"          # 默认 provider；用国内博查则改 WEB_SEARCH_PROVIDER=bocha 并填 BOCHA_API_KEY
 
 # 同步数据库表结构（本项目无 migrations，用 db push）
 pnpm --filter @repo/server exec prisma db push
@@ -178,7 +199,7 @@ pnpm --filter @repo/server exec prisma db push
 pnpm --filter @repo/server start:dev
 ```
 
-`TAVILY_API_KEY` 可在 [Tavily](https://tavily.com/) 注册并创建。实时联网搜索必须配置该密钥；不要将真实密钥提交到版本库或公开分享。
+`TAVILY_API_KEY` 可在 [Tavily](https://tavily.com/) 注册并创建；切到 `WEB_SEARCH_PROVIDER=bocha` 时改填 `BOCHA_API_KEY`（[博查开放平台](https://open.bochaai.com/)）。两者留空时联网检索会失败并自动降级为「无实时资料」，不会让整轮对话报错。不要将真实密钥提交到版本库或公开分享。
 
 ## 模型分层与级联调度
 
@@ -272,6 +293,12 @@ CHAT_TOOL_MAX_RESULT_CHARS="8000"            # 工具结果最大字符数
 CHAT_ZHIPU_LOCK_TIMEOUT_MS="5000"            # 智谱串行锁最长等待（ms）；超时自动降级到下一个候选
 CHAT_SHOW_ROUTING_THOUGHT="true"             # 是否把模型选择推给前端思考流（含 APP 端）
 CHAT_USER_PROFILE="on"                       # 用户画像：on=只记用户明确声明的白名单偏好；off=完全不记不注入
+PUBLIC_BASE_URL=""                           # 图片 URL 对外前缀（如 https://api.example.com）；留空用请求 Host
+TAVILY_API_KEY=""                            # provider=tavily 时必填；留空则联网检索失败并自动降级
+WEB_SEARCH_PROVIDER="tavily"                 # 联网 provider：tavily（默认，境外）| bocha（国内，博查）
+BOCHA_API_KEY=""                             # provider=bocha 时必填；见 https://open.bochaai.com
+BOCHA_API_URL=""                             # 留空用官方 https://api.bochaai.com/v1/web-search
+WEB_SEARCH_TIMEOUT_MS="15000"                # 单次联网超时（1000~60000）
 ```
 
 调试时可看日志判断实际走了哪条链路：

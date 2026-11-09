@@ -111,7 +111,11 @@ export class ChatController {
   @Post('upload-image')
   async uploadImage(@Body() body: { image: string }, @Req() req: Request) {
     if (!body?.image) throw new BadRequestException('没有收到图片数据');
-    const host = `${req.protocol}://${req.get('host')}`;
+    // ✅ 网关/HTTPS 后面用 PUBLIC_BASE_URL 固定对外地址：否则落库的绝对 URL
+    //    会指向内网 Host 或 http，手机端刷新历史时加载失败（混合内容还会被拦）。
+    const host =
+      process.env.PUBLIC_BASE_URL?.trim().replace(/\/+$/, '') ||
+      `${req.protocol}://${req.get('host')}`;
     return this.imageService.uploadImage(body.image, host);
   }
 
@@ -325,7 +329,21 @@ export class ChatController {
         : typeof device?.platform === 'string'
           ? device.platform.slice(0, 64)
           : undefined;
-    const images = asList(body?.images);
+    let images = asList(body?.images);
+    // ✅ 老客户端把图片 URL 放在单数字段 image 里时别静默忽略：
+    //    以前这种请求照样 200 建流，但 images 没落库，当轮本地预览还在、刷新就没图了。
+    const legacyImage =
+      typeof (body as { image?: unknown })?.image === 'string'
+        ? ((body as { image?: string }).image as string).trim()
+        : '';
+    if (!images?.length && legacyImage) {
+      if (legacyImage.startsWith('data:')) {
+        throw new BadRequestException(
+          '图片请先调用 POST /chat/upload-image 上传，再把返回的 url 放进 images 数组',
+        );
+      }
+      images = [legacyImage];
+    }
     const fileIds = asList(body?.fileIds);
     const attachmentIds = asList(body?.attachmentIds);
 

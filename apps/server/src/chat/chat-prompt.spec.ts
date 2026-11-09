@@ -258,6 +258,11 @@ describe('按端区分提示词', () => {
     expect(app).toContain('fetchWeatherInfo');
     expect(app).toContain('【引用规则】');
     expect(app.length).toBeGreaterThan(web.length);
+    // APP 正文不贴 URL，改用 [1]/[2] 角标；链接由 sources 事件下发
+    expect(app).toContain('正文中禁止出现任何完整 URL');
+    expect(app).toContain('[1]、[2]');
+    expect(app).not.toContain('联网事实的链接直接跟在对应句子后面');
+    expect(web).toContain('禁止把裸 URL');
   });
 
   it('非 APP 端（含不传 platform）与原模板完全一致', () => {
@@ -321,7 +326,44 @@ describe('APP 端排版兜底清洗', () => {
   it('流式开头不留白，结果与整段清洗一致', () => {
     const chunks = ['\n\n  ', '第一段\n\n', '\n第二段'];
     const format = createAppReplyFormatter();
-    expect(chunks.map(format).join('')).toBe(formatAppReply(chunks.join('')));
+    expect(chunks.map(format).join('') + format.flush()).toBe(
+      formatAppReply(chunks.join('')),
+    );
+  });
+
+  it('末尾 chunk 的换行不推给前端：末尾空白行不再偶发', () => {
+    for (const tail of ['\n', '\n\n', ' \n', '\n \n']) {
+      const format = createAppReplyFormatter();
+      const out = format('第一段\n第二段') + format(tail) + format.flush();
+      expect(out).toBe('第一段\n第二段');
+      expect(out).toBe(formatAppReply(`第一段\n第二段${tail}`));
+    }
+  });
+
+  it('正文里的方括号包裸 URL / 裸 URL 被收掉，文本链接只留锚文本', () => {
+    expect(formatAppReply('发布 V4 [https://a.com/x] 后续')).toBe('发布 V4 后续');
+    expect(formatAppReply('详见 https://a.com/very/long/path 的说明')).toBe(
+      '详见 的说明',
+    );
+    expect(formatAppReply('A [标题](https://a.com/x) B')).toBe('A 标题 B');
+  });
+
+  it('被 chunk 切开的长 URL 不吐半截，结果与整段清洗一致', () => {
+    const chunks = ['发布 ', '[https://a.com/', 'blog/very-long]', ' 后续'];
+    const format = createAppReplyFormatter();
+    const streamed = chunks.map(format).join('') + format.flush();
+    expect(streamed).not.toContain('https://');
+    expect(streamed).toBe(formatAppReply(chunks.join('')));
+  });
+
+  it('Markdown 图片不被 URL 清洗误伤（助手消息的图片只能存在 content 里）', () => {
+    const md = '看图 ![封面](https://a.com/x.png) 和 ![本地](/uploads/img-1.png)';
+    expect(formatAppReply(md)).toBe(md);
+    const chunks = ['看图 ![封面](https://a.com/', 'x.png) 收尾'];
+    const format = createAppReplyFormatter();
+    const streamed = chunks.map(format).join('') + format.flush();
+    expect(streamed).toContain('![封面](https://a.com/x.png)');
+    expect(streamed).toBe(formatAppReply(chunks.join('')));
   });
 });
 

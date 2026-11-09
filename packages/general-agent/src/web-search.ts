@@ -16,6 +16,92 @@ interface TavilySearchResponse {
   }>;
 }
 
+/** 博查响应：官方开放平台 Web Search API，结果在 webPages.value[] */
+interface BochaSearchResponse {
+  webPages?: {
+    value?: Array<{
+      name?: string;
+      url?: string;
+      /** 长摘要（summary=true 时返回），比 snippet 更适合喂给模型 */
+      summary?: string;
+      snippet?: string;
+      datePublished?: string | null;
+    }>;
+  };
+}
+
+/** 联网搜索 provider：tavily（默认，境外）| bocha（国内，博查） */
+export type WebSearchProvider = 'tavily' | 'bocha';
+
+const DEFAULT_TIMEOUT_MS = 15_000;
+const MAX_RESULTS = 10;
+const BOCHA_DEFAULT_URL = 'https://api.bochaai.com/v1/web-search';
+
+interface WebSearchFailure extends Error {
+  searchStatus?: number;
+  searchCode?: string;
+}
+
+/** provider 未配或写了未知值一律回落 tavily，避免配置笔误让线上突然断网 */
+export function webSearchProvider(): WebSearchProvider {
+  const raw = (process.env.WEB_SEARCH_PROVIDER || '').trim().toLowerCase();
+  return raw === 'bocha' ? 'bocha' : 'tavily';
+}
+
+function searchTimeoutMs(): number {
+  const raw = Number(process.env.WEB_SEARCH_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw >= 1000 && raw <= 60_000
+    ? Math.trunc(raw)
+    : DEFAULT_TIMEOUT_MS;
+}
+
+/** 两个 provider 的结果收敛成同一份契约：URL 协议白名单 + 摘要限长 + 最多 10 条 */
+function normalizeResults(
+  rows: Array<{
+    title?: string;
+    url?: string;
+    content?: string;
+    publishedDate?: string | null;
+  }>,
+): WebSearchResult[] {
+  return rows
+    .flatMap((row) => {
+      if (!row.title || !row.url || !row.content) return [];
+      try {
+        const url = new URL(row.url);
+        if (url.protocol !== 'https:' && url.protocol !== 'http:') return [];
+      } catch {
+        return [];
+      }
+      return [
+        {
+          title: row.title.trim(),
+          url: row.url,
+          content: row.content.replace(/\s+/g, ' ').trim().slice(0, 400),
+          ...(row.publishedDate
+            ? { publishedDate: String(row.publishedDate) }
+            : {}),
+        },
+      ];
+    })
+    .slice(0, MAX_RESULTS);
+}
+
+/** 对外只给收敛文案；status/code 挂在 error 上给统一打点用，不泄漏内部报错原文 */
+function toSearchFailure(error: unknown, provider: string): WebSearchFailure {
+  const status = axios.isAxiosError(error)
+    ? error.response?.status
+    : undefined;
+  const code = axios.isAxiosError(error) ? error.code : undefined;
+  console.error(`${provider} 联网搜索请求失败:`, { status, code });
+  const wrapped = new Error(
+    '实时搜索服务暂时不可用，请稍后重试。',
+  ) as WebSearchFailure;
+  wrapped.searchStatus = status;
+  wrapped.searchCode = code;
+  return wrapped;
+}
+
 /** 情绪倾诉 / 收尾：这类句子不联网、不查资料，交给普通对话处理 */
 const EMOTIONAL_TALK =
   /^(算了|不聊|不想|罢了|哎|唉|嗯|哦|好吧|行吧)|不聊了|不说了|心累|好累|好烦|难受|难过|沮丧|崩溃|emo|不顺|不太顺|没过|凉了|烦死|累死|压力大|心情|情绪|吐槽|安慰/i;
@@ -89,6 +175,10 @@ export const isLiveInfoQuery = (query: string): boolean => {
   return false;
 };
 
+/**
+ * Tavily adapter（默认，境外）。保留原有请求形状，既有部署与单测平滑过渡。
+ * 直接调用它不会打点，业务侧请统一用 searchWeb()。
+ */
 export async function searchTavily(
   query: string,
   signal?: AbortSignal,
@@ -99,7 +189,6 @@ export async function searchTavily(
   }
 
   const date = new Date().toISOString().slice(0, 10);
-  let data: TavilySearchResponse;
   try {
     const response = await axios.post<TavilySearchResponse>(
       'https://api.tavily.com/search',
@@ -108,52 +197,137 @@ export async function searchTavily(
         query: `${query} ${date}`,
         topic: 'general',
         search_depth: 'advanced',
-        max_results: 10,
+        max_results: MAX_RESULTS,
         include_answer: false,
         include_raw_content: false,
       },
-      { timeout: 15000, signal },
+      { timeout: searchTimeoutMs(), signal },
     );
-    data = response.data;
+    const rows = Array.isArray(response.data.results)
+      ? response.data.results
+      : [];
+    return normalizeResults(
+      rows.map((result) => ({
+        title: result.title,
+        url: result.url,
+        content: result.content,
+        publishedDate: result.published_date,
+      })),
+    );
   } catch (error) {
     if (signal?.aborted) throw error;
-    const status = axios.isAxiosError(error)
-      ? error.response?.status
-      : undefined;
-    const code = axios.isAxiosError(error) ? error.code : undefined;
-    console.error('Tavily 联网搜索请求失败:', { status, code });
-    throw new Error('实时搜索服务暂时不可用，请稍后重试。');
+    throw toSearchFailure(error, 'Tavily');
   }
+}
 
-  return (Array.isArray(data.results) ? data.results : [])
-    .flatMap((result) => {
-      if (!result.title || !result.url || !result.content) return [];
-      try {
-        const url = new URL(result.url);
-        if (url.protocol !== 'https:' && url.protocol !== 'http:') return [];
-      } catch {
-        return [];
-      }
-      return [
-        {
-          title: result.title.trim(),
-          url: result.url,
-          content: result.content.replace(/\s+/g, ' ').trim().slice(0, 400),
-          ...(result.published_date
-            ? { publishedDate: result.published_date }
-            : {}),
+/**
+ * 博查 Bocha adapter（国内，可选）。
+ * 按官方开放平台：POST /v1/web-search + Bearer Key，
+ * 响应 webPages.value[] → name / url / summary|snippet / datePublished。
+ * endpoint 可用 BOCHA_API_URL 覆盖，方便换域名或走代理。
+ */
+export async function searchBocha(
+  query: string,
+  signal?: AbortSignal,
+): Promise<WebSearchResult[]> {
+  const apiKey = process.env.BOCHA_API_KEY;
+  if (!apiKey) {
+    throw new Error('实时搜索未配置：请在后端环境变量中设置 BOCHA_API_KEY。');
+  }
+  const endpoint = process.env.BOCHA_API_URL?.trim() || BOCHA_DEFAULT_URL;
+  const date = new Date().toISOString().slice(0, 10);
+  try {
+    const response = await axios.post<BochaSearchResponse>(
+      endpoint,
+      {
+        query: `${query} ${date}`,
+        freshness: 'noLimit',
+        summary: true,
+        count: MAX_RESULTS,
+      },
+      {
+        timeout: searchTimeoutMs(),
+        signal,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
         },
-      ];
-    })
-    .slice(0, 10);
+      },
+    );
+    const rows = Array.isArray(response.data?.webPages?.value)
+      ? response.data.webPages.value
+      : [];
+    return normalizeResults(
+      rows.map((result) => ({
+        title: result.name,
+        url: result.url,
+        content: result.summary || result.snippet,
+        publishedDate: result.datePublished,
+      })),
+    );
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw toSearchFailure(error, 'Bocha');
+  }
+}
+
+/**
+ * 业务侧统一入口：按 WEB_SEARCH_PROVIDER 分发 + 统一打点。
+ * 日志不打印 query 和 API Key（用户隐私 / 凭据），只记 provider、结果数、耗时、失败原因。
+ */
+export async function searchWeb(
+  query: string,
+  signal?: AbortSignal,
+): Promise<WebSearchResult[]> {
+  const provider = webSearchProvider();
+  const startedAt = Date.now();
+  try {
+    const results =
+      provider === 'bocha'
+        ? await searchBocha(query, signal)
+        : await searchTavily(query, signal);
+    console.log(
+      `[web-search] ${JSON.stringify({
+        provider,
+        ok: true,
+        results: results.length,
+        durationMs: Date.now() - startedAt,
+      })}`,
+    );
+    return results;
+  } catch (error) {
+    // 客户端主动断开不算服务失败，别往日志里灌噪音
+    if (!signal?.aborted) {
+      const failure = error as WebSearchFailure;
+      console.warn(
+        `[web-search] ${JSON.stringify({
+          provider,
+          ok: false,
+          results: 0,
+          durationMs: Date.now() - startedAt,
+          ...(failure.searchStatus !== undefined
+            ? { status: failure.searchStatus }
+            : {}),
+          ...(failure.searchCode ? { code: failure.searchCode } : {}),
+          reason: error instanceof Error ? error.message : '未知错误',
+        })}`,
+      );
+    }
+    throw error;
+  }
 }
 
 export function formatWebSearchContext(results: WebSearchResult[]): string {
-  return results
+  const entries = results
     .map(
       (result, index) =>
         `[${index + 1}] ${result.title}\nURL: ${result.url}\n` +
         `发布时间: ${result.publishedDate || '来源未提供'}\n摘要: ${result.content}`,
     )
     .join('\n\n');
+  // URL 是给用户端「来源列表」和引用链接用的，不要让模型把它原样贴进正文：
+  // 小模型很容易退化成 [https://…]，窄屏上一条链接折成好几行。
+  return entries
+    ? `（引用请用 [序号]；URL 仅用于生成来源链接，禁止把裸 URL 或 [URL] 原样写进回答正文。）\n\n${entries}`
+    : '';
 }

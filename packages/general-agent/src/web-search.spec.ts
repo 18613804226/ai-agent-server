@@ -4,7 +4,10 @@ import {
   formatWebSearchContext,
   isEmotionalTurn,
   isLiveInfoQuery,
+  searchBocha,
   searchTavily,
+  searchWeb,
+  webSearchProvider,
   type WebSearchResult,
 } from './web-search.js';
 
@@ -151,6 +154,189 @@ describe('searchTavily', () => {
 
     await expect(searchTavily('搜索微博热搜')).rejects.toThrow(
       '请在后端环境变量中设置 TAVILY_API_KEY',
+    );
+  });
+});
+
+function mockResponse(data: unknown): AxiosResponse {
+  return {
+    data,
+    status: 200,
+    statusText: 'OK',
+    headers: {},
+    config: { headers: new AxiosHeaders() },
+  };
+}
+
+describe('provider 选择', () => {
+  it.each([
+    ['', 'tavily'],
+    ['tavily', 'tavily'],
+    ['TAVILY', 'tavily'],
+    ['bocha', 'bocha'],
+    ['BOCHA', 'bocha'],
+    ['写错了', 'tavily'],
+  ] as const)('WEB_SEARCH_PROVIDER=%s → %s', (value, expected) => {
+    vi.stubEnv('WEB_SEARCH_PROVIDER', value);
+    expect(webSearchProvider()).toBe(expected);
+  });
+});
+
+describe('searchBocha（国内 adapter）', () => {
+  it('按官方接口请求，并把 webPages.value 归一化成统一契约', async () => {
+    vi.stubEnv('BOCHA_API_KEY', 'bocha-key');
+    const post = vi.spyOn(axios, 'post').mockResolvedValue(
+      mockResponse({
+        webPages: {
+          value: [
+            {
+              name: ' 微博热搜榜 ',
+              url: 'https://weibo.com/hot',
+              summary: '今日热点 '.repeat(100),
+              snippet: '短摘要',
+              datePublished: '2026-11-09T00:00:00+08:00',
+            },
+            {
+              name: '仅短摘要',
+              url: 'https://example.com/a',
+              snippet: '兜底摘要',
+            },
+            { name: '坏协议', url: 'javascript:alert(1)', snippet: '不该出现' },
+            { name: '缺 URL', snippet: '不该出现' },
+          ],
+        },
+      }),
+    );
+
+    const found = await searchBocha('今天的新闻');
+
+    expect(post).toHaveBeenCalledWith(
+      'https://api.bochaai.com/v1/web-search',
+      expect.objectContaining({
+        query: expect.stringContaining('今天的新闻'),
+        freshness: 'noLimit',
+        summary: true,
+        count: 10,
+      }),
+      expect.objectContaining({
+        timeout: 15000,
+        headers: expect.objectContaining({
+          Authorization: 'Bearer bocha-key',
+        }),
+      }),
+    );
+    expect(found).toHaveLength(2);
+    expect(found[0].title).toBe('微博热搜榜');
+    expect(found[0].content.length).toBeLessThanOrEqual(400);
+    expect(found[0].publishedDate).toBe('2026-11-09T00:00:00+08:00');
+    expect(found[1].content).toBe('兜底摘要');
+    expect(found.some((result) => result.url.startsWith('javascript:'))).toBe(
+      false,
+    );
+  });
+
+  it('缺 key 明确报错；BOCHA_API_URL 可覆盖 endpoint', async () => {
+    vi.stubEnv('BOCHA_API_KEY', '');
+    await expect(searchBocha('新闻')).rejects.toThrow('BOCHA_API_KEY');
+
+    vi.stubEnv('BOCHA_API_KEY', 'bocha-key');
+    vi.stubEnv('BOCHA_API_URL', 'https://proxy.internal/v1/web-search');
+    const post = vi
+      .spyOn(axios, 'post')
+      .mockResolvedValue(mockResponse({ webPages: { value: [] } }));
+    await searchBocha('新闻');
+    expect(post).toHaveBeenCalledWith(
+      'https://proxy.internal/v1/web-search',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+});
+
+describe('searchWeb：分发 + 打点', () => {
+  it('默认走 Tavily，成功日志只含 provider/结果数/耗时', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.stubEnv('TAVILY_API_KEY', 'tavily-key');
+    vi.stubEnv('WEB_SEARCH_PROVIDER', 'tavily');
+    const post = vi.spyOn(axios, 'post').mockResolvedValue(
+      mockResponse({
+        results: [
+          { title: '标题', url: 'https://example.com/a', content: '摘要' },
+        ],
+      }),
+    );
+
+    const found = await searchWeb('查一下机密关键词');
+
+    expect(post).toHaveBeenCalledWith(
+      'https://api.tavily.com/search',
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(found).toHaveLength(1);
+    expect(log).toHaveBeenCalledTimes(1);
+    const line = String(log.mock.calls[0][0]);
+    expect(line).toContain('"provider":"tavily"');
+    expect(line).toContain('"ok":true');
+    expect(line).toContain('"results":1');
+    expect(line).toContain('"durationMs"');
+    // 用户查询与凭据不能进日志
+    expect(line).not.toContain('机密关键词');
+    expect(line).not.toContain('tavily-key');
+  });
+
+  it('WEB_SEARCH_PROVIDER=bocha 时分发到博查', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.stubEnv('WEB_SEARCH_PROVIDER', 'bocha');
+    vi.stubEnv('BOCHA_API_KEY', 'bocha-key');
+    const post = vi
+      .spyOn(axios, 'post')
+      .mockResolvedValue(mockResponse({ webPages: { value: [] } }));
+
+    await searchWeb('新闻');
+
+    expect(post).toHaveBeenCalledWith(
+      'https://api.bochaai.com/v1/web-search',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('失败打 warn 日志并抛出，交给上层降级（不打 query）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubEnv('WEB_SEARCH_PROVIDER', 'tavily');
+    vi.stubEnv('TAVILY_API_KEY', '');
+    vi.spyOn(axios, 'post').mockResolvedValue(mockResponse({}));
+
+    await expect(searchWeb('今天的新闻')).rejects.toThrow('TAVILY_API_KEY');
+
+    const line = String(warn.mock.calls[0][0]);
+    expect(line).toContain('"ok":false');
+    expect(line).toContain('"durationMs"');
+    expect(line).not.toContain('今天的新闻');
+  });
+
+  it('WEB_SEARCH_TIMEOUT_MS 可配，越界回落 15000', async () => {
+    vi.stubEnv('TAVILY_API_KEY', 'k');
+    vi.stubEnv('WEB_SEARCH_TIMEOUT_MS', '8000');
+    const post = vi
+      .spyOn(axios, 'post')
+      .mockResolvedValue(mockResponse({ results: [] }));
+
+    await searchTavily('新闻');
+    expect(post).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ timeout: 8000 }),
+    );
+
+    vi.stubEnv('WEB_SEARCH_TIMEOUT_MS', '999999');
+    await searchTavily('新闻');
+    expect(post).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ timeout: 15000 }),
     );
   });
 });

@@ -1,4 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
 import { generalAgent } from './agent.js';
 import { createChatTools, createGeneralTools } from './tools.js';
 
@@ -30,5 +35,23 @@ describe('general-agent 工具集', () => {
     expect(generalAgent.buildSystemPrompt({ query: '几号是春节' })).toContain(
       'festival_info',
     );
+  });
+
+  it('web_search 联网失败不抛错，返回「无可引用资料」说明让模型如实回答', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubEnv('WEB_SEARCH_PROVIDER', 'tavily');
+    vi.stubEnv('TAVILY_API_KEY', '');
+    const tool = createGeneralTools().find(
+      (item) => item.definition.function.name === 'web_search',
+    )!;
+
+    const result = await tool.handler(
+      { query: '今天的新闻' },
+      { toolName: 'web_search' },
+    );
+
+    expect(result).toContain('联网检索暂不可用');
+    expect(result).toContain('不要编造');
   });
 });

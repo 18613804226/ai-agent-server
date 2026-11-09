@@ -2,7 +2,7 @@ import axios from 'axios';
 import { evaluate } from 'mathjs';
 import type { RegisteredTool } from '@repo/agent-orchestrator';
 import { festivalTool } from './festival.js';
-import { formatWebSearchContext, searchTavily } from './web-search.js';
+import { formatWebSearchContext, searchWeb } from './web-search.js';
 
 async function fetchWeather(cityName: string): Promise<string> {
   try {
@@ -94,8 +94,14 @@ export const webSearchTool: RegisteredTool = {
   },
   handler: async (args) => {
     const query = typeof args.query === 'string' ? args.query : '';
-    const results = await searchTavily(query);
-    return formatWebSearchContext(results);
+    try {
+      const results = await searchWeb(query);
+      return formatWebSearchContext(results);
+    } catch {
+      // ✅ P0 降级：模型主动调用工具时联网失败，不要抛错打断工具循环；
+      //    返回一条明确的「无资料」说明，让模型如实回答而不是编造来源。
+      return '（本轮联网检索暂不可用，没有可引用的实时资料。请如实说明无法查证，不要编造来源、日期或链接。）';
+    }
   },
 };
 
