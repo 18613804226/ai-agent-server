@@ -437,10 +437,32 @@ export class AgentOrchestrator {
     } = input;
 
     let chain = input.candidates ?? this.deriveCandidates(input);
+    /** 本次 run 的起点：下面的首字延迟都相对它计算，宿主再加自己的前置耗时 */
+    const runStartTime = Date.now();
     let usedModel = '';
     let usedTokens = 0;
     // 生成 token（completion_tokens），用于计算真实生成速度
     let usedCompletionTokens = 0;
+    // 输入 token（prompt_tokens）：直接取上游 usage，不再让客户端做减法
+    let usedInputTokens = 0;
+    // 命中 prompt cache 的输入 token（智谱 / OpenAI 可能返回）
+    let usedCachedTokens = 0;
+    // 思考 token：优先用上游 completion_tokens_details.reasoning_tokens；
+    // 上游不报时按思考/正文字符占比分摊，保证字段永远可用
+    let usedReasoningTokens = 0;
+    let reasoningTokensReported = false;
+    /** 累计的思考 / 正文字符数，仅用于「上游不报 reasoning_tokens」时的分摊兜底 */
+    let thoughtChars = 0;
+    let answerChars = 0;
+    /** 首个 token（含思考 / 工具调用）到达时刻 */
+    let firstTokenAt: number | null = null;
+    /** 正文首个 token 到达时刻，t/s 的分母起点 */
+    let firstAnswerAt: number | null = null;
+    /** 正文最后一段到达时刻，用于算正文生成耗时 */
+    let lastAnswerAt: number | null = null;
+    /** 思考首 / 尾时刻，用于算思考耗时 */
+    let firstThoughtAt: number | null = null;
+    let lastThoughtAt: number | null = null;
     // tool_call / tool_result 的序号：跨轮递增，保证 UI 能唯一匹配
     //（每轮都从 0 开始的话，下一轮的 result 会覆盖上一轮同序号的工具）
     let toolCallSeq = 0;
@@ -525,9 +547,26 @@ export class AgentOrchestrator {
 
           // stream_options.include_usage 的用量只在最后一个 chunk 下发，累加起来
           const chunkUsage = (chunk as any).usage;
-          if (chunkUsage?.total_tokens) {
-            usedTokens += chunkUsage.total_tokens;
+          // 用 chunkUsage 存在性判断，而不是 total_tokens：少数平台只给
+          // prompt_tokens / completion_tokens，漏掉 total 也不能丢掉输入明细
+          if (chunkUsage) {
+            usedTokens += chunkUsage.total_tokens ?? 0;
             usedCompletionTokens += chunkUsage.completion_tokens ?? 0;
+            // 输入 / 缓存：OpenAI 兼容口径是 prompt_tokens + prompt_tokens_details
+            usedInputTokens += chunkUsage.prompt_tokens ?? 0;
+            usedCachedTokens +=
+              chunkUsage.prompt_tokens_details?.cached_tokens ??
+              chunkUsage.cached_tokens ??
+              0;
+            // 思考 token：OpenAI 口径 completion_tokens_details.reasoning_tokens，
+            // 部分平台直接放在 usage.reasoning_tokens
+            const reasoning =
+              chunkUsage.completion_tokens_details?.reasoning_tokens ??
+              chunkUsage.reasoning_tokens;
+            if (typeof reasoning === 'number') {
+              usedReasoningTokens += reasoning;
+              reasoningTokensReported = true;
+            }
           }
 
           const chunkFinishReason = (chunk as any).choices?.[0]?.finish_reason;
@@ -540,6 +579,8 @@ export class AgentOrchestrator {
 
           if (delta.tool_calls?.length) {
             mergeToolCallDeltas(toolAcc, delta.tool_calls);
+            // 工具调用也是「首个 token」，避免纯工具轮的首字延迟丢成 null
+            firstTokenAt ??= Date.now();
           }
 
           const reasoningContent =
@@ -561,7 +602,13 @@ export class AgentOrchestrator {
 
           if (!textContent && !reasoningContent) continue;
 
+          const chunkAt = Date.now();
+          firstTokenAt ??= chunkAt;
+
           if (reasoningContent) {
+            thoughtChars += reasoningContent.length;
+            firstThoughtAt ??= chunkAt;
+            lastThoughtAt = chunkAt;
             yield { type: 'thought', content: reasoningContent };
           }
 
@@ -569,6 +616,10 @@ export class AgentOrchestrator {
             // 剥掉模型误写进正文的 XML 风格标签（<think>/<tool_call>/<web_search>）
             const clean = sanitizeContent(textContent);
             if (!clean) continue;
+            // 正文首个 token：清洗后为空的不算，否则纯标签 chunk 会把 t/s 起点提前
+            firstAnswerAt ??= chunkAt;
+            lastAnswerAt = chunkAt;
+            answerChars += clean.length;
             roundReply += clean;
             if (gateOpen) {
               rawFullReply += clean;
@@ -825,6 +876,20 @@ export class AgentOrchestrator {
       .replace(/<\/?tool_call>/g, '')
       .trimStart();
 
+    // 输入 token：上游没给 prompt_tokens 时退回 total - completion（老口径）
+    const doneInputTokens =
+      usedInputTokens > 0
+        ? usedInputTokens
+        : Math.max(0, usedTokens - usedCompletionTokens);
+    // 思考 token：上游没报 reasoning_tokens 时按思考/正文字符占比分摊，
+    // 与客户端旧的估算算法一致，只是挪到后端统一算
+    const doneReasoningTokens =
+      reasoningTokensReported || !usedCompletionTokens
+        ? usedReasoningTokens
+        : splitTokensByChars(usedCompletionTokens, thoughtChars, answerChars);
+    const span = (from: number | null, to: number | null) =>
+      from === null || to === null ? undefined : Math.max(0, to - from);
+
     yield {
       type: 'done',
       model: usedModel,
@@ -834,8 +899,34 @@ export class AgentOrchestrator {
       finishReason: lastFinishReason,
       truncated: lastFinishReason === 'length',
       context: lastContextStats,
+      // ✅ 用量明细：客户端直接展示「输入 X / 输出 Y（思考 M + 正文 N）」，不做减法
+      inputTokens: doneInputTokens,
+      outputTokens: usedCompletionTokens,
+      reasoningTokens: doneReasoningTokens,
+      cachedTokens: usedCachedTokens || undefined,
+      // ✅ 延迟：ttft 与「正文首字」分开，t/s 的分母只算正文生成耗时
+      firstTokenMs:
+        firstTokenAt === null ? undefined : firstTokenAt - runStartTime,
+      firstAnswerTokenMs:
+        firstAnswerAt === null ? undefined : firstAnswerAt - runStartTime,
+      thoughtDurationMs: span(firstThoughtAt, lastThoughtAt),
+      answerDurationMs: span(firstAnswerAt, lastAnswerAt),
     };
   }
+}
+
+/**
+ * 上游没报 reasoning_tokens 时的兜底：按思考 / 正文字符数把输出 token 分摊。
+ * 纯思考或纯正文时分别返回全量 / 0，比例只用于「思考 293 + 正文 27」这类展示。
+ */
+function splitTokensByChars(
+  total: number,
+  thoughtChars: number,
+  answerChars: number,
+): number {
+  const sum = thoughtChars + answerChars;
+  if (!sum) return 0;
+  return Math.round((total * thoughtChars) / sum);
 }
 
 /**

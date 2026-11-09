@@ -132,17 +132,20 @@ export function loadModelCascadeConfig(
  * 智谱客户端的思考链参数。
  *
  * 必须**显式**指定：实测 GLM-4.6V-Flash 默认是关闭思考的（省略参数 = 关闭），
- * 光删掉 disabled 参数并不会打开。默认关闭是因为思考链会把「你好」这种问候
- * 也产出上千字推理，严重拖慢首字。
+ * 光删掉 disabled 参数并不会打开。
+ *
+ * 默认开启：客户端要展示「思考 M + 正文 N」的 token 拆分，就必须拿到
+ * reasoning_content。代价是首字变慢（问候类问题也会先产出推理），
+ * 需要快首字时用 CHAT_GLM_THINKING=false/off/0 显式关闭。
  *
  * ⚠️ 注意：glm-4-flash 是非推理模型，无论怎么设都不会产出 reasoning_content；
- *    想要思考内容请用 GLM-4.6V-Flash / GLM-4.7-Flash 这类推理模型。
+ *    想要思考内容请用 GLM-4.5-Flash / GLM-4.6V-Flash / GLM-4.7-Flash 这类推理模型。
  */
 export function zhipuThinkingParam(): Record<string, unknown> {
+  const raw = (process.env.CHAT_GLM_THINKING ?? '').trim().toLowerCase();
+  const disabled = ['false', 'off', '0', 'no', 'disabled'].includes(raw);
   return {
-    thinking: {
-      type: process.env.CHAT_GLM_THINKING === 'true' ? 'enabled' : 'disabled',
-    },
+    thinking: { type: disabled ? 'disabled' : 'enabled' },
   };
 }
 

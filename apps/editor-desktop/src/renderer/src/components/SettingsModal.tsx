@@ -151,69 +151,29 @@ export function SettingsModal({
             <div className="section-head">
               <h4>工具审批</h4>
             </div>
-            <div className="approval-row">
-              <div className="approval-row-text">
-                <strong>命令执行审批</strong>
-                <span className="muted small">
-                  run_terminal 等命令执行前询问（危险命令）
-                </span>
-              </div>
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={draft.commandApproval !== 'auto'}
-                  onChange={(e) =>
-                    setDraft((d) => ({
-                      ...d,
-                      commandApproval: e.target.checked ? 'ask' : 'auto',
-                    }))
-                  }
-                />
-                <span className="switch-slider" />
-              </label>
-            </div>
-            <div className="approval-row">
-              <div className="approval-row-text">
-                <strong>文件操作审批</strong>
-                <span className="muted small">
-                  写、删、移动文件前询问（可在 diff 里逐块确认/取消）
-                </span>
-              </div>
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={draft.fileApproval !== 'auto'}
-                  onChange={(e) =>
-                    setDraft((d) => ({
-                      ...d,
-                      fileApproval: e.target.checked ? 'ask' : 'auto',
-                    }))
-                  }
-                />
-                <span className="switch-slider" />
-              </label>
-            </div>
-            <div className="approval-row">
-              <div className="approval-row-text">
-                <strong>数据库操作审批</strong>
-                <span className="muted small">
-                  execute_sql 写操作前询问（query_database 只读，不询问）
-                </span>
-              </div>
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={draft.databaseApproval !== 'auto'}
-                  onChange={(e) =>
-                    setDraft((d) => ({
-                      ...d,
-                      databaseApproval: e.target.checked ? 'ask' : 'auto',
-                    }))
-                  }
-                />
-                <span className="switch-slider" />
-              </label>
-            </div>
+            <p className="hint">
+              开关控制「执行前是否需要你确认」：<strong>开 = 每次询问</strong>
+              （弹出确认框，你可以拒绝），<strong>关 = 自动放行</strong>
+              （直接执行，不再询问）。只读操作（读文件、查询数据库）始终不询问。
+            </p>
+            <ApprovalToggle
+              title="命令执行"
+              description="run_terminal 执行命令前弹出确认（危险命令必须手动放行）"
+              value={draft.commandApproval}
+              onChange={(v) => setDraft((d) => ({ ...d, commandApproval: v }))}
+            />
+            <ApprovalToggle
+              title="文件写操作"
+              description="写、删、移动文件前弹出确认，可在 diff 里逐块接受/拒绝"
+              value={draft.fileApproval}
+              onChange={(v) => setDraft((d) => ({ ...d, fileApproval: v }))}
+            />
+            <ApprovalToggle
+              title="数据库写操作"
+              description="execute_sql 执行写入前弹出确认；query_database 只读，始终放行"
+              value={draft.databaseApproval}
+              onChange={(v) => setDraft((d) => ({ ...d, databaseApproval: v }))}
+            />
           </section>
 
           <DatabaseSettings />
@@ -237,6 +197,46 @@ export function SettingsModal({
           onSave={saveProvider}
         />
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * 审批开关：开 = ask（每次询问），关 = auto（自动放行）。
+ * 开关本身只有「要/不要确认」一种语义，旁边用文字徽标把当前状态写出来，
+ * 避免用户猜「开着是放行还是拦截」。
+ */
+function ApprovalToggle({
+  title,
+  description,
+  value,
+  onChange,
+}: {
+  title: string;
+  description: string;
+  value: 'ask' | 'auto';
+  onChange: (value: 'ask' | 'auto') => void;
+}) {
+  const ask = value === 'ask';
+  return (
+    <div className="approval-row">
+      <div className="approval-row-text">
+        <strong>{title}</strong>
+        <span className="muted small">{description}</span>
+      </div>
+      <div className="approval-row-control">
+        <span className={`approval-state ${ask ? 'is-ask' : 'is-auto'}`}>
+          {ask ? '每次询问' : '自动放行'}
+        </span>
+        <label className="switch">
+          <input
+            type="checkbox"
+            checked={ask}
+            onChange={(e) => onChange(e.target.checked ? 'ask' : 'auto')}
+          />
+          <span className="switch-slider" />
+        </label>
+      </div>
     </div>
   );
 }

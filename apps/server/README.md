@@ -76,7 +76,7 @@ APP 端同样展示模型路由决策（`模型选择：…`），`🔧 调用�
 - `sources`：`sources` 为引用来源数组。知识库来源形如 `{ fileId, fileName }`；联网来源形如 `{ kind: 'web', index, title, url, publishedDate? }`，`index` 对应正文里的 `[1]` / `[2]` 角标。`usedInThisReply` 只在正文实际出现对应 `[n]` 时为 `true`，未被引用的联网来源为 `false`。
 - `tool_call`：`{ name, args, index }`，`args` 是入参摘要（最长 500 字）。
 - `tool_result`：`{ name, index, result, resultLength, durationMs, status }`；`result` 为 200 字预览、`resultLength` 为原长、`durationMs` 为从 call 到 result 的墙钟耗时，`status` 取 `success | error | cached | denied`。按 `index` 与 `tool_call` 配对即可渲染可展开的工具卡片。
-- `done`：`{ tokens, model, completionTokens, finishReason, truncated, ttftMs, durationMs, sourcesCount, historyKept, historyDropped, digestUsed }`，其中 `ttftMs` 是首字延迟；后三项是上下文记忆指标（本轮带入的历史条数、被裁掉的条数、是否启用滚动摘要）。
+- `done`：`{ tokens, model, completionTokens, inputTokens, outputTokens, reasoningTokens, cachedTokens, finishReason, truncated, ttftMs, firstAnswerTokenMs, thoughtDurationMs, answerDurationMs, durationMs, sourcesCount, historyKept, historyDropped, digestUsed }`。`inputTokens` / `outputTokens` / `reasoningTokens` 直接取上游 usage（`prompt_tokens` / `completion_tokens` / `completion_tokens_details.reasoning_tokens`，上游不报思考 token 时按思考/正文字符占比分摊），正文 token = `outputTokens - reasoningTokens`；`cachedTokens` 是命中 prompt cache 的输入，无则为 `null`。`ttftMs` 是首个 token（含思考）延迟，`firstAnswerTokenMs` 是正文首字延迟，算 t/s 用后者；`thoughtDurationMs` / `answerDurationMs` 分别是思考与正文生成耗时。后三项是上下文记忆指标（本轮带入的历史条数、被裁掉的条数、是否启用滚动摘要）。
 - `ping`：每 15 秒一帧心跳，避免长静默期被网关断开，客户端忽略即可。
 
 兼容性：结构化 `tool_call` / `tool_result` 是新增事件，原有的 `🔧 调用 …` / `↩️ …` 文本 `thought` 仍同时推送，老版 APP 无需改动也能展示工具链。出错时推一帧收敛文案后正常结束流，不再用 `subscriber.error()` 触发 EventSource 反复重连。
@@ -244,7 +244,7 @@ pnpm --filter @repo/server start:dev
 | `GLM-4.6V-Flash` | ~4.4s | ✅ 免费 | 实测质量不可用，已从默认档位移除 |
 | `qwen3.7-flash` | 秒级 | ❌ 付费 | 复杂文本 / 视觉（默认）/ 兜底 |
 
-思考链默认给智谱请求带上 `thinking:{type:'disabled'}`：它会让「你好」这种问候也产出上千字推理，严重拖慢首字。需要模型自行深度推理时配 `CHAT_GLM_THINKING=true`（且必须换成 `GLM-4.6V-Flash` 等推理模型，`glm-4-flash` 等非推理型号无推理能力）。
+思考链默认开启（智谱候选一律显式下发 `thinking:{type:'enabled'}`）：客户端要靠它展示「思考 M + 正文 N」的 token 拆分。代价是首字变慢——「你好」这类问候也会先产出上千字推理，追求快首字时配 `CHAT_GLM_THINKING=false`（也接受 `off` / `0` / `no` / `disabled`）关闭。思考内容还需要推理模型，`glm-4-flash` 等非推理型号即使开启也不会产出 `reasoning_content`。实测（`glm-4.5-flash` 流式）上游 usage 只给 `prompt_tokens` / `completion_tokens` / `prompt_tokens_details.cached_tokens`，不返回 `completion_tokens_details.reasoning_tokens`，所以 `done.reasoningTokens` 由后端按思考/正文字符占比分摊，是估算值而非上游精确值。
 
 智能问答链路按任务分档给 GLM 下发采样参数（只作用于智谱候选）：闲聊 `temperature=0.7`（比 0.65 基准档更活泼）、知识库/附件问答 `0.4`（严格基于资料、少编造）、实时搜索 `0.5`，`top_p` 统一 `0.8` 以收敛发散、少加空行。代码 Agent 链路和降级到 qwen 的请求不下发，保持服务端默认。`CHAT_GLM_TEMPERATURE` / `CHAT_GLM_TOP_P` 会覆盖所有档位，取值需在 `(0, 1]`，非法值回落到当前档预设。
 
@@ -274,7 +274,7 @@ CHAT_MODEL_COMPLEX_FALLBACK="qwen3.7-flash"  # 复杂档兜底，可改 qwen3.7-
 CHAT_MODEL_FALLBACK="qwen3.7-flash"          # 全局兜底
 CHAT_COMPLEXITY_THRESHOLD="3"                # 得分达到该值算「复杂」
 CHAT_EXPERT_THRESHOLD="5"                    # 得分达到该值算「高难度」（默认=复杂阈值+2）
-CHAT_GLM_THINKING="false"                    # 是否保留思考链（默认关）
+CHAT_GLM_THINKING="true"                     # 是否保留思考链（默认开；配 false/off 关闭）
 CHAT_GLM_TEMPERATURE=""                      # 留空按任务分档 0.7/0.4/0.5；填值则覆盖所有档位
 CHAT_GLM_TOP_P=""                            # 留空用 0.8；填值则覆盖所有档位
 CHAT_DEMO_REPLAY=""                          # 留空=失败时兜底回放；true=纯离线演示；off=关闭

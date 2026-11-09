@@ -207,6 +207,22 @@ export interface AgentEvent {
   tokens?: number;
   /** done 事件携带的生成 token（completion_tokens），用于计算真实生成速度 */
   completionTokens?: number;
+  /** done 事件携带的输入 token（prompt_tokens），宿主无需再靠 total - completion 倒推 */
+  inputTokens?: number;
+  /** done 事件携带的输出 token（与 completionTokens 同口径，含思考） */
+  outputTokens?: number;
+  /** 输出 token 中「思考」占的部分（completion_tokens_details.reasoning_tokens） */
+  reasoningTokens?: number;
+  /** 命中上游 prompt cache 的输入 token（有才给） */
+  cachedTokens?: number;
+  /** 首个 token（含思考）的延迟，相对本次 run 开始，单位 ms */
+  firstTokenMs?: number;
+  /** 正文首个 token 的延迟，相对本次 run 开始，单位 ms（t/s 的分母起点） */
+  firstAnswerTokenMs?: number;
+  /** 思考段落总耗时，ms（首末思考 chunk 的间隔，有才给） */
+  thoughtDurationMs?: number;
+  /** 正文生成耗时，ms（首末正文 chunk 的间隔，有才给） */
+  answerDurationMs?: number;
   /** done 事件携带的最终回答（已清理 <think>/<tool_call> 标签） */
   fullReply?: string;
   /** 最后一轮的 finish_reason（stop / length / tool_calls / content_filter 等） */

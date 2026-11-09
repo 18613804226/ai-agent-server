@@ -463,9 +463,20 @@ export class ChatController {
                 tokens: result?.tokens ?? 0,
                 model: result?.model ?? '',
                 completionTokens: result?.completionTokens ?? 0,
+                // ✅ 用量明细：输入 / 输出 / 思考 / 缓存，客户端直接展示不用倒推
+                inputTokens: result?.inputTokens ?? 0,
+                outputTokens:
+                  result?.outputTokens ?? result?.completionTokens ?? 0,
+                reasoningTokens: result?.reasoningTokens ?? 0,
+                cachedTokens: result?.cachedTokens ?? null,
                 finishReason: result?.finishReason ?? '',
                 truncated: result?.truncated === true,
+                // ttftMs 是「首个 token（含思考）」，firstAnswerTokenMs 是「正文首字」；
+                // 客户端算 t/s 用后者，思考那几秒不会算进分母
                 ttftMs: result?.ttftMs ?? null,
+                firstAnswerTokenMs: result?.firstAnswerTokenMs ?? null,
+                thoughtDurationMs: result?.thoughtDurationMs ?? null,
+                answerDurationMs: result?.answerDurationMs ?? null,
                 durationMs: result?.durationMs ?? 0,
                 sourcesCount: result?.sourcesCount ?? 0,
                 // ✅ 记忆可观测：面试官能直接看到本轮用了多少历史、是否启用摘要

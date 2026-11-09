@@ -3673,6 +3673,32 @@ button:disabled {
   font-weight: 500;
 }
 
+.approval-row-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+/* 开关旁的状态徽标：把 ask/auto 翻译成「每次询问 / 自动放行」 */
+.approval-state {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.approval-state.is-ask {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.approval-state.is-auto {
+  color: var(--text-dim);
+  background: var(--bg-elevated);
+}
+
 .switch {
   position: relative;
   flex: none;

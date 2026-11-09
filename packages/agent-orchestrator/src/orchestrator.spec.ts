@@ -66,6 +66,71 @@ describe('AgentOrchestrator.run', () => {
     expect(done?.fullReply).toBe('你好');
   });
 
+  it('done 透传 usage：输入 / 输出 / 思考 / 缓存 token 与正文首字延迟', async () => {
+    const { client } = fakeClient([
+      [
+        { choices: [{ delta: { reasoning_content: '想一下' } }] },
+        { choices: [{ delta: { content: '你好' } }] },
+        {
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          usage: {
+            prompt_tokens: 6090,
+            completion_tokens: 320,
+            total_tokens: 6410,
+            completion_tokens_details: { reasoning_tokens: 293 },
+            prompt_tokens_details: { cached_tokens: 4096 },
+          },
+        },
+      ],
+    ]);
+    const events = await collect(
+      new AgentOrchestrator(config({ getClient: () => client })),
+      { messages: [], candidates: [dashscope('qwen')] },
+    );
+
+    const done = events.at(-1)!;
+    expect(done).toMatchObject({
+      type: 'done',
+      tokens: 6410,
+      completionTokens: 320,
+      // 输入直接取 prompt_tokens，思考取上游 reasoning_tokens
+      inputTokens: 6090,
+      outputTokens: 320,
+      reasoningTokens: 293,
+      cachedTokens: 4096,
+    });
+    // 正文首字不会早于首个 token；两个延迟都相对 run 起点，单位为 ms
+    expect(done.firstAnswerTokenMs).toBeTypeOf('number');
+    expect(done.firstAnswerTokenMs!).toBeGreaterThanOrEqual(
+      done.firstTokenMs ?? 0,
+    );
+  });
+
+  it('上游不报 reasoning_tokens 时按思考/正文字符占比分摊', async () => {
+    const { client } = fakeClient([
+      [
+        { choices: [{ delta: { reasoning_content: '思考' } }] },
+        { choices: [{ delta: { content: '正文正文' } }] },
+        {
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 6, total_tokens: 16 },
+        },
+      ],
+    ]);
+    const events = await collect(
+      new AgentOrchestrator(config({ getClient: () => client })),
+      { messages: [], candidates: [dashscope('qwen')] },
+    );
+
+    // 思考 2 字 / 正文 4 字，输出 6 token → 思考约 2
+    expect(events.at(-1)).toMatchObject({
+      type: 'done',
+      inputTokens: 10,
+      outputTokens: 6,
+      reasoningTokens: 2,
+    });
+  });
+
   it('采样参数下发给所有候选，thinking 只给智谱；不传时保持服务端默认', async () => {
     const chunks = [{ choices: [{ delta: { content: 'ok' } }] }];
     const zhipu = fakeClient([chunks]);

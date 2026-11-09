@@ -330,6 +330,8 @@ export const ChatMessage = memo(function ChatMessage({
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
   const blocks = useMemo(() => buildMessageBlocks(msg), [msg]);
+  /** 本条消息是否仍在生成（最后一条 + 会话流式中）：复制按钮此时不出 */
+  const generating = streaming && isLatest && msg.role === 'assistant';
 
   const copyMessage = async () => {
     try {
@@ -359,31 +361,34 @@ export const ChatMessage = memo(function ChatMessage({
   );
   return (
     <div className={`msg msg-${msg.role}`}>
-      <button
-        type="button"
-        className={`message-copy${copied ? ' copied' : ''}`}
-        title={copied ? '已复制' : '复制消息'}
-        onClick={copyMessage}
-      >
-        {copied ? (
-          '✓'
-        ) : (
-          <svg
-            viewBox="0 0 16 16"
-            width="13"
-            height="13"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.4"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden
-          >
-            <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
-            <path d="M10.5 5.5v-2a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3.5v5A1.5 1.5 0 0 0 4 10h1.5" />
-          </svg>
-        )}
-      </button>
+      {/* 生成中的消息不显示复制按钮：内容还没定型，复制到一半的正文没有意义 */}
+      {!generating ? (
+        <button
+          type="button"
+          className={`message-copy${copied ? ' copied' : ''}`}
+          title={copied ? '已复制' : '复制消息'}
+          onClick={copyMessage}
+        >
+          {copied ? (
+            '✓'
+          ) : (
+            <svg
+              viewBox="0 0 16 16"
+              width="13"
+              height="13"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+              <path d="M10.5 5.5v-2a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3.5v5A1.5 1.5 0 0 0 4 10h1.5" />
+            </svg>
+          )}
+        </button>
+      ) : null}
       {blocks.map((block, i) => {
         if (block.type === 'content') {
           const text = collapseBlankLines(block.text);

@@ -553,13 +553,15 @@ describe('模型分层：配置与凭据', () => {
     });
   });
 
-  it('思考链开关显式下发（模型默认是关的，省略参数不等于开启）', () => {
+  it('思考链默认开启，可用显式 false/off 关闭（省略参数不等于关闭）', () => {
     delete process.env.CHAT_GLM_THINKING;
-    expect(zhipuThinkingParam()).toEqual({ thinking: { type: 'disabled' } });
-    process.env.CHAT_GLM_THINKING = 'false';
-    expect(zhipuThinkingParam()).toEqual({ thinking: { type: 'disabled' } });
+    expect(zhipuThinkingParam()).toEqual({ thinking: { type: 'enabled' } });
     process.env.CHAT_GLM_THINKING = 'true';
     expect(zhipuThinkingParam()).toEqual({ thinking: { type: 'enabled' } });
+    for (const off of ['false', 'off', '0', 'no', 'disabled']) {
+      process.env.CHAT_GLM_THINKING = off;
+      expect(zhipuThinkingParam()).toEqual({ thinking: { type: 'disabled' } });
+    }
   });
 
   it('问答档采样：按任务分档，可用环境变量覆盖，非法值回落档位预设', () => {

@@ -247,7 +247,14 @@ export class ChatService {
       truncated: false,
       completionTokens: 0,
       finishReason: 'stop',
+      inputTokens: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      cachedTokens: undefined,
       ttftMs: 0,
+      firstAnswerTokenMs: 0,
+      thoughtDurationMs: undefined,
+      answerDurationMs: undefined,
       durationMs: Date.now() - startTime,
       sourcesCount: entry.sources.length,
       historyKept: 0,
@@ -1048,8 +1055,23 @@ export class ChatService {
       let finishReason = '';
       /** 首个真正出字的时刻，用于算首字延迟 */
       let firstContentAt: number | undefined;
+      // ✅ 用量明细：编排器直接透传上游 usage，客户端不再做减法 / 按字符分摊
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let reasoningTokens = 0;
+      let cachedTokens: number | undefined;
+      // ✅ 延迟明细：编排器给的是「相对 run 起点」的值，这里补上本方法的前置耗时
+      let firstTokenMs: number | undefined;
+      let firstAnswerTokenMs: number | undefined;
+      let thoughtDurationMs: number | undefined;
+      let answerDurationMs: number | undefined;
       /** tool_call.index → 收到调用的时间戳，用于估算工具展示耗时 */
       const toolCallStartedAt = new Map<number, number>();
+
+      // 编排器只知道自己内部的时间点，这里记下入口时刻，好把首字延迟换算成
+      // 「从收到用户消息算起」——和之前 ttftMs 的口径保持一致
+      const orchestratorStartAt = Date.now();
+      const preRunMs = orchestratorStartAt - overallStartTime;
 
       for await (const ev of this.orchestrator.run(
         {
@@ -1137,6 +1159,19 @@ export class ChatService {
             truncated = ev.truncated === true;
             completionTokens = ev.completionTokens ?? 0;
             finishReason = ev.finishReason ?? '';
+            // ✅ 用量 / 延迟明细原样带出，缺字段时 controller 会给 null 让客户端降级
+            inputTokens = ev.inputTokens ?? 0;
+            outputTokens = ev.outputTokens ?? completionTokens;
+            reasoningTokens = ev.reasoningTokens ?? 0;
+            cachedTokens = ev.cachedTokens;
+            firstTokenMs =
+              ev.firstTokenMs == null ? undefined : preRunMs + ev.firstTokenMs;
+            firstAnswerTokenMs =
+              ev.firstAnswerTokenMs == null
+                ? undefined
+                : preRunMs + ev.firstAnswerTokenMs;
+            thoughtDurationMs = ev.thoughtDurationMs;
+            answerDurationMs = ev.answerDurationMs;
             break;
         }
       }
@@ -1204,10 +1239,23 @@ export class ChatService {
         truncated,
         completionTokens,
         finishReason,
-        // ✅ 首字延迟 / 总耗时 / 来源数：done 事件展示给面试官
-        ttftMs: firstContentAt
-          ? firstContentAt - overallStartTime
-          : undefined,
+        // ✅ 用量明细：输入 / 输出 / 思考 / 缓存，客户端直接展示不推算
+        inputTokens:
+          inputTokens > 0
+            ? inputTokens
+            : Math.max(0, usedTokens - completionTokens),
+        outputTokens: outputTokens > 0 ? outputTokens : completionTokens,
+        reasoningTokens,
+        cachedTokens,
+        // ✅ 首字延迟（含思考）/ 正文首字延迟 / 总耗时 / 来源数
+        ttftMs:
+          firstTokenMs ??
+          (firstContentAt ? firstContentAt - overallStartTime : undefined),
+        firstAnswerTokenMs:
+          firstAnswerTokenMs ??
+          (firstContentAt ? firstContentAt - overallStartTime : undefined),
+        thoughtDurationMs,
+        answerDurationMs,
         durationMs: Date.now() - overallStartTime,
         sourcesCount: replySources().length,
         // ✅ 记忆可观测：本轮实际带了多少历史、裁掉多少、有没有启用摘要
@@ -1237,7 +1285,14 @@ export class ChatService {
           truncated: false,
           completionTokens: 0,
           finishReason: '',
+          inputTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          cachedTokens: undefined,
           ttftMs: undefined,
+          firstAnswerTokenMs: undefined,
+          thoughtDurationMs: undefined,
+          answerDurationMs: undefined,
           durationMs: totalDuration,
           sourcesCount: 0,
           historyKept: 0,
