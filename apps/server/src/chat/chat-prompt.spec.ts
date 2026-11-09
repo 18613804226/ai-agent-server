@@ -218,9 +218,9 @@ describe('buildSystemPrompt', () => {
       webSearchContext: '【搜索结果】...',
       now,
     });
-    expect(prompt).toContain('【参考资料】：\n      【来源：a.pdf】\n内容A');
-    expect(prompt).toContain('【历史对话来源状态】：\n      a.pdf（当前已停用）');
-    expect(prompt).toContain('【本轮联网搜索结果】：\n      【搜索结果】...');
+    expect(prompt).toContain('【参考资料】：\n【来源：a.pdf】\n内容A');
+    expect(prompt).toContain('【历史对话来源状态】：\na.pdf（当前已停用）');
+    expect(prompt).toContain('【本轮联网搜索结果】：\n【搜索结果】...');
   });
 
   it('注入权威农历日期，并提示以本轮计算为准', () => {
@@ -256,6 +256,27 @@ describe('buildSystemPrompt', () => {
     };
     expect(buildSystemPrompt(parts)).toBe(buildSystemPrompt(parts));
   });
+
+  it('前缀稳定：本轮数据全在尾部，静态规则不随请求变化（命中前缀缓存）', () => {
+    const a = buildSystemPrompt({
+      context: 'CTX-A',
+      historySourceSummary: 'H-A',
+      webSearchContext: 'W-A',
+      now,
+    });
+    const b = buildSystemPrompt({
+      context: 'CTX-B',
+      historySourceSummary: 'H-B',
+      webSearchContext: 'W-B',
+      now: new Date('2026-03-04T05:06:07Z'),
+    });
+    const marker = '【本轮上下文】';
+    const prefixA = a.slice(0, a.indexOf(marker));
+    expect(prefixA).toBe(b.slice(0, b.indexOf(marker)));
+    // 当前时间也是逐轮变化的数据，不能落在静态前缀里，否则缓存必失效
+    expect(prefixA).not.toContain('2026');
+    expect(a.slice(a.indexOf(marker))).toContain('2026');
+  });
 });
 
 describe('按端区分提示词', () => {
@@ -285,7 +306,7 @@ describe('按端区分提示词', () => {
     const web = buildSystemPrompt({ ...base, platform: 'web' });
     const app = buildSystemPrompt({ ...base, platform: 'ios' });
     expect(app.startsWith('【APP 端输出规范')).toBe(true);
-    expect(app).toContain('任意位置最多 1 个换行符');
+    expect(app).toContain('点与点之间空一行');
     expect(app).toContain('不复述用户问题');
     expect(app).toContain('长度、形式都不设限');
     // 历史版本压过内容与排版（字数上限、空格/Markdown 禁令），防止回归
@@ -335,24 +356,24 @@ describe('按端区分提示词', () => {
       platform: 'ios',
     });
     expect(appChat.startsWith('【APP 端输出规范')).toBe(true);
-    expect(appChat).toContain('任意位置最多 1 个换行符');
+    expect(appChat).toContain('点与点之间空一行');
     expect(appChat).toContain('下方工具、附件、知识库来源');
     expect(appChat).toContain('【搜索结果与工具规则】');
   });
 });
 
 describe('APP 端排版兜底清洗', () => {
-  it('连续空行压成单个换行，首尾空白去掉', () => {
-    expect(formatAppReply('第一句\n\n\n第二句')).toBe('第一句\n第二句');
+  it('连续空行压成一个空行，首尾空白去掉', () => {
+    expect(formatAppReply('第一句\n\n\n第二句')).toBe('第一句\n\n第二句');
     expect(formatAppReply('\n  \n  你好 \n\n')).toBe('你好');
-    expect(formatAppReply('a\r\n\r\nb')).toBe('a\nb');
+    expect(formatAppReply('a\r\n\r\nb')).toBe('a\n\nb');
   });
 
   it('单个合法换行保留', () => {
     expect(formatAppReply('第一句\n第二句')).toBe('第一句\n第二句');
   });
 
-  it('流式清洗跨 chunk 边界也能压掉连续换行', () => {
+  it('流式清洗：跨 chunk 的连续换行压成一个空行，单个空行保留', () => {
     const format = createAppReplyFormatter();
     const out = [
       format('你好\n'),
@@ -361,7 +382,7 @@ describe('APP 端排版兜底清洗', () => {
       format('\n'),
       format('结束'),
     ].join('');
-    expect(out).toBe('你好\n世界。\n结束');
+    expect(out).toBe('你好\n\n世界。\n\n结束');
   });
 
   it('流式开头不留白，结果与整段清洗一致', () => {

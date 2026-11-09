@@ -2,6 +2,7 @@ export * from './model-cascade.js';
 export * from './tool-call-accumulator.js';
 export * from './simple-lock.js';
 export * from './types.js';
+export * from './prompt-rules.js';
 export * from './tool-runtime.js';
 export * from './context-manager.js';
 export * from './run-state.js';
