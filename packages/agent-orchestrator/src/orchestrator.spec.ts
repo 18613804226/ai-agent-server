@@ -131,6 +131,40 @@ describe('AgentOrchestrator.run', () => {
     });
   });
 
+  it('generationDurationMs 覆盖思考 + 正文的吐字时长', async () => {
+    const create = vi.fn(async () => {
+      return (async function* () {
+        yield { choices: [{ delta: { reasoning_content: '想' } }] };
+        await new Promise((r) => setTimeout(r, 30));
+        yield { choices: [{ delta: { content: '答' } }] };
+        await new Promise((r) => setTimeout(r, 20));
+        yield { choices: [{ delta: { content: '案' } }] };
+        yield {
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+        };
+      })();
+    });
+    const client = {
+      chat: { completions: { create } },
+    } as unknown as OpenAI;
+
+    const events = await collect(
+      new AgentOrchestrator(config({ getClient: () => client })),
+      { messages: [], candidates: [dashscope('qwen')] },
+    );
+
+    const done = events.at(-1)!;
+    // 思考首字 → 正文末字之间共 30 + 20ms，thinking 与 content 都算在分母里
+    expect(done.generationDurationMs).toBeGreaterThanOrEqual(45);
+    // 思考只有一段 chunk，跨度为 0，视为缺失
+    expect(done.thoughtDurationMs).toBeUndefined();
+    expect(done.answerDurationMs).toBeGreaterThanOrEqual(15);
+    expect(done.generationDurationMs!).toBeGreaterThanOrEqual(
+      done.answerDurationMs!,
+    );
+  });
+
   it('采样参数下发给所有候选，thinking 只给智谱；不传时保持服务端默认', async () => {
     const chunks = [{ choices: [{ delta: { content: 'ok' } }] }];
     const zhipu = fakeClient([chunks]);

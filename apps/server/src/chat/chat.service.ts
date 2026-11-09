@@ -253,6 +253,7 @@ export class ChatService {
       cachedTokens: undefined,
       ttftMs: 0,
       firstAnswerTokenMs: 0,
+      generationDurationMs: undefined,
       thoughtDurationMs: undefined,
       answerDurationMs: undefined,
       durationMs: Date.now() - startTime,
@@ -1063,6 +1064,7 @@ export class ChatService {
       // ✅ 延迟明细：编排器给的是「相对 run 起点」的值，这里补上本方法的前置耗时
       let firstTokenMs: number | undefined;
       let firstAnswerTokenMs: number | undefined;
+      let generationDurationMs: number | undefined;
       let thoughtDurationMs: number | undefined;
       let answerDurationMs: number | undefined;
       /** tool_call.index → 收到调用的时间戳，用于估算工具展示耗时 */
@@ -1170,6 +1172,8 @@ export class ChatService {
               ev.firstAnswerTokenMs == null
                 ? undefined
                 : preRunMs + ev.firstAnswerTokenMs;
+            // 吐字时长是编排器内部的时间差，与本方法的前置耗时无关，不用加 preRunMs
+            generationDurationMs = ev.generationDurationMs;
             thoughtDurationMs = ev.thoughtDurationMs;
             answerDurationMs = ev.answerDurationMs;
             break;
@@ -1254,6 +1258,8 @@ export class ChatService {
         firstAnswerTokenMs:
           firstAnswerTokenMs ??
           (firstContentAt ? firstContentAt - overallStartTime : undefined),
+        // ✅ 思考 + 正文的吐字时长：t/s = outputTokens / (generationDurationMs / 1000)
+        generationDurationMs,
         thoughtDurationMs,
         answerDurationMs,
         durationMs: Date.now() - overallStartTime,
@@ -1291,6 +1297,7 @@ export class ChatService {
           cachedTokens: undefined,
           ttftMs: undefined,
           firstAnswerTokenMs: undefined,
+          generationDurationMs: undefined,
           thoughtDurationMs: undefined,
           answerDurationMs: undefined,
           durationMs: totalDuration,

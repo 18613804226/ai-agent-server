@@ -454,15 +454,19 @@ export class AgentOrchestrator {
     /** 累计的思考 / 正文字符数，仅用于「上游不报 reasoning_tokens」时的分摊兜底 */
     let thoughtChars = 0;
     let answerChars = 0;
-    /** 首个 token（含思考 / 工具调用）到达时刻 */
+    /** 首个 token（含思考 / 工具调用）到达时刻，决定 ttft */
     let firstTokenAt: number | null = null;
     /** 正文首个 token 到达时刻，t/s 的分母起点 */
     let firstAnswerAt: number | null = null;
-    /** 正文最后一段到达时刻，用于算正文生成耗时 */
-    let lastAnswerAt: number | null = null;
-    /** 思考首 / 尾时刻，用于算思考耗时 */
-    let firstThoughtAt: number | null = null;
-    let lastThoughtAt: number | null = null;
+    /**
+     * 各轮「首 token → 末 token」时长之和：思考 + 正文一起的吐字时间。
+     * 工具执行、轮次之间的等待都不计入，t/s 才不会被打折。
+     */
+    let generationMs = 0;
+    /** 各轮思考段落时长之和 */
+    let thoughtMs = 0;
+    /** 各轮正文段落时长之和 */
+    let answerMs = 0;
     // tool_call / tool_result 的序号：跨轮递增，保证 UI 能唯一匹配
     //（每轮都从 0 开始的话，下一轮的 result 会覆盖上一轮同序号的工具）
     let toolCallSeq = 0;
@@ -491,6 +495,13 @@ export class AgentOrchestrator {
       const toolAcc: ToolCallAccumulator = {};
       let roundReply = '';
       let roundTtft: number | null = null;
+      // 本轮的吐字时刻：轮末累加进全局 generationMs / thoughtMs / answerMs
+      let roundFirstTokenAt: number | null = null;
+      let roundLastTokenAt: number | null = null;
+      let roundFirstThoughtAt: number | null = null;
+      let roundLastThoughtAt: number | null = null;
+      let roundFirstAnswerAt: number | null = null;
+      let roundLastAnswerAt: number | null = null;
       let roundFinishReason: string | undefined;
       // 拒答守卫：gateOpen=false 时内容先攒在 gateBuf，够长或确认非拒答才放行
       let gateOpen = !gate?.enabled;
@@ -580,7 +591,10 @@ export class AgentOrchestrator {
           if (delta.tool_calls?.length) {
             mergeToolCallDeltas(toolAcc, delta.tool_calls);
             // 工具调用也是「首个 token」，避免纯工具轮的首字延迟丢成 null
-            firstTokenAt ??= Date.now();
+            const toolAt = Date.now();
+            firstTokenAt ??= toolAt;
+            roundFirstTokenAt ??= toolAt;
+            roundLastTokenAt = toolAt;
           }
 
           const reasoningContent =
@@ -604,11 +618,13 @@ export class AgentOrchestrator {
 
           const chunkAt = Date.now();
           firstTokenAt ??= chunkAt;
+          roundFirstTokenAt ??= chunkAt;
+          roundLastTokenAt = chunkAt;
 
           if (reasoningContent) {
             thoughtChars += reasoningContent.length;
-            firstThoughtAt ??= chunkAt;
-            lastThoughtAt = chunkAt;
+            roundFirstThoughtAt ??= chunkAt;
+            roundLastThoughtAt = chunkAt;
             yield { type: 'thought', content: reasoningContent };
           }
 
@@ -618,7 +634,8 @@ export class AgentOrchestrator {
             if (!clean) continue;
             // 正文首个 token：清洗后为空的不算，否则纯标签 chunk 会把 t/s 起点提前
             firstAnswerAt ??= chunkAt;
-            lastAnswerAt = chunkAt;
+            roundFirstAnswerAt ??= chunkAt;
+            roundLastAnswerAt = chunkAt;
             answerChars += clean.length;
             roundReply += clean;
             if (gateOpen) {
@@ -645,6 +662,18 @@ export class AgentOrchestrator {
         // 锁必须等整条流读完才放，避免并发打爆免费层的 1 并发限制
         dispose();
         release?.();
+      }
+
+      // 累计本轮的吐字时长：只看「首 token → 末 token」，
+      // 工具执行与轮次间隔都不计入，保证 t/s 只反映模型真正吐字的速度
+      if (roundFirstTokenAt !== null && roundLastTokenAt !== null) {
+        generationMs += roundLastTokenAt - roundFirstTokenAt;
+      }
+      if (roundFirstThoughtAt !== null && roundLastThoughtAt !== null) {
+        thoughtMs += roundLastThoughtAt - roundFirstThoughtAt;
+      }
+      if (roundFirstAnswerAt !== null && roundLastAnswerAt !== null) {
+        answerMs += roundLastAnswerAt - roundFirstAnswerAt;
       }
 
       // 记录本轮 finish_reason；最后一轮的值会带进 done 事件
@@ -887,8 +916,8 @@ export class AgentOrchestrator {
       reasoningTokensReported || !usedCompletionTokens
         ? usedReasoningTokens
         : splitTokensByChars(usedCompletionTokens, thoughtChars, answerChars);
-    const span = (from: number | null, to: number | null) =>
-      from === null || to === null ? undefined : Math.max(0, to - from);
+    // 时长为 0 表示「同一毫秒内到齐」，对速度没有意义，统一当缺失让客户端降级
+    const positive = (ms: number) => (ms > 0 ? ms : undefined);
 
     yield {
       type: 'done',
@@ -904,13 +933,16 @@ export class AgentOrchestrator {
       outputTokens: usedCompletionTokens,
       reasoningTokens: doneReasoningTokens,
       cachedTokens: usedCachedTokens || undefined,
-      // ✅ 延迟：ttft 与「正文首字」分开，t/s 的分母只算正文生成耗时
+      // ✅ 延迟：ttft 与「正文首字」分开
       firstTokenMs:
         firstTokenAt === null ? undefined : firstTokenAt - runStartTime,
       firstAnswerTokenMs:
         firstAnswerAt === null ? undefined : firstAnswerAt - runStartTime,
-      thoughtDurationMs: span(firstThoughtAt, lastThoughtAt),
-      answerDurationMs: span(firstAnswerAt, lastAnswerAt),
+      // ✅ 速度：generationDurationMs = 思考 + 正文的吐字时长，
+      //    口径与 outputTokens（含思考）对齐 → t/s = outputTokens / generationDurationMs
+      generationDurationMs: positive(generationMs),
+      thoughtDurationMs: positive(thoughtMs),
+      answerDurationMs: positive(answerMs),
     };
   }
 }

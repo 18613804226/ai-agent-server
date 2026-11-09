@@ -475,6 +475,8 @@ export class ChatController {
                 // 客户端算 t/s 用后者，思考那几秒不会算进分母
                 ttftMs: result?.ttftMs ?? null,
                 firstAnswerTokenMs: result?.firstAnswerTokenMs ?? null,
+                // 思考 + 正文的吐字时长：t/s = outputTokens / (generationDurationMs / 1000)
+                generationDurationMs: result?.generationDurationMs ?? null,
                 thoughtDurationMs: result?.thoughtDurationMs ?? null,
                 answerDurationMs: result?.answerDurationMs ?? null,
                 durationMs: result?.durationMs ?? 0,

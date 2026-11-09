@@ -219,9 +219,14 @@ export interface AgentEvent {
   firstTokenMs?: number;
   /** 正文首个 token 的延迟，相对本次 run 开始，单位 ms（t/s 的分母起点） */
   firstAnswerTokenMs?: number;
-  /** 思考段落总耗时，ms（首末思考 chunk 的间隔，有才给） */
+  /**
+   * 思考 + 正文的吐字时长，ms（各轮「首 token → 末 token」累加，
+   * 不含工具执行 / 轮次间隔）。t/s = outputTokens / generationDurationMs
+   */
+  generationDurationMs?: number;
+  /** 思考段落总耗时，ms（各轮首末思考 chunk 间隔累加，有才给） */
   thoughtDurationMs?: number;
-  /** 正文生成耗时，ms（首末正文 chunk 的间隔，有才给） */
+  /** 正文生成耗时，ms（各轮首末正文 chunk 间隔累加，有才给） */
   answerDurationMs?: number;
   /** done 事件携带的最终回答（已清理 <think>/<tool_call> 标签） */
   fullReply?: string;
