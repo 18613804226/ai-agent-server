@@ -73,7 +73,7 @@ APP 端同样展示模型路由决策（`模型选择：…`），`🔧 调用�
 `/chat/:id/stream` 每帧 `data` 是一个 JSON 对象，`type` 取值：
 
 - `thought` / `content` / `error`：`content` 为文本；错误文案已收敛，不含内部报错原文。
-- `sources`：`sources` 为引用来源数组。知识库来源形如 `{ fileId, fileName }`；联网来源形如 `{ kind: 'web', index, title, url, publishedDate? }`，`index` 对应正文里的 `[1]` / `[2]` 角标。
+- `sources`：`sources` 为引用来源数组。知识库来源形如 `{ fileId, fileName }`；联网来源形如 `{ kind: 'web', index, title, url, publishedDate? }`，`index` 对应正文里的 `[1]` / `[2]` 角标。`usedInThisReply` 只在正文实际出现对应 `[n]` 时为 `true`，未被引用的联网来源为 `false`。
 - `tool_call`：`{ name, args, index }`，`args` 是入参摘要（最长 500 字）。
 - `tool_result`：`{ name, index, result, resultLength, durationMs, status }`；`result` 为 200 字预览、`resultLength` 为原长、`durationMs` 为从 call 到 result 的墙钟耗时，`status` 取 `success | error | cached | denied`。按 `index` 与 `tool_call` 配对即可渲染可展开的工具卡片。
 - `done`：`{ tokens, model, completionTokens, finishReason, truncated, ttftMs, durationMs, sourcesCount, historyKept, historyDropped, digestUsed }`，其中 `ttftMs` 是首字延迟；后三项是上下文记忆指标（本轮带入的历史条数、被裁掉的条数、是否启用滚动摘要）。
@@ -299,6 +299,7 @@ WEB_SEARCH_PROVIDER="tavily"                 # 联网 provider：tavily（默认
 BOCHA_API_KEY=""                             # provider=bocha 时必填；见 https://open.bochaai.com
 BOCHA_API_URL=""                             # 留空用官方 https://api.bochaai.com/v1/web-search
 WEB_SEARCH_TIMEOUT_MS="15000"                # 单次联网超时（1000~60000）
+CHAT_SEARCH_SESSION="on"                     # 来源统一回流：on=模型补搜也下发 sources；off=回退旧行为
 ```
 
 调试时可看日志判断实际走了哪条链路：

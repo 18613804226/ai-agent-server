@@ -94,6 +94,8 @@ pnpm --filter @repo/server exec prisma generate
 
 两者都归一化成同一份 `WebSearchResult { title, url, content, publishedDate? }`，`formatWebSearchContext`、`sources` 事件和提示词都不用改。博查按官方开放平台 `POST https://api.bochaai.com/v1/web-search` + `Authorization: Bearer`，把响应 `webPages.value[]` 的 `name / url / summary|snippet / datePublished` 映射过来；`BOCHA_API_URL` 可覆盖 endpoint（换域名或走代理），`WEB_SEARCH_TIMEOUT_MS` 控制单次超时（默认 15000）。未配 provider 或写了未知值一律回落 `tavily`。
 
+**来源统一回流**（`CHAT_SEARCH_SESSION`，默认 `on`）：一轮对话建一个 `SearchSession`，后端预检索和模型主动调 `web_search` 都往里写结构化结果；`sources` 事件、落库 `sources` 与 `done.sourcesCount` 全部由它派生，正文里的 `[n]` 编号跨多次检索全局连续、同 URL 去重。因此「关键词没命中、模型自己补搜」的轮次也会正常下发来源列表。设 `CHAT_SEARCH_SESSION=off` 可一键回退到「只有后端预检索才下发 sources」的旧行为，便于线上止血。
+
 **失败自动降级，不再拖垮整轮**：`searchWeb()` 统一打点并抛错，主链路对联网这一支做了 `.catch(() => [])`，推一帧 `⚠️ 联网检索暂不可用，以下回答未包含实时信息。`，再走已有的 `liveSearchEmpty` 分支照常请求模型（并打开工具让模型如实说明）；模型主动调 `web_search` 工具失败时，工具也返回「本轮没有可引用的实时资料」而不是抛错打断工具循环。以前联网 API 一超时整轮就抛错，默认还会切成离线演示回放，用户问实时问题却收到预录答案。
 
 日志格式（不打印 query 和 API Key）：
@@ -135,7 +137,7 @@ APP 端同样展示模型路由决策（`模型选择：…`），`🔧 调用�
 `/chat/:id/stream` 每帧 `data` 是一个 JSON 对象，`type` 取值：
 
 - `thought` / `content` / `error`：`content` 为文本；错误文案已收敛，不含内部报错原文。
-- `sources`：`sources` 为引用来源数组。知识库来源形如 `{ fileId, fileName }`；联网来源形如 `{ kind: 'web', index, title, url, publishedDate? }`，`index` 对应正文里的 `[1]` / `[2]` 角标。
+- `sources`：`sources` 为引用来源数组。知识库来源形如 `{ fileId, fileName }`；联网来源形如 `{ kind: 'web', index, title, url, publishedDate? }`，`index` 对应正文里的 `[1]` / `[2]` 角标。`usedInThisReply` 只在正文实际出现对应 `[n]` 时为 `true`，未被引用的联网来源为 `false`。
 - `tool_call`：`{ name, args, index }`，`args` 是入参摘要（最长 500 字）。
 - `tool_result`：`{ name, index, result, resultLength, durationMs, status }`；`result` 为 200 字预览、`resultLength` 为原长、`durationMs` 为从 call 到 result 的墙钟耗时，`status` 取 `success | error | cached | denied`。按 `index` 与 `tool_call` 配对即可渲染可展开的工具卡片。
 - `done`：`{ tokens, model, completionTokens, finishReason, truncated, ttftMs, durationMs, sourcesCount, historyKept, historyDropped, digestUsed }`，其中 `ttftMs` 是首字延迟；后三项是上下文记忆指标（本轮带入的历史条数、被裁掉的条数、是否启用滚动摘要）。
@@ -361,6 +363,7 @@ WEB_SEARCH_PROVIDER="tavily"                 # 联网 provider：tavily（默认
 BOCHA_API_KEY=""                             # provider=bocha 时必填；见 https://open.bochaai.com
 BOCHA_API_URL=""                             # 留空用官方 https://api.bochaai.com/v1/web-search
 WEB_SEARCH_TIMEOUT_MS="15000"                # 单次联网超时（1000~60000）
+CHAT_SEARCH_SESSION="on"                     # 来源统一回流：on=模型补搜也下发 sources；off=回退旧行为
 ```
 
 调试时可看日志判断实际走了哪条链路：

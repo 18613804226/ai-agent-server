@@ -3,3 +3,4 @@ export * from './prompt.js';
 export * from './agent.js';
 export * from './festival.js';
 export * from './web-search.js';
+export * from './search-session.js';

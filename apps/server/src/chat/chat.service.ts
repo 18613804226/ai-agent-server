@@ -26,6 +26,9 @@ import {
   isEmotionalTurn,
   isLiveInfoQuery,
   searchWeb,
+  SearchSession,
+  type WebSearchResult,
+  type WebSource,
 } from '@repo/general-agent';
 import {
   ATTACHMENT_TTL_MS,
@@ -35,6 +38,7 @@ import {
   buildAttachmentDigest,
   buildConversationDigest,
   buildSystemPrompt,
+  buildWebSearchFallbackContext,
   createAppReplyFormatter,
   estimateTokens,
   formatAppReply,
@@ -81,6 +85,8 @@ const DEFAULT_LIVE_HISTORY_MESSAGES = 12;
 const RAG_CACHE_TTL_MS = 5 * 60 * 1000;
 const RAG_FOLLOWUP_HINT =
   /刚才|前面|上面|再说|展开|详细|继续|这点|那段|上述|第一点|第二点/;
+/** 预检索结果少于这个数就保留 web_search，让模型有机会换词补搜 */
+const MIN_WEB_RESULTS = 3;
 
 /**
  * 用户画像开关：默认开启，但只记「用户明确要求记住」的白名单四类偏好。
@@ -88,6 +94,15 @@ const RAG_FOLLOWUP_HINT =
  */
 function userProfileEnabled(): boolean {
   return (process.env.CHAT_USER_PROFILE ?? 'on').toLowerCase() !== 'off';
+}
+
+/**
+ * 联网来源统一通道开关：默认开启。
+ * 设 CHAT_SEARCH_SESSION=off 一键回退到「只有后端预检索才下发 sources」的旧行为，
+ * 用于线上出问题时不必回滚代码即可止血。
+ */
+function searchSessionEnabled(): boolean {
+  return (process.env.CHAT_SEARCH_SESSION ?? 'on').toLowerCase() !== 'off';
 }
 // ✅ 纯文本追问历史图的指代词：命中后强制走视觉档并还原历史图
 const HISTORY_IMAGE_HINT =
@@ -356,6 +371,11 @@ export class ChatService {
         userQuery,
       );
       const liveInfoQuery = isLiveInfoQuery(userQuery);
+      // ✅ 本轮联网结果的唯一事实来源。per-request 创建：ChatService 是单例，
+      //    绝不能挂到 this.tools 或模块作用域，否则并发会把 A 的来源串到 B。
+      const searchSession = searchSessionEnabled()
+        ? new SearchSession()
+        : undefined;
 
       // 附件先取出来：既要在落库时记元数据，也要拼进 prompt
       // （内联附件 = 随本条消息直传的；attachmentIds = 先上传后引用的）
@@ -405,7 +425,7 @@ export class ChatService {
         createdUserMessage,
         relevantDocs,
         historyMessages,
-        webSearchResults,
+        webSearchOutcome,
         userPreferences,
       ] = await Promise.all([
           this.prisma.message.create({
@@ -462,13 +482,17 @@ export class ChatService {
             ? searchWeb(userQuery, signal)
                 .then((r) => {
                   onChunk('thought', `🔎 已联网检索：${r.length} 条结果。`);
-                  return r;
+                  // ✅ 预检索同样入池：与模型补搜共用一套全局编号，末尾 sources 同源
+                  searchSession?.add(r, { origin: 'prefetch', query: userQuery });
+                  return {
+                    results: r,
+                    status: (r.length ? 'ok' : 'empty') as 'ok' | 'empty',
+                  };
                 })
                 // ✅ P0 降级：联网 API 超时/限流/欠费不该拖垮整轮对话。
                 //    以前这个 Promise 在 Promise.all 里 reject，会直接跳到 demo-replay
                 //    兜底（用户问实时信息却收到一段预录答案）或推一帧 error 就结束。
-                //    现在返回空数组，交给下面已有的 liveSearchEmpty 分支照常走模型，
-                //    由模型如实说明无法查证，不再编造来源。
+                //    status=error 与「没搜到」分开，prompt 才能给出真实的失败说明。
                 .catch(() => {
                   if (!aborted()) {
                     onChunk(
@@ -476,14 +500,22 @@ export class ChatService {
                       '⚠️ 联网检索暂不可用，以下回答未包含实时信息。',
                     );
                   }
-                  return [];
+                  return {
+                    results: [] as WebSearchResult[],
+                    status: 'error' as const,
+                  };
                 })
-            : Promise.resolve([]),
+            : Promise.resolve({
+                results: [] as WebSearchResult[],
+                status: 'not-run' as const,
+              }),
           // ✅ 读该设备的用户画像（只读；失败就当没有，不影响主链路）
           deviceId
             ? this.getUserPreferences(deviceId)
             : Promise.resolve([] as UserPreference[]),
         ]);
+      const webSearchResults = webSearchOutcome.results;
+      const webSearchStatus = webSearchOutcome.status;
       if (reuseRag) {
         onChunk('thought', '📚 沿用上一轮检索到的知识库资料。');
       } else if (!isCasualChat && !liveInfoQuery && relevantDocs.length) {
@@ -529,9 +561,8 @@ export class ChatService {
         throw new NotFoundException(`ChatSession not found: ${sessionId}`);
       }
 
-      // ✅ 后端预检索为空时不再硬拒答：本轮照常走模型，并打开工具让它自己再搜一次或如实说明。
-      //    硬拒答会把「好吧」这类误判和真实的搜索失败一起挡在门外，体验比让模型收尾更差。
-      const liveSearchEmpty = liveInfoQuery && webSearchResults.length === 0;
+      // ✅ 预检索为空/失败时不硬拒答：本轮照常走模型，工具表里保留 web_search
+      //    让模型换词再搜一次或如实说明；硬拒答会把误判和真实失败一起挡在门外。
 
       // ✅ 反转回时间正序，再从最旧一条开始装上下文
       historyMessages.reverse();
@@ -576,7 +607,8 @@ export class ChatService {
       // ✅ 联网结果在模型出第一个字之前就在服务端手里：把 URL 结构化下发，
       //    不再依赖模型把链接写进正文（APP 窄屏上会被折成好几行，且不可点）。
       //    kind 用来和知识库来源区分，老客户端忽略新字段也不会崩。
-      const webSources = webSearchResults
+      //    这是「回滚开关关闭」时的旧算法；session 开启时由来源池统一供给。
+      const fallbackWebSources: WebSource[] = webSearchResults
         .filter((result) => typeof result?.url === 'string' && !!result.url)
         .slice(0, 10)
         .map((result, index) => ({
@@ -588,7 +620,7 @@ export class ChatService {
             ? { publishedDate: result.publishedDate }
             : {}),
         }));
-      const replySources: any[] = [
+      const docSources: any[] = [
         ...new Map(
           relevantAndPassingDocs
             .filter((doc: any) => typeof doc.metadata?.fileId === 'string')
@@ -600,7 +632,15 @@ export class ChatService {
               },
             ]),
         ).values(),
-        ...webSources,
+      ];
+      /**
+       * ⚠️ 必须延迟到流结束后求值：模型中途调 web_search 会往 session 追加结果，
+       *    提前展开成静态数组就会把补搜来源漏掉（旧实现正是这样丢掉 sources 的）。
+       *    落库、sources 事件、sourcesCount 全部走这一个函数，保证三者同源。
+       */
+      const replySources = (): any[] => [
+        ...docSources,
+        ...(searchSession ? searchSession.list() : fallbackWebSources),
       ];
       const hasRelevantDocs =
         !isCasualChat && relevantAndPassingDocs.length > 0;
@@ -632,26 +672,41 @@ export class ChatService {
 //         console.log(`📚 [RAG] 截断后: ${estimateTokens(context)} tokens`);
       }
 
-      const webSearchContext = liveInfoQuery
-        ? formatWebSearchContext(webSearchResults)
-        : '';
+      // ✅ 区分「根本没搜 / 搜了没结果 / 服务失败」：以前三者都回落成
+      //    「本轮未执行联网搜索」，与事实不符，模型会被推着反复想调工具。
+      const webSearchContext =
+        liveInfoQuery && webSearchResults.length
+          ? formatWebSearchContext(webSearchResults)
+          : liveInfoQuery
+            ? buildWebSearchFallbackContext(webSearchStatus, userQuery)
+            : '';
       // ✅ 节日/农历日期不靠模型记忆：本轮直接算好，注入 system prompt。
       //    小模型经常「知道有工具但不调用」，给权威结果比提示它调工具更可靠。
       const festivalContext = buildFestivalContext(userQuery);
-      // ✅ 实时查询默认不发工具定义：少一轮工具往返、prompt 也更短，首字更快。
-      //    只有本轮确实需要天气/计算/农历日期时才开启工具。
+      // ✅ 本轮是否需要天气/计算/农历等专用工具（闲聊档判定仍用它）
       const needsToolsForLiveQuery =
         festivalContext !== '' ||
         /天气|气温|温度|下雨|降雨|风力|湿度|计算|等于|折扣|换算|日期差/.test(
           userQuery,
         );
-      // ✅ 本轮已经算好节日日期时，直接把 festival_info 从工具表里拿掉：
-      //    模型即使想“再查一次”也没有机会，少一整轮模型往返。
-      const toolsForThisTurn = festivalContext
-        ? this.tools.filter(
-            (tool) => tool.definition.function.name !== 'festival_info',
-          )
+      // ✅ 不再用 includeTools:false 关掉整个工具箱：
+      //    预检索结果足够时只摘掉 web_search（天气/计算器/节日照常可用，也省一轮补搜往返），
+      //    结果不足（含空/失败）时保留 web_search，让模型换词补搜。
+      const webSearchScarce =
+        liveInfoQuery && webSearchResults.length < MIN_WEB_RESULTS;
+      const excludeWebSearch = liveInfoQuery && !webSearchScarce;
+      // ✅ session 模式下每轮新建工具集，让 web_search 的结果回流到本轮来源池；
+      //    开关关闭时复用共享实例。
+      const baseTools = searchSession
+        ? createChatTools(searchSession)
         : this.tools;
+      const toolsForThisTurn = baseTools.filter((tool) => {
+        const name = tool.definition.function.name;
+        // 本轮已算好节日日期时摘掉 festival_info，模型没机会再查一次
+        if (festivalContext && name === 'festival_info') return false;
+        if (excludeWebSearch && name === 'web_search') return false;
+        return true;
+      });
       const historySourceIds = [
         ...new Set(
           historyForModel.flatMap((message: any) =>
@@ -1002,11 +1057,8 @@ export class ChatService {
           tools: toolsForThisTurn,
           candidates,
           maxToolRounds: 4,
-          // ✅ 实时搜索由后端做；实时查询默认不带工具，避免多一轮工具往返拖慢首字。
-          //    天气/计算/节日等确实需要工具的场景仍会开启（见 needsToolsForLiveQuery）；
-          //    后端预检索为空时也开启，让模型自己再搜一次或如实说明（见 liveSearchEmpty）。
-          includeTools:
-            !liveInfoQuery || needsToolsForLiveQuery || liveSearchEmpty,
+          // ✅ 工具定义常驻（orchestrator 默认 includeTools=true）：实时轮只从工具表里
+          //    摘掉 web_search，天气/计算器等仍可用；结果不足时才保留补搜能力。
           // ✅ 按任务分档采样：只作用于免费层 GLM-4.5-Flash，代码 Agent 链路不传
           //    情绪档优先级最高，且只在 casualTurn 允许的纯闲聊轮次生效
           sampling: zhipuChatSamplingParam(
@@ -1109,16 +1161,33 @@ export class ChatService {
             sessionId,
             role: 'assistant',
             content: fullReply,
-            sources: replySources,
+            sources: replySources(),
           },
         });
+        // ✅ 只有正文里真正出现的 [n] 才算被引用；知识库来源沿用「有资料即标注」的旧行为
+        const citedNumbers = new Set<number>();
+        for (const match of fullReply.matchAll(/\[(\d{1,2})\]/g)) {
+          citedNumbers.add(Number(match[1]));
+        }
         onChunk(
           'sources',
-          replySources.map((source) => ({
+          replySources().map((source) => ({
             ...source,
-            usedInThisReply: true,
+            usedInThisReply:
+              typeof source.index === 'number'
+                ? citedNumbers.has(source.index)
+                : true,
           })),
         );
+        // ✅ 打点：区分预检索 / 模型补搜各贡献了多少来源，便于灰度观察与排障
+        if (searchSession && searchSession.size > 0) {
+          console.log(
+            `[web-search][session] ${JSON.stringify({
+              ...searchSession.stats(),
+              total: searchSession.size,
+            })}`,
+          );
+        }
       }
 
       await this.prisma.chatSession.update({
@@ -1140,7 +1209,7 @@ export class ChatService {
           ? firstContentAt - overallStartTime
           : undefined,
         durationMs: Date.now() - overallStartTime,
-        sourcesCount: replySources.length,
+        sourcesCount: replySources().length,
         // ✅ 记忆可观测：本轮实际带了多少历史、裁掉多少、有没有启用摘要
         historyKept: keptMessages.length,
         historyDropped: droppedForDigest.length,

@@ -2,7 +2,12 @@ import axios from 'axios';
 import { evaluate } from 'mathjs';
 import type { RegisteredTool } from '@repo/agent-orchestrator';
 import { festivalTool } from './festival.js';
-import { formatWebSearchContext, searchWeb } from './web-search.js';
+import {
+  formatIndexedWebSearchContext,
+  formatWebSearchContext,
+  searchWeb,
+} from './web-search.js';
+import type { SearchSession } from './search-session.js';
 
 async function fetchWeather(cityName: string): Promise<string> {
   try {
@@ -75,35 +80,46 @@ export const calculatorTool: RegisteredTool = {
     calc(typeof args.expression === 'string' ? args.expression : ''),
 };
 
-/** 联网搜索：依赖最新事实时使用 */
-export const webSearchTool: RegisteredTool = {
-  definition: {
-    type: 'function',
-    function: {
-      name: 'web_search',
-      description:
-        '仅用于用户明确要求查询实时/外部事实（新闻、热搜、股价、汇率、公告等），且该事实无法凭常识回答时调用。不用于：情绪倾诉、闲聊、观点建议、安慰、开放式提问；拿不准时不调用。反例：用户说「今天面试不太顺」→ 不调用本工具。',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: '搜索关键词' },
+/** 联网搜索：依赖最新事实时使用。传 session 时结果同时回流到本轮来源池 */
+export function createWebSearchTool(session?: SearchSession): RegisteredTool {
+  return {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'web_search',
+        description:
+          '仅用于用户明确要求查询实时/外部事实（新闻、热搜、股价、汇率、公告等），且该事实无法凭常识回答时调用。不用于：情绪倾诉、闲聊、观点建议、安慰、开放式提问；拿不准时不调用。反例：用户说「今天面试不太顺」→ 不调用本工具。',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: '搜索关键词' },
+          },
+          required: ['query'],
         },
-        required: ['query'],
       },
     },
-  },
-  handler: async (args) => {
-    const query = typeof args.query === 'string' ? args.query : '';
-    try {
-      const results = await searchWeb(query);
-      return formatWebSearchContext(results);
-    } catch {
-      // ✅ P0 降级：模型主动调用工具时联网失败，不要抛错打断工具循环；
-      //    返回一条明确的「无资料」说明，让模型如实回答而不是编造来源。
-      return '（本轮联网检索暂不可用，没有可引用的实时资料。请如实说明无法查证，不要编造来源、日期或链接。）';
-    }
-  },
-};
+    handler: async (args) => {
+      const query = typeof args.query === 'string' ? args.query : '';
+      try {
+        const results = await searchWeb(query);
+        if (session) {
+          // ✅ 结构化结果先入本轮来源池，再用池子分配的全局编号生成提示词：
+          //    正文里的 [n] 才能和末尾 sources 事件的下标对齐（补搜不会与预检索撞号）。
+          const indexed = session.add(results, { origin: 'tool', query });
+          return formatIndexedWebSearchContext(indexed);
+        }
+        return formatWebSearchContext(results);
+      } catch {
+        // ✅ P0 降级：模型主动调用工具时联网失败，不要抛错打断工具循环；
+        //    返回一条明确的「无资料」说明，让模型如实回答而不是编造来源。
+        return '（本轮联网检索暂不可用，没有可引用的实时资料。请如实说明无法查证，不要编造来源、日期或链接。）';
+      }
+    },
+  };
+}
+
+/** 无 session 的共享实例：general agent 与回滚路径，行为与改造前完全一致 */
+export const webSearchTool: RegisteredTool = createWebSearchTool();
 
 export { festivalTool };
 
@@ -118,7 +134,15 @@ export function createGeneralTools(): RegisteredTool[] {
  * 后端对「实时查询」会自己跑 web_search 并把结果注入 prompt（省一轮模型往返），
  * 但关键词识别覆盖不到的说法（如「查一下某人」「搜索一下」「帮我查」）后端不会搜，
  * 所以这里仍暴露 `web_search`，让模型在需要时自己搜。
+ *
+ * 传 session 时模型自己搜到的结果也会回流，末尾照样下发 sources。
+ * ⚠️ 每轮新建：ChatService 是单例，session 绝不能跨请求共享。
  */
-export function createChatTools(): RegisteredTool[] {
-  return [weatherTool, calculatorTool, webSearchTool, festivalTool];
+export function createChatTools(session?: SearchSession): RegisteredTool[] {
+  return [
+    weatherTool,
+    calculatorTool,
+    session ? createWebSearchTool(session) : webSearchTool,
+    festivalTool,
+  ];
 }

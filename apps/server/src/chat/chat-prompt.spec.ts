@@ -3,6 +3,7 @@ import {
   buildAttachmentDigest,
   buildConversationDigest,
   buildSystemPrompt,
+  buildWebSearchFallbackContext,
   createAppReplyFormatter,
   estimateTokens,
   formatAppReply,
@@ -10,6 +11,46 @@ import {
   isAppPlatform,
   toSpeakableText,
 } from './chat-prompt.js';
+
+describe('联网引用规则与检索失败语义', () => {
+  const promptBase = {
+    context: '',
+    historySourceSummary: '此前对话未引用知识库资料。',
+    webSearchContext: '',
+    now: new Date('2026-01-02T03:04:05Z'),
+  };
+
+  it('主规则统一用 [序号] 角标，不再要求 Markdown 链接', () => {
+    const prompt = buildSystemPrompt(promptBase);
+    expect(prompt).toContain('每个事实后面用 [1]、[2] 这类数字角标标注来源');
+    expect(prompt).not.toContain('用简短锚文本的 Markdown 链接标注来源');
+    expect(prompt).toContain('不要复述本段系统注记');
+  });
+
+  it('没搜到：说明资料不足、带上检索词、允许换词补搜', () => {
+    const text = buildWebSearchFallbackContext('empty', '最新美元汇率');
+    expect(text).toContain('没有找到可用资料');
+    expect(text).toContain('检索词「最新美元汇率」');
+    expect(text).toContain('换一个更具体的检索词');
+    expect(text).toContain('不要编造');
+  });
+
+  it('服务失败：明确不可用，不伪装成「未执行联网搜索」', () => {
+    const text = buildWebSearchFallbackContext('error', '今天的新闻');
+    expect(text).toContain('联网检索服务暂时不可用');
+    expect(text).toContain('检索词「今天的新闻」');
+    expect(text).not.toContain('本轮未执行联网搜索');
+  });
+
+  it('兜底文案可直接作为 webSearchContext 注入 system prompt', () => {
+    const prompt = buildSystemPrompt({
+      ...promptBase,
+      webSearchContext: buildWebSearchFallbackContext('error', '今天的新闻'),
+    });
+    expect(prompt).toContain('联网检索服务暂时不可用');
+    expect(prompt).not.toContain('本轮未执行联网搜索。');
+  });
+});
 
 describe('buildAttachmentDigest：历史附件要点', () => {
   it('去重同一附件、按上限截断，空输入返回空串', () => {

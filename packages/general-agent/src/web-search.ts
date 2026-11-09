@@ -125,7 +125,7 @@ export const isEmotionalTurn = (query: string): boolean => {
 
 /** 强检索信号：出现即按实时查询处理 */
 const STRONG_LIVE_SIGNAL =
-  /实时|热搜|热榜|热点|热度|新闻|榜单|排行榜|微博|股价|汇率|搜索|搜一下|搜搜|帮我搜|查一下|查查|查询|帮我查|top\s*\d+/i;
+  /实时|热搜|热榜|热点|热度|新闻|榜单|排行榜|微博|股价|汇率|搜索|搜一下|搜搜|帮我搜|查一下|查查|查询|帮我查|top\s*\d+|上映|开播|夺冠|开奖|财报/i;
 
 /**
  * 「今天 / 最近 / 现在」只是时间词，本身不构成检索意图：
@@ -317,17 +317,32 @@ export async function searchWeb(
   }
 }
 
-export function formatWebSearchContext(results: WebSearchResult[]): string {
-  const entries = results
+/** 带全局编号的检索结果：编号由 SearchSession 分配，跨多次搜索连续 */
+export interface IndexedWebSearchResult extends WebSearchResult {
+  index: number;
+}
+
+/**
+ * 与 formatWebSearchContext 完全同文案，但编号由调用方给定。
+ * 模型主动补搜时用它，编号才不会与后端预检索的 [1]、[2] 撞车。
+ */
+export function formatIndexedWebSearchContext(
+  rows: IndexedWebSearchResult[],
+): string {
+  // 只放数据：引用规则统一写在 system prompt（chat-prompt.ts）。
+  // 以前把「（引用请用 [序号]…）」这类内部指令拼进工具结果，模型会原样复述进思考/正文。
+  return rows
     .map(
-      (result, index) =>
-        `[${index + 1}] ${result.title}\nURL: ${result.url}\n` +
+      (result) =>
+        `[${result.index}] ${result.title}\nURL: ${result.url}\n` +
         `发布时间: ${result.publishedDate || '来源未提供'}\n摘要: ${result.content}`,
     )
     .join('\n\n');
-  // URL 是给用户端「来源列表」和引用链接用的，不要让模型把它原样贴进正文：
-  // 小模型很容易退化成 [https://…]，窄屏上一条链接折成好几行。
-  return entries
-    ? `（引用请用 [序号]；URL 仅用于生成来源链接，禁止把裸 URL 或 [URL] 原样写进回答正文。）\n\n${entries}`
-    : '';
+}
+
+/** 独立使用（无 SearchSession）时按传入顺序从 1 编号 */
+export function formatWebSearchContext(results: WebSearchResult[]): string {
+  return formatIndexedWebSearchContext(
+    results.map((result, index) => ({ ...result, index: index + 1 })),
+  );
 }

@@ -1,6 +1,7 @@
 import axios, { AxiosHeaders, type AxiosResponse } from 'axios';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  formatIndexedWebSearchContext,
   formatWebSearchContext,
   isEmotionalTurn,
   isLiveInfoQuery,
@@ -34,6 +35,12 @@ describe('isLiveInfoQuery', () => {
     '面试不顺，帮我查下这家公司',
     '现在几点',
     '今天有啥新闻',
+    // 强时效事件词：没有「新闻」二字也该触发联网检索
+    '哪吒什么时候上映',
+    '新剧今晚几点开播',
+    '中国队夺冠了吗',
+    '今晚双色球开奖结果',
+    '腾讯第三季度财报',
   ])('识别实时查询：%s', (query) => {
     expect(isLiveInfoQuery(query)).toBe(true);
   });
@@ -106,6 +113,43 @@ describe('formatWebSearchContext', () => {
       '[1] 微博热搜榜\nURL: https://example.com/trending\n' +
         '发布时间: 2026-10-10\n摘要: 当前热门话题列表',
     );
+  });
+
+  it('formatIndexedWebSearchContext 使用调用方给定的全局编号', () => {
+    const result: WebSearchResult = {
+      title: '新闻C',
+      url: 'https://c.com/3',
+      content: '摘要C',
+    };
+
+    expect(
+      formatIndexedWebSearchContext([{ ...result, index: 3 }]),
+    ).toContain(
+      '[3] 新闻C\nURL: https://c.com/3\n发布时间: 来源未提供\n摘要: 摘要C',
+    );
+  });
+
+  it('两者文案完全一致：formatWebSearchContext 只是从 1 编号的便捷包装', () => {
+    const results: WebSearchResult[] = [
+      { title: '新闻A', url: 'https://a.com/1', content: '摘要A' },
+    ];
+
+    expect(formatWebSearchContext(results)).toBe(
+      formatIndexedWebSearchContext([{ ...results[0], index: 1 }]),
+    );
+  });
+
+  it('格式化结果只含数据，不夹带内部指令（避免模型复述）', () => {
+    const results: WebSearchResult[] = [
+      { title: '新闻A', url: 'https://a.com/1', content: '摘要A' },
+    ];
+
+    const text = formatWebSearchContext(results);
+    expect(text).toContain('[1] 新闻A');
+    expect(text).toContain('URL: https://a.com/1');
+    expect(text).not.toContain('引用请用');
+    expect(text).not.toContain('禁止把裸 URL');
+    expect(text).not.toContain('URL 仅用于生成来源链接');
   });
 });
 
