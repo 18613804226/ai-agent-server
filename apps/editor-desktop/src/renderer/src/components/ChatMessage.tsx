@@ -68,9 +68,17 @@ export function formatElapsed(ms: number): string {
   return `${min}:${remainder.toString().padStart(2, '0')}`;
 }
 
-/** 折叠多余空行：模型或标签清洗后常在段落间留下 3+ 个换行，统一成最多一个空行 */
+/**
+ * 显示前兜底清洗：/agent 链路和历史消息不走服务端的 APP 清洗器，
+ * 这里至少要认全 CRLF、全角空格 / NBSP 伪空行、行尾空白。
+ * 桌面端用 Markdown 渲染，段落分隔要保留一个空行，不能压成单换行。
+ */
 function collapseBlankLines(text: string): string {
-  return text.replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '').replace(/\n+$/, '');
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/[^\S\n]+\n/g, '\n')
+    .replace(/(?:\n[^\S\n]*){3,}/g, '\n\n')
+    .trim();
 }
 
 /**

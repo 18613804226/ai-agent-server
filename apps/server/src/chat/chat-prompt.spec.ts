@@ -306,7 +306,7 @@ describe('按端区分提示词', () => {
     const web = buildSystemPrompt({ ...base, platform: 'web' });
     const app = buildSystemPrompt({ ...base, platform: 'ios' });
     expect(app.startsWith('【APP 端输出规范')).toBe(true);
-    expect(app).toContain('点与点之间空一行');
+    expect(app).toContain('都只换行，不留任何空白行');
     expect(app).toContain('不复述用户问题');
     expect(app).toContain('长度、形式都不设限');
     // 历史版本压过内容与排版（字数上限、空格/Markdown 禁令），防止回归
@@ -356,38 +356,39 @@ describe('按端区分提示词', () => {
       platform: 'ios',
     });
     expect(appChat.startsWith('【APP 端输出规范')).toBe(true);
-    expect(appChat).toContain('点与点之间空一行');
+    expect(appChat).toContain('都只换行，不留任何空白行');
     expect(appChat).toContain('下方工具、附件、知识库来源');
     expect(appChat).toContain('【搜索结果与工具规则】');
   });
 });
 
 describe('APP 端排版兜底清洗', () => {
-  it('连续空行压成一个空行，首尾空白去掉', () => {
-    expect(formatAppReply('第一句\n\n\n第二句')).toBe('第一句\n\n第二句');
+  it('空白行全部收掉，段落间只留一个换行，首尾空白去掉', () => {
+    expect(formatAppReply('第一句\n\n\n第二句')).toBe('第一句\n第二句');
+    expect(formatAppReply('第一句\n\n第二句')).toBe('第一句\n第二句');
     expect(formatAppReply('\n  \n  你好 \n\n')).toBe('你好');
-    expect(formatAppReply('a\r\n\r\nb')).toBe('a\n\nb');
+    expect(formatAppReply('a\r\n\r\nb')).toBe('a\nb');
   });
 
-  it('全角空格 / NBSP 造的伪空行也算空行，大片留白收成一个空行', () => {
+  it('全角空格 / NBSP 造的伪空行也算空行，大片留白全部收掉', () => {
     // 模型常见变体：伪空行由全角空格（U+3000）或 NBSP 组成，肉眼看不见字符
-    expect(formatAppReply('第一句\n\n　\n\n第二句')).toBe('第一句\n\n第二句');
+    expect(formatAppReply('第一句\n\n　\n\n第二句')).toBe('第一句\n第二句');
     expect(formatAppReply('第一句\n\u00a0\n\u00a0\n\u00a0\n第二句')).toBe(
-      '第一句\n\n第二句',
+      '第一句\n第二句',
     );
     // 行尾全角空格先收掉，伪空行才能被识别为真空行
     expect(formatAppReply('第一句　\n　\n　\n第二句')).toBe(
-      '第一句\n\n第二句',
+      '第一句\n第二句',
     );
-    // 单个伪空行标准化成真空行（视觉不变，都是段间一个空行）
-    expect(formatAppReply('第一句\n　\n第二句')).toBe('第一句\n\n第二句');
+    // 单个伪空行也不留（窄屏上一个空行就足够吃掉半屏）
+    expect(formatAppReply('第一句\n　\n第二句')).toBe('第一句\n第二句');
   });
 
   it('单个合法换行保留', () => {
     expect(formatAppReply('第一句\n第二句')).toBe('第一句\n第二句');
   });
 
-  it('流式清洗：跨 chunk 的连续换行压成一个空行，单个空行保留', () => {
+  it('流式清洗：跨 chunk 的连续换行全部压成单个换行', () => {
     const format = createAppReplyFormatter();
     const out = [
       format('你好\n'),
@@ -396,7 +397,7 @@ describe('APP 端排版兜底清洗', () => {
       format('\n'),
       format('结束'),
     ].join('');
-    expect(out).toBe('你好\n\n世界。\n\n结束');
+    expect(out).toBe('你好\n世界。\n结束');
   });
 
   it('流式开头不留白，结果与整段清洗一致', () => {
