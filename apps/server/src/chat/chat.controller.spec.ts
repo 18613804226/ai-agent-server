@@ -295,6 +295,27 @@ describe('ChatController.streamMessage：只有文件没有 query', () => {
     });
   });
 
+  it('未命中缓存时 done 帧保留 0，不被兜成 null', async () => {
+    const { controller, chatService } = mkController();
+    chatService.sendMessageStream.mockResolvedValue({
+      fullReply: 'ok',
+      tokens: 10,
+      cachedTokens: 0,
+    });
+    const obs = await controller.streamMessage(
+      { id: 'dev-1' },
+      'sess-1',
+      { query: '你好' },
+      undefined,
+      mkRes(),
+    );
+    const events = await drain(obs);
+    expect(events[events.length - 1]).toMatchObject({
+      type: 'done',
+      cachedTokens: 0,
+    });
+  });
+
   it('服务抛错时补一帧收敛文案并正常结束流', async () => {
     const { controller, chatService } = mkController();
     chatService.sendMessageStream.mockRejectedValue(

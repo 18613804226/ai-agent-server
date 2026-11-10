@@ -213,7 +213,7 @@ export interface AgentEvent {
   outputTokens?: number;
   /** 输出 token 中「思考」占的部分（completion_tokens_details.reasoning_tokens） */
   reasoningTokens?: number;
-  /** 命中上游 prompt cache 的输入 token（有才给） */
+  /** 命中上游 prompt cache 的输入 token；未命中为 0，本轮无用量数据时为 undefined */
   cachedTokens?: number;
   /** 首个 token（含思考）的延迟，相对本次 run 开始，单位 ms */
   firstTokenMs?: number;

@@ -932,7 +932,9 @@ export class AgentOrchestrator {
       inputTokens: doneInputTokens,
       outputTokens: usedCompletionTokens,
       reasoningTokens: doneReasoningTokens,
-      cachedTokens: usedCachedTokens || undefined,
+      // 0 表示上游给了 usage 但本轮未命中缓存，是确定值，不能被当成「无数据」抹掉；
+      // 只有本轮完全没有用量数据（回放 / 早退）才由 controller 兜成 null
+      cachedTokens: usedCachedTokens,
       // ✅ 延迟：ttft 与「正文首字」分开
       firstTokenMs:
         firstTokenAt === null ? undefined : firstTokenAt - runStartTime,

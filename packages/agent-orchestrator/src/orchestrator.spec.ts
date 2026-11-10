@@ -106,6 +106,30 @@ describe('AgentOrchestrator.run', () => {
     );
   });
 
+  it('上游报 0 命中时 done 保留 cachedTokens: 0（不被当成无数据抹掉）', async () => {
+    const { client } = fakeClient([
+      [
+        { choices: [{ delta: { content: '你好' } }] },
+        {
+          // 真实流式收尾帧：choices 为空，usage 单独下发
+          choices: [],
+          usage: {
+            prompt_tokens: 6090,
+            completion_tokens: 320,
+            total_tokens: 6410,
+            prompt_tokens_details: { cached_tokens: 0 },
+          },
+        },
+      ],
+    ]);
+    const events = await collect(
+      new AgentOrchestrator(config({ getClient: () => client })),
+      { messages: [], candidates: [dashscope('qwen')] },
+    );
+
+    expect(events.at(-1)).toMatchObject({ type: 'done', cachedTokens: 0 });
+  });
+
   it('上游不报 reasoning_tokens 时按思考/正文字符占比分摊', async () => {
     const { client } = fakeClient([
       [
