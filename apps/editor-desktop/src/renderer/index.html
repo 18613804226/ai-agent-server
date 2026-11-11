@@ -4,6 +4,31 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DieTai Editor Desktop</title>
+    <script>
+      // 在 CSS / React 挂载前定好主题，避免亮色用户启动时闪一下暗色
+      (function () {
+        try {
+          var saved = localStorage.getItem('editor_theme');
+          var theme =
+            saved === 'light' || saved === 'dark'
+              ? saved
+              : window.matchMedia('(prefers-color-scheme: light)').matches
+                ? 'light'
+                : 'dark';
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+          // Windows 隐藏原生标题栏后，顶栏要留出系统窗口按钮的位置
+          if (/Windows/i.test(navigator.userAgent)) {
+            document.documentElement.dataset.winTitlebar = '1';
+          }
+          if (window.electron && window.electron.setTheme) {
+            window.electron.setTheme(theme);
+          }
+        } catch (e) {
+          /* localStorage 不可用时退回 CSS 默认暗色 */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

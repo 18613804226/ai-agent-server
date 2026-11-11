@@ -202,6 +202,11 @@ const api = {
     close: (id: number): Promise<void> =>
       ipcRenderer.invoke('browser:close', id),
   },
+  // 同步 IPC：阻塞到主进程把窗口按钮底色刷出去再返回，
+  // 保证标题栏与网页配色在同一帧切换，不落后一个 IPC 往返
+  setTheme: (theme: 'light' | 'dark'): void => {
+    ipcRenderer.sendSync('theme:set', theme);
+  },
 };
 
 contextBridge.exposeInMainWorld('electron', api);

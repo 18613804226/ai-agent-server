@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { basename, dirname, join, resolve } from 'path';
 import { spawn } from 'child_process';
@@ -32,6 +32,14 @@ let terminalCwd: string | null = null;
 let spawnedChild: ReturnType<typeof spawn> | null = null;
 let spawnedPid: number | null = null;
 
+/** 隐藏原生标题栏后，右上角窗口按钮区域的底色 / 图标色由应用统一提供 */
+export const TITLE_BAR_HEIGHT = 48;
+export function titleBarOverlayFor(theme: 'light' | 'dark') {
+  return theme === 'light'
+    ? { color: '#f0f2f6', symbolColor: '#1f2328', height: TITLE_BAR_HEIGHT }
+    : { color: '#191b21', symbolColor: '#e8eaf0', height: TITLE_BAR_HEIGHT };
+}
+
 function getAgent(): LocalAgent {
   if (!localAgent) {
     // 首次启动不预置工作区，用户点「打开文件夹」后再创建
@@ -53,6 +61,23 @@ function persistRoots(): void {
 }
 
 export function registerIpc(): void {
+  // 同步 handler：必须设置 event.returnValue，否则 sendSync 会一直等
+  ipcMain.on('theme:set', (event, theme: 'light' | 'dark') => {
+    if (theme === 'light' || theme === 'dark') {
+      // 先刷窗口按钮底色（视觉最敏感），再更新 themeSource（系统对话框等）
+      const overlay = titleBarOverlayFor(theme);
+      for (const win of BrowserWindow.getAllWindows()) {
+        try {
+          win.setTitleBarOverlay(overlay);
+        } catch {
+          // macOS 用交通灯按钮，没有 titleBarOverlay
+        }
+      }
+      nativeTheme.themeSource = theme;
+    }
+    event.returnValue = null;
+  });
+
   ipcMain.handle('config:get', () => getConfig());
 
   ipcMain.handle('config:set', (_event, next: AppConfig) => {

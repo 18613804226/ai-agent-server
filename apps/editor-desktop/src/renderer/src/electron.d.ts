@@ -38,6 +38,7 @@ export interface RunStateInfo {
 declare global {
   interface Window {
     electron: {
+      setTheme(theme: 'light' | 'dark'): void;
       versions: { node: string; chrome: string; electron: string };
       config: {
         get(): Promise<AppConfig>;

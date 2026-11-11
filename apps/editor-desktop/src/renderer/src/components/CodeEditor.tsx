@@ -1,5 +1,13 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import * as monaco from 'monaco-editor';
+import { useTheme } from '../theme/ThemeContext';
 import { diffLines } from '../diff';
 import type { FileEdit } from '../mode/types';
 
@@ -157,10 +165,17 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
     /** 流式编辑队列：保证多个 file_edit 串行执行，不互相覆盖 */
     const queueRef = useRef<Promise<void>>(Promise.resolve());
     const [streaming, setStreaming] = useState(false);
+    const { theme } = useTheme();
 
     onChangeRef.current = onChange;
     onAskAIRef.current = onAskAI;
     valueRef.current = value;
+
+    // 与 ThemeProvider 同在 layout effect 批次里执行，浏览器绘制前完成换肤；
+    // 只换配色、不重建编辑器（会丢光标、选区与撤销栈）
+    useLayoutEffect(() => {
+      monaco.editor.setTheme(theme === 'light' ? 'vs' : 'vs-dark');
+    }, [theme]);
 
     useEffect(() => {
       if (!host.current) return;
@@ -170,7 +185,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
 
       const editor = monaco.editor.create(host.current, {
         model,
-        theme: 'vs-dark',
+        theme: theme === 'light' ? 'vs' : 'vs-dark',
         automaticLayout: true,
         fontFamily: "'Cascadia Code', 'JetBrains Mono', 'Fira Code', Consolas, monospace",
         fontSize: 13,

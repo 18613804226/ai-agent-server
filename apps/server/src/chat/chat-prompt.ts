@@ -179,8 +179,9 @@ const APP_OUTPUT_RULES = `【APP 端输出规范｜优先级最高，覆盖下�
 当前在手机 APP 上对话，屏幕窄、内容按流式逐字显示，请遵守：
 1. 直给答案，第一句就是结论；不复述用户问题，不写「好的」「我来帮你」这类开场白和客套话。
 2. 排版规则：同一段内不换行；段与段之间、分点（1. 2. 3. 或 -）之间都只换行，不留任何空白行；分点每一点单独一行即可，窄屏上照样分得清条目；禁止空行和大片留白（流式显示时空行会吃掉半屏）。
-3. 内容照常充分输出：长度、形式都不设限，该详细就详细，需要的解释、步骤、例子、代码就完整写出来，把问题讲透；不要刻意压短、省略依据或只回结论。补充内容必须有依据，不确定的细节不要编；不知道就直接说不清楚，不编造、不脑补。
-4. 下方工具、附件、知识库来源与联网引用规则依然有效；APP 端正文中禁止出现任何完整 URL 或「[URL]」这种方括号包链接，联网事实只用 [1]、[2] 这类数字角标跟在对应句子后面（编号对应【本轮联网搜索结果】或 web_search 结果里的 [序号]），链接由客户端的来源列表统一展示；知识库来源只在末尾写一行【来源：xxx】，都不要额外空行。`;
+3. 开头和结尾都不得出现空白行：回答的第一行就是正文，最后一行也是正文；不要用换行、空格、全角空格开头或结尾，也不要先空一行再开始、说完再空一行收尾。
+4. 内容照常充分输出：长度、形式都不设限，该详细就详细，需要的解释、步骤、例子、代码就完整写出来，把问题讲透；不要刻意压短、省略依据或只回结论。补充内容必须有依据，不确定的细节不要编；不知道就直接说不清楚，不编造、不脑补。
+5. 下方工具、附件、知识库来源与联网引用规则依然有效；APP 端正文中禁止出现任何完整 URL 或「[URL]」这种方括号包链接，联网事实只用 [1]、[2] 这类数字角标跟在对应句子后面（编号对应【本轮联网搜索结果】或 web_search 结果里的 [序号]），链接由客户端的来源列表统一展示；知识库来源只在末尾写一行【来源：xxx】，都不要额外空行。`;
 
 /**
  * 闲聊增强档：只额外强调口语直给，工具 / 附件 / 引用规则由完整模板提供。
@@ -341,6 +342,26 @@ function collapseBlankLines(text: string): string {
 }
 
 /**
+ * 零宽空格（U+200B）/ BOM（U+FEFF）在正文里只会被模型当缩进或占位，
+ * 肉眼不可见，却会造出「看起来没空、实际有空」的首尾空白行，直接删掉。
+ * ⚠️ emoji 组合用的 ZWJ（U+200D）不能动，删了会拆散表情。
+ */
+function stripInvisible(text: string): string {
+  return text.replace(/[\u200b\ufeff]/g, '');
+}
+
+/**
+ * 首尾空白行：开头第一行 / 结尾最后一行不允许是空白行。
+ * \s 覆盖全角空格（U+3000）与 NBSP，再加上零宽字符，首尾一律剥干净。
+ */
+const LEAD_BLANK = /^[\s\u200b\ufeff]+/;
+const TAIL_BLANK = /[\s\u200b\ufeff]+$/;
+
+function stripEdgeBlankLines(text: string): string {
+  return text.replace(LEAD_BLANK, '').replace(TAIL_BLANK, '');
+}
+
+/**
  * APP 正文里不该出现 URL：小模型常把联网引用写成 `[https://…]`，
  * 窄屏上一条链接折成好几行，既占屏又不可点（截图里就是这个）。
  * 真链接改由 sources 事件结构化下发；这里只负责把正文里的裸 URL 收干净。
@@ -387,7 +408,9 @@ function splitHeldTail(text: string): { body: string; held: string } {
  * 保证流式看到的与历史回显一致。
  */
 export function formatAppReply(text: string): string {
-  return collapseBlankLines(stripInlineUrls(text)).trim();
+  return stripEdgeBlankLines(
+    collapseBlankLines(stripInlineUrls(stripInvisible(text))),
+  );
 }
 
 /**
@@ -409,13 +432,13 @@ export function createAppReplyFormatter(): AppReplyFormatter {
   let pending = '';
   const format = (chunk: string): string => {
     if (!chunk && !pending) return '';
-    const merged = collapseBlankLines(pending + chunk);
+    const merged = collapseBlankLines(stripInvisible(pending + chunk));
     const { body, held } = splitHeldTail(merged);
     pending = held;
     let out = stripInlineUrls(body);
     if (!started) {
-      // 开头不留白：流式第一帧就出现换行/空格，手机上会顶出一截空白
-      out = out.replace(/^\s+/, '');
+      // 开头不留空白行：流式第一帧就出现换行/空格，手机上会顶出一截空白
+      out = stripEdgeBlankLines(out);
       if (!out) return '';
       started = true;
     }
@@ -426,8 +449,8 @@ export function createAppReplyFormatter(): AppReplyFormatter {
     const held = pending;
     pending = '';
     if (!held) return '';
-    // 尾部空白一律丢（末尾空白行），裸 URL 也丢；其余（含完整图片）原样补回
-    return stripInlineUrls(held.replace(/\s+$/, '')).trim();
+    // 首尾空白一律丢（开头/结尾空白行），裸 URL 也丢；其余（含完整图片）原样补回
+    return stripEdgeBlankLines(stripInlineUrls(held));
   };
   return formatter;
 }

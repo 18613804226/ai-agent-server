@@ -307,6 +307,8 @@ describe('按端区分提示词', () => {
     const app = buildSystemPrompt({ ...base, platform: 'ios' });
     expect(app.startsWith('【APP 端输出规范')).toBe(true);
     expect(app).toContain('都只换行，不留任何空白行');
+    expect(app).toContain('开头和结尾都不得出现空白行');
+    expect(app).toContain('第一行就是正文');
     expect(app).toContain('不复述用户问题');
     expect(app).toContain('长度、形式都不设限');
     // 历史版本压过内容与排版（字数上限、空格/Markdown 禁令），防止回归
@@ -386,6 +388,40 @@ describe('APP 端排版兜底清洗', () => {
 
   it('单个合法换行保留', () => {
     expect(formatAppReply('第一句\n第二句')).toBe('第一句\n第二句');
+  });
+
+  it('开头 / 结尾的空白行一律收掉：正文第一行就是开头，最后一行就是结尾', () => {
+    // 半角空白行
+    expect(formatAppReply('\n\n第一句\n第二句\n\n')).toBe('第一句\n第二句');
+    // 全角空格 / NBSP 造的伪空白行（首尾各一段）
+    expect(formatAppReply('　\n　\n第一句\n第二句\n\u00a0\n\u00a0')).toBe(
+      '第一句\n第二句',
+    );
+    // 零宽空格 / BOM 当缩进：肉眼看不到，也必须算首尾空白
+    expect(formatAppReply('\u200b\u200b\n第一句\u200b\n\u200b')).toBe(
+      '第一句',
+    );
+    expect(formatAppReply('\ufeff第一句\ufeff')).toBe('第一句');
+    // 只有空白 → 空串，不会渲染出一个纯空白回复
+    expect(formatAppReply('\n\n　\n')).toBe('');
+  });
+
+  it('流式首尾空白行同样被限制：首帧不出空白，flush 不留尾巴', () => {
+    // 开头连续空帧被吞掉，不发任何可见内容
+    const leading = createAppReplyFormatter();
+    expect(leading('\n\n')).toBe('');
+    expect(leading('　\n')).toBe('');
+    expect(leading('\u200b')).toBe('');
+    expect(leading('第一段')).toBe('第一段');
+    expect(leading.flush()).toBe('');
+
+    // 结尾空白行（含零宽字符）在 flush 时丢掉
+    for (const tail of ['\n', '\n\n', ' \n', '\n \n', '　\n', '\u200b']) {
+      const format = createAppReplyFormatter();
+      const out = format('第一段') + format(tail) + format.flush();
+      expect(out).toBe('第一段');
+      expect(out.endsWith('\n')).toBe(false);
+    }
   });
 
   it('流式清洗：跨 chunk 的连续换行全部压成单个换行', () => {

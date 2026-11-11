@@ -28,6 +28,41 @@ import type {
   FileChange,
   WorkspaceProvider,
 } from './mode/types';
+import { useTheme, type Theme } from './theme/ThemeContext';
+
+/** 顶栏主题按钮图标：暗色时显示太阳（点了变亮），亮色时显示月亮 */
+function ThemeIcon({ theme }: { theme: Theme }) {
+  return theme === 'dark' ? (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+    </svg>
+  ) : (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    </svg>
+  );
+}
 
 function createBackend(mode: AgentMode): {
   transport: AgentTransport;
@@ -42,6 +77,7 @@ function createBackend(mode: AgentMode): {
 
 export function App() {
   const { mode, setMode } = useMode();
+  const { theme, toggleTheme } = useTheme();
   const backend = useMemo(() => createBackend(mode), [mode]);
 
   const [activeDiff, setActiveDiff] = useState<FileChange | null>(null);
@@ -481,6 +517,15 @@ export function App() {
             云端
           </button>
         </div>
+        <button
+          className="ghost theme-toggle"
+          onClick={toggleTheme}
+          title={theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'}
+          aria-label={theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'}
+        >
+          <ThemeIcon theme={theme} />
+          {theme === 'dark' ? '亮色' : '暗色'}
+        </button>
       </header>
 
       {!modelConfigured && mode === 'local' ? (

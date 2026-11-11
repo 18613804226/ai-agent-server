@@ -2,6 +2,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import { ModeProvider } from './mode/ModeContext';
+import { ThemeProvider } from './theme/ThemeContext';
 import { setupMonacoWorkers } from './monaco';
 import './styles.css';
 
@@ -14,7 +15,9 @@ if (!container) throw new Error('找不到 #root');
 createRoot(container).render(
   <React.StrictMode>
     <ModeProvider>
-      <App />
+      <ThemeProvider>
+        <App />
+      </ThemeProvider>
     </ModeProvider>
   </React.StrictMode>,
 );

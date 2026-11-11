@@ -1,7 +1,7 @@
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, Menu, nativeTheme, shell } from 'electron';
 import { existsSync, readdirSync } from 'fs';
 import { join } from 'path';
-import { registerIpc } from './ipc.js';
+import { registerIpc, titleBarOverlayFor } from './ipc.js';
 import { loadEnv } from './env.js';
 
 // 必须在 registerIpc / getConfig 之前加载，provider 的 key 从 env 读取
@@ -42,8 +42,20 @@ function createWindow(): void {
     width: 1360,
     height: 860,
     show: false,
+    // 窗口底色跟随系统明暗，避免渲染页面加载前闪一下白屏
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#1e1e1e' : '#ffffff',
     title: 'DieTai Editor Desktop',
     ...(icon ? { icon } : {}),
+    // Windows / Linux 隐藏原生标题栏：右上角的窗口按钮由系统绘制，
+    // 底色与图标色由应用主题决定（theme:set 时刷新）
+    ...(process.platform !== 'darwin'
+      ? {
+          titleBarStyle: 'hidden' as const,
+          titleBarOverlay: titleBarOverlayFor(
+            nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
+          ),
+        }
+      : {}),
     webPreferences: {
       // electron-vite 在 "type": "module" 下产出 ESM 预加载脚本（.mjs）
       preload: join(__dirname, '../preload/index.mjs'),
@@ -73,6 +85,8 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  // 去掉 Electron 默认的英文菜单栏：它由系统绘制，配色不跟随应用主题
+  Menu.setApplicationMenu(null);
   registerIpc();
   createWindow();
   // 内置浏览器（<webview>）调试：开发模式自动打开 DevTools，并打印加载失败
