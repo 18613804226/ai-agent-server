@@ -181,18 +181,23 @@ export function isAppPlatform(platform?: string | null): boolean {
 
 /**
  * APP 端专用输出规范：手机屏幕窄 + 流式逐字显示。
- * 排版只约束「空白行」：段落、列表项之间都只换行、不留空行，避免窄屏上
- * 一个空行被渲染层的段落间距放大成半屏留白；内容长度与形式（分点、代码、步骤）
- * 一律不设限，避免回答被压得太简洁。
+ * 排版按「短标题 + 短段落」：段落之间只留一个空行，列表短而稀，
+ * 结尾单独一段给一句可执行的追问，避免窄屏上 4～6 行的长 bullet 挤成一堵墙。
+ * 约束的是「结构」而不是「长度」：内容照常充分、有依据，靠小标题分展开，
+ * 不刻意压短、也不编细节。
  * 这段放在提示词最前面并声明最高优先级，但不覆盖工具 / 附件 / 引用规则。
  */
 const APP_OUTPUT_RULES = `【APP 端输出规范｜优先级最高，覆盖下方所有规则】
 当前在手机 APP 上对话，屏幕窄、内容按流式逐字显示，请遵守：
 1. 直给答案，第一句就是结论；不复述用户问题，不写「好的」「我来帮你」这类开场白和客套话。
-2. 排版规则：同一段内不换行；段与段之间、分点（1. 2. 3. 或 -）之间都只换行，不留任何空白行；分点每一点单独一行即可，窄屏上照样分得清条目；禁止空行和大片留白（流式显示时空行会吃掉半屏）。
-3. 开头和结尾都不得出现空白行：回答的第一行就是正文，最后一行也是正文；不要用换行、空格、全角空格开头或结尾，也不要先空一行再开始、说完再空一行收尾。
-4. 内容照常充分输出：长度、形式都不设限，该详细就详细，需要的解释、步骤、例子、代码就完整写出来，把问题讲透；不要刻意压短、省略依据或只回结论。补充内容必须有依据，不确定的细节不要编；不知道就直接说不清楚，不编造、不脑补。
-5. 下方工具、附件、知识库来源与联网引用规则依然有效；APP 端正文中禁止出现任何完整 URL 或「[URL]」这种方括号包链接，联网事实只用 [1]、[2] 这类数字角标跟在对应句子后面（编号对应【本轮联网搜索结果】或 web_search 结果里的 [序号]），链接由客户端的来源列表统一展示；知识库来源只在末尾写一行【来源：xxx】，都不要额外空行。`;
+2. 【排版约束】用短标题行分段：6–12 字纯文本单独一行，前后各留一个空行；不要用 # / ** 等标记。例：「价格现实」「300 档最容易踩的坑」「给你两条路」。
+3. 【排版约束】每段 2–4 行；每条列表项只讲一个要点、控制在 2 行以内，禁止在一条里堆 3 个以上分号短句。
+4. 【排版约束】列表不超过 5 项，超了拆成「小标题 + 子列表」。
+5. 【排版约束】结尾单独一段，只给一个可执行的追问句，不要再加总结或客套话。
+6. 【排版约束】段落之间只留一个空行，不要连续空行；开头和结尾都不得出现空白行：不要用换行、空格、全角空格开头或结尾，也不要先空一行再开始、说完再空一行收尾。
+7. 【排版约束】不输出 Markdown 标题、表格、代码块等块级元素，除非用户明确要求。
+8. 内容照常充分输出：该详细就详细，需要的解释、步骤、例子完整写出来，用「小标题 + 短段落」展开，不要把长内容挤成一整段或一条超长列表；不要刻意压短、省略依据或只回结论。补充内容必须有依据，不确定的细节不要编；不知道就直接说不清楚，不编造、不脑补。
+9. 下方工具、附件、知识库来源与联网引用规则依然有效；APP 端正文中禁止出现任何完整 URL 或「[URL]」这种方括号包链接，也不要复述搜索结果里的「发布时间」「URL」这类元数据字段；联网事实只用 [1]、[2] 这类数字角标跟在对应句子后面（编号对应【本轮联网搜索结果】或 web_search 结果里的 [序号]），链接由客户端的来源列表统一展示；知识库来源只在末尾写一行【来源：xxx】，都不要额外空行。`;
 
 /**
  * 闲聊增强档：只额外强调口语直给，工具 / 附件 / 引用规则由完整模板提供。
@@ -231,7 +236,7 @@ const CHAT_TOOL_RULES = formatRuleList([
  */
 const STATIC_RULES = `你是一个专属的 AI 智能助手。
 - 你的名字叫toto。
-- 你是由开发者独立打造的智能助手，能够协助处理各种问题。
+- 你是由开发者独立打造的智能助手，能够协助处理各种问题，可以跟用户有感情的互动。
 - 涉及"今天/明天/现在/星期几"的问题，以末尾【本轮上下文】里的当前时间为准，禁止自己推测日期。
 - 用户问传统节日但没给年份时，默认指最近一次尚未到来的日期，不要回答已经过去的年份。
 
@@ -263,7 +268,9 @@ function buildRuntimeContext(
 ): string {
   const sections: string[] = [`【当前时间】\n${currentTime}`];
 
-  sections.push(`【参考资料】：\n${parts.context || '本轮没有提供知识库参考资料。'}`);
+  sections.push(
+    `【参考资料】：\n${parts.context || '本轮没有提供知识库参考资料。'}`,
+  );
   sections.push(`【历史对话来源状态】：\n${parts.historySourceSummary}`);
 
   if (parts.conversationDigest) {
@@ -285,7 +292,9 @@ function buildRuntimeContext(
     sections.push(parts.festivalContext);
   }
 
-  sections.push(`【本轮联网搜索结果】：\n${parts.webSearchContext || '本轮未执行联网搜索。'}`);
+  sections.push(
+    `【本轮联网搜索结果】：\n${parts.webSearchContext || '本轮未执行联网搜索。'}`,
+  );
   return sections.join('\n\n');
 }
 
@@ -329,7 +338,8 @@ export function buildSystemPrompt(parts: SystemPromptParts): string {
 
   // APP 端把移动端规则前置：模型对提示词首尾位置更敏感
   const appRules = isAppPlatform(parts.platform) ? `${APP_OUTPUT_RULES}\n` : '';
-  const toneRules = parts.promptProfile === 'chat' ? `${CHAT_TONE_RULES}\n` : '';
+  const toneRules =
+    parts.promptProfile === 'chat' ? `${CHAT_TONE_RULES}\n` : '';
   const runtime = buildRuntimeContext(parts, currentTime);
 
   return `${appRules}${toneRules}${STATIC_RULES}
@@ -339,17 +349,40 @@ export function buildSystemPrompt(parts: SystemPromptParts): string {
 ${runtime}`;
 }
 
+/** 围栏状态：open 为 null 表示在代码块外，否则是当前未闭合的围栏标记 */
+interface FenceState {
+  open: string | null;
+}
+
 /**
- * 连续换行（2 个及以上，含只夹空白字符的伪空行）压成单个换行：
- * APP 窄屏上哪怕一个空行，也会被渲染层的段落间距放大成半屏留白，
- * 所以段落 / 分点之间只留一个换行，正文完全不留空白行。
+ * 段落之间保留「一个空行」（\n\n）：3 个及以上连续换行压成 \n\n，
+ * 单个换行（同段内换行 / 列表项）原样保留；首尾空白由 stripEdgeBlankLines 兜底。
  * [^\S\n] = 除换行外的所有空白（含全角空格 U+3000 / NBSP）——
- * 小模型爱用全角空格造「伪空行」，只认半角空格会整段漏过去。
+ * 小模型爱用全角空格造「伪空行」，先清行尾空白才识别得出来。
+ *
+ * 代码块（``` / ~~~）内部原样保留，否则代码里的空行会被一起压掉。
+ * state 由调用方持有：流式逐 chunk 时围栏常跨帧，落定全文则用一次性的空状态，
+ * 两条路径共用这一套规则，吐完那一刻气泡不会突然变高 / 变矮。
  */
-function collapseBlankLines(text: string): string {
+function collapseBlankLines(
+  text: string,
+  state: FenceState = { open: null },
+): string {
   return text
-    .replace(/\r\n?/g, '\n')
-    .replace(/(?:\n[^\S\n]*){2,}/g, '\n');
+    .split(/(```|~~~)/g)
+    .map((segment) => {
+      if (segment === '```' || segment === '~~~') {
+        if (state.open === null) state.open = segment;
+        else if (state.open === segment) state.open = null;
+        return segment;
+      }
+      if (state.open !== null || !segment) return segment;
+      return segment
+        .replace(/\r\n?/g, '\n')
+        .replace(/[^\S\n]+\n/g, '\n')
+        .replace(/(?:\n[^\S\n]*){3,}/g, '\n\n');
+    })
+    .join('');
 }
 
 /**
@@ -383,14 +416,16 @@ const APP_RAW_URL =
   /(?<!\]\()\[?https?:\/\/[^\s\]\)，。！？；：、（）【】\u4e00-\u9fff]+\]?/g;
 
 function stripInlineUrls(text: string): string {
-  return text
-    // 普通 Markdown 链接只留锚文本；图片链接跳过（负向回顾排除前面的 !）
-    .replace(/(?<!!)\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1')
-    .replace(APP_RAW_URL, '')
-    .replace(/\[\s*\]/g, '')
-    // 行尾空白（含全角空格）一并收掉：伪空行先变真空行，collapseBlankLines 才接得住
-    .replace(/[^\S\n]+\n/g, '\n')
-    .replace(/[ \t]{2,}/g, ' ');
+  return (
+    text
+      // 普通 Markdown 链接只留锚文本；图片链接跳过（负向回顾排除前面的 !）
+      .replace(/(?<!!)\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1')
+      .replace(APP_RAW_URL, '')
+      .replace(/\[\s*\]/g, '')
+      // 行尾空白（含全角空格）一并收掉：伪空行先变真空行，collapseBlankLines 才接得住
+      .replace(/[^\S\n]+\n/g, '\n')
+      .replace(/[ \t]{2,}/g, ' ')
+  );
 }
 
 /**
@@ -400,7 +435,15 @@ function stripInlineUrls(text: string): string {
 const HELD_URL_TAIL =
   /(?:!\[[^\]\n]*\]\([^)\s]*|\[?https?:\/\/[^\s\]\)，。！？；：、（）【】\u4e00-\u9fff]*\]?|\[h(?:t(?:t(?:p(?:s(?::(?:\/{0,2})?)?)?)?)?)?|\[\d{0,2})$/;
 
-/** 把暂时不能决定的尾部扣住：空白 + URL 片段 */
+/**
+ * 尾部半截围栏（``` / ~~~ 被 chunk 切成 1–2 个字符）：扣住等下一帧拼全。
+ * 不扣的话流式会先把 1～2 个反引号当正文发出去，围栏计数与落定全文错开，
+ * 代码块内的空行就会出现「流式与落定清洗结果不一致」。
+ * lookbehind 排除第 3 个同类字符，完整的 ``` / ~~~ 不会被误扣。
+ */
+const HELD_FENCE_TAIL = /(?<!`)`{1,2}$|(?<!~)~{1,2}$/;
+
+/** 把暂时不能决定的尾部扣住：空白 + URL 片段 + 半截围栏 */
 function splitHeldTail(text: string): { body: string; held: string } {
   let body = text;
   let held = '';
@@ -408,6 +451,11 @@ function splitHeldTail(text: string): { body: string; held: string } {
   if (urlTail) {
     held = urlTail[0];
     body = body.slice(0, -held.length);
+  }
+  const fenceTail = HELD_FENCE_TAIL.exec(body);
+  if (fenceTail) {
+    held = fenceTail[0] + held;
+    body = body.slice(0, -fenceTail[0].length);
   }
   const wsTail = /\s+$/.exec(body);
   if (wsTail) {
@@ -418,8 +466,8 @@ function splitHeldTail(text: string): { body: string; held: string } {
 }
 
 /**
- * APP 端兜底清洗：提示词压不住时用代码收掉空行与裸 URL，
- * 保证流式看到的与历史回显一致。
+ * APP 端兜底清洗：提示词压不住时用代码把段落间空行规范成「一个」、
+ * 收掉首尾空白与裸 URL，保证流式看到的与历史回显一致。
  */
 export function formatAppReply(text: string): string {
   return stripEdgeBlankLines(
@@ -477,6 +525,8 @@ export function createAppReplyFormatter(
   let pending = '';
   // 已出现的 ``` 个数：奇数表示当前处于代码块内（代码里的 [1] 不是引用）
   let fence = 0;
+  // 空行规范化的围栏状态跨 chunk 延续，与落定全文走同一套规则
+  const spacingFence: FenceState = { open: null };
   /** 流式逐段对齐角标：来源没收集到的 [n] 直接不发，避免客户端出现悬空引用 */
   const applyCitations = (text: string): string => {
     if (!options.citationIndexes) return text;
@@ -497,7 +547,10 @@ export function createAppReplyFormatter(
   };
   const format = (chunk: string): string => {
     if (!chunk && !pending) return '';
-    const merged = collapseBlankLines(stripInvisible(pending + chunk));
+    const merged = collapseBlankLines(
+      stripInvisible(pending + chunk),
+      spacingFence,
+    );
     const { body, held } = splitHeldTail(merged);
     pending = held;
     let out = applyCitations(stripInlineUrls(body));
@@ -584,6 +637,7 @@ export function toSpeakableText(text: string, limit = 300): string {
     head.lastIndexOf('，'),
     head.lastIndexOf('. '),
   );
-  return (boundary >= limit * 0.6 ? head.slice(0, boundary + 1) : head)
-    .trimEnd();
+  return (
+    boundary >= limit * 0.6 ? head.slice(0, boundary + 1) : head
+  ).trimEnd();
 }

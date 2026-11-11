@@ -1142,7 +1142,7 @@ export class ChatService {
               if (raw) firstContentAt ??= Date.now();
               onChunk('content', raw);
             } else {
-              // 逐 chunk 压空行；跨 chunk 的连续换行由 formatter 内部合并
+              // 逐 chunk 规范段落间空行；跨 chunk 的连续换行由 formatter 内部合并
               const text = appReplyFormatter(raw);
               if (text) {
                 firstContentAt ??= Date.now();
