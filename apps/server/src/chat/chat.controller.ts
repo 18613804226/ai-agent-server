@@ -297,6 +297,8 @@ export class ChatController {
       attachmentIds?: unknown;
       /** APP 端可显式声明终端形态；不传时回退到登录时上报的 Device.platform */
       platform?: string;
+      /** 客户端定位到的用户所在城市（天气类提问时携带），拼进检索词与模型上下文 */
+      location?: string;
     },
     @UploadedFile() file: Express.Multer.File | undefined,
     @Res({ passthrough: true }) res: Response,
@@ -346,6 +348,11 @@ export class ChatController {
     }
     const fileIds = asList(body?.fileIds);
     const attachmentIds = asList(body?.attachmentIds);
+    // ✅ 客户端定位的城市（天气类提问携带）：清洗后只作当轮上下文，不落库
+    const location =
+      typeof body?.location === 'string' && body.location.trim()
+        ? body.location.trim().slice(0, 64)
+        : undefined;
 
     // ✅ 「只传文件/图片、没输问题」也要放行：有 file、已上传附件或图片即可。
     //    三者都没有才报错，避免空请求白白建一条 SSE。
@@ -450,6 +457,7 @@ export class ChatController {
             rawQuery, // ✅ 落库用用户原文：只传文件时补的默认指令不进聊天记录
             platform, // ✅ APP 端专用提示词 / 排版清洗的开关
             device?.id, // ✅ 设备 ID：读写该设备的用户画像（只存白名单偏好）
+            location, // ✅ 用户所在城市：天气类提问时拼检索词与模型上下文，不落库
           );
 
           if (!isClientDisconnected) {

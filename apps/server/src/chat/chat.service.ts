@@ -341,6 +341,12 @@ export class ChatService {
      * 设备 ID：用于读写该设备的用户画像（只存用户明确要求记住的白名单偏好）。
      */
     deviceId?: string,
+    /**
+     * 客户端定位到的用户所在城市（如「广东省 深圳市」，天气类提问携带）。
+     * 只拼进当轮联网检索词与喂给模型的用户消息前缀；落库仍用用户原文，
+     * 位置不进聊天记录，也不影响 RAG / 画像提取等基于原文的判定。
+     */
+    location?: string,
   ) {
     const overallStartTime = Date.now();
     const aborted = () => signal?.aborted === true;
@@ -487,11 +493,18 @@ export class ChatService {
             take: 30,
           }),
           liveInfoQuery
-            ? searchWeb(userQuery, signal)
+            ? // ✅ 天气类提问带上定位城市，检索结果才是「当地」的实时信息
+              searchWeb(
+                location ? `${location} ${userQuery}` : userQuery,
+                signal,
+              )
                 .then((r) => {
                   onChunk('thought', `🔎 已联网检索：${r.length} 条结果。`);
                   // ✅ 预检索同样入池：与模型补搜共用一套全局编号，末尾 sources 同源
-                  searchSession?.add(r, { origin: 'prefetch', query: userQuery });
+                  searchSession?.add(r, {
+                    origin: 'prefetch',
+                    query: userQuery,
+                  });
                   return {
                     results: r,
                     status: (r.length ? 'ok' : 'empty') as 'ok' | 'empty',
@@ -855,10 +868,19 @@ export class ChatService {
           image_url: { url: dataUrl },
         }));
 
-      // ✅ 附件正文并入「当前用户消息」（见下方 userMessage 说明），预算里也要按它算 token
-      const userText = attachmentContext
-        ? `${attachmentContext}\n\n${userQuery}`
-        : userQuery;
+      // ✅ 附件正文并入「当前用户消息」（见下方 userMessage 说明），预算里也要按它算 token。
+      //    天气回合带定位时，同样在这里前缀注入（括号包住，模型不会当成用户说的话复述）；
+      //    落库走 persistContent（用户原文），位置不进聊天记录。
+      const locationPrefix = location
+        ? `（用户当前位于：${location}，回答天气/本地信息时以此为位置）\n\n`
+        : '';
+      const userText = locationPrefix
+        ? attachmentContext
+          ? `${locationPrefix}${attachmentContext}\n\n${userQuery}`
+          : `${locationPrefix}${userQuery}`
+        : attachmentContext
+          ? `${attachmentContext}\n\n${userQuery}`
+          : userQuery;
       const MAX_INPUT_TOKENS = readMaxInputTokens();
       const systemTokens = estimateTokens(baseSystemPrompt);
       const queryTokens = estimateTokens(userText);
