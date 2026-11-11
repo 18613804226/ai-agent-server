@@ -162,10 +162,21 @@ const APP_PLATFORM_ALIASES = new Set([
   'react-native',
 ]);
 
+/**
+ * 端标识判定：既要覆盖精确别名，也要覆盖「系统名 + 版本号 / 机型」这类常见上报值
+ * （Android 14 / iOS 17.5 / HarmonyOS 4.2 / iPhone 15 Pro / React Native 0.74）。
+ * ⚠️ 之前只对 ios|android|app|mobile 做前缀匹配，鸿蒙 / 小米带版本的上报值会被判成
+ * 非 APP 端，导致 APP 提示词与首尾空白行清洗整轮失效——天气这类工具轮末尾的换行
+ * 就会原样透传到客户端，看起来「只有天气多一行空白」。
+ */
 export function isAppPlatform(platform?: string | null): boolean {
   if (!platform) return false;
   const p = platform.trim().toLowerCase();
-  return APP_PLATFORM_ALIASES.has(p) || /^(ios|android|app|mobile)[-_/ .]/.test(p);
+  if (!p) return false;
+  if (APP_PLATFORM_ALIASES.has(p)) return true;
+  return /^(ios|iphone|ipad|android|app|mobile|harmony(?:os)?|miui|hyperos|flutter|react[-_ ]?native)(?:$|[-_/ .])/.test(
+    p,
+  );
 }
 
 /**

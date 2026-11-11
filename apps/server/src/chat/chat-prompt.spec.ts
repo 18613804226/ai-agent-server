@@ -295,9 +295,32 @@ describe('按端区分提示词', () => {
     expect(isAppPlatform('app')).toBe(true);
   });
 
+  it('带版本号 / 机型的上报值也识别为 APP 端（漏判会让首尾空白行清洗失效）', () => {
+    for (const platform of [
+      'Android 14',
+      'iOS 17.5',
+      'iPhone 15 Pro',
+      'iPad Air',
+      'HarmonyOS 4.2',
+      'harmonyos next',
+      'MIUI 14',
+      'HyperOS 1.0',
+      'React Native 0.74',
+      'react-native',
+      'Flutter 3.24',
+    ]) {
+      expect(isAppPlatform(platform), platform).toBe(true);
+    }
+  });
+
   it('web / desktop / 空值不识别为 APP 端', () => {
     expect(isAppPlatform('web')).toBe(false);
     expect(isAppPlatform('desktop')).toBe(false);
+    expect(isAppPlatform('Windows 11')).toBe(false);
+    expect(isAppPlatform('macOS 14')).toBe(false);
+    expect(isAppPlatform('Linux')).toBe(false);
+    expect(isAppPlatform('')).toBe(false);
+    expect(isAppPlatform('   ')).toBe(false);
     expect(isAppPlatform(undefined)).toBe(false);
     expect(isAppPlatform(null)).toBe(false);
   });
