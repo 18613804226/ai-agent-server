@@ -35,6 +35,7 @@ import {
   type AttachmentKind,
 } from './attachment-store.js';
 import {
+  alignCitations,
   buildAttachmentDigest,
   buildConversationDigest,
   buildSystemPrompt,
@@ -663,6 +664,14 @@ export class ChatService {
         ...docSources,
         ...(searchSession ? searchSession.list() : fallbackWebSources),
       ];
+      /**
+       * 正文角标只认这些编号：有同号来源才允许出现 [n]，否则删掉悬空角标。
+       * 延迟求值，补搜新增的来源能在后续帧/收尾时补上。
+       */
+      const citationIndexes = (): number[] =>
+        replySources()
+          .map((source: any) => source?.index)
+          .filter((index: unknown): index is number => typeof index === 'number');
       const hasRelevantDocs =
         !isCasualChat && relevantAndPassingDocs.length > 0;
 
@@ -781,7 +790,9 @@ export class ChatService {
         : '此前对话未引用知识库资料。';
       const isApp = isAppPlatform(platform);
       // APP 端流式增量清洗器：只在 APP 端创建，其它端输出保持逐字不变
-      const appReplyFormatter = isApp ? createAppReplyFormatter() : undefined;
+      const appReplyFormatter = isApp
+        ? createAppReplyFormatter({ citationIndexes })
+        : undefined;
 
       // ✅ 闲聊增强档：本轮没有资料/附件/联网结果/工具需求时，额外前置口语直给要求；
       //    工具 / 附件 / 引用规则两档共用同一份文本，Demo 的工具调用展示不受影响。
@@ -1174,9 +1185,13 @@ export class ChatService {
             onChunk('error', ev.content ?? '');
             break;
           case 'done':
-            // APP 端落库/返回的全文也做一次完整清洗，与流式看到的保持一致
+            // APP 端落库/返回的全文也做一次完整清洗，与流式看到的保持一致；
+            // 角标再过一遍来源校验：没有同号来源的 [n] 一律删掉，不留悬空引用
             fullReply = appReplyFormatter
-              ? formatAppReply(ev.fullReply ?? '')
+              ? alignCitations(
+                  formatAppReply(ev.fullReply ?? ''),
+                  citationIndexes(),
+                )
               : (ev.fullReply ?? '');
             usedModel = ev.model ?? '';
             usedTokens = ev.tokens ?? 0;

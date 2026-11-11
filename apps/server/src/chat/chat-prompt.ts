@@ -393,9 +393,12 @@ function stripInlineUrls(text: string): string {
     .replace(/[ \t]{2,}/g, ' ');
 }
 
-/** 尾部「疑似 URL」或半截 Markdown 图片：扣住等下一帧拼全，避免先吐半截再删 */
+/**
+ * 尾部「疑似 URL」/ 半截 Markdown 图片 / 半截角标：扣住等下一帧拼全，
+ * 避免先吐半截再删（角标 [1] 被 chunk 切成 `[` + `1]` 时也要整段判断来源）。
+ */
 const HELD_URL_TAIL =
-  /(?:!\[[^\]\n]*\]\([^)\s]*|\[?https?:\/\/[^\s\]\)，。！？；：、（）【】\u4e00-\u9fff]*\]?|\[h(?:t(?:t(?:p(?:s(?::(?:\/{0,2})?)?)?)?)?)?)$/;
+  /(?:!\[[^\]\n]*\]\([^)\s]*|\[?https?:\/\/[^\s\]\)，。！？；：、（）【】\u4e00-\u9fff]*\]?|\[h(?:t(?:t(?:p(?:s(?::(?:\/{0,2})?)?)?)?)?)?|\[\d{0,2})$/;
 
 /** 把暂时不能决定的尾部扣住：空白 + URL 片段 */
 function splitHeldTail(text: string): { body: string; held: string } {
@@ -425,6 +428,27 @@ export function formatAppReply(text: string): string {
 }
 
 /**
+ * 角标 ↔ 来源一致性：正文里的 [n] 只有 sources 里存在同号来源时才允许保留。
+ * 模型偶尔会「凭记忆」写 [1]，但本轮根本没检索到来源，客户端就会只有角标、
+ * 点开没有链接——这里直接删掉悬空角标，保证「带角标就一定带来源」。
+ * 代码块里的 [0]、[1] 是代码不是引用，原样保留。
+ */
+export function alignCitations(
+  text: string,
+  available: Iterable<number>,
+): string {
+  const known = new Set(available);
+  const align = (segment: string): string =>
+    segment.replace(/\[(\d{1,2})\]/g, (m, n) =>
+      known.has(Number(n)) ? m : '',
+    );
+  return text
+    .split(/(```[\s\S]*?```)/g)
+    .map((part, i) => (i % 2 === 1 ? part : align(part)))
+    .join('');
+}
+
+/**
  * 流式版本：content 逐 chunk 推给前端，只清洗落库全文没用（用户已经看到了）。
  * 关键：把「尾部空白」和「尾部 URL 片段」扣住不发，等下一帧再决定——
  * 1. 跨 chunk 的连续换行能合并；
@@ -438,15 +462,45 @@ export interface AppReplyFormatter {
   flush(): string;
 }
 
-export function createAppReplyFormatter(): AppReplyFormatter {
+export interface AppReplyFormatterOptions {
+  /**
+   * 本轮已收集到的来源编号。延迟求值：模型补搜过的来源会在流式过程中增长，
+   * 每帧重新取一次，才能既支持「先调工具再引用」也不放过悬空角标。
+   */
+  citationIndexes?: () => Iterable<number>;
+}
+
+export function createAppReplyFormatter(
+  options: AppReplyFormatterOptions = {},
+): AppReplyFormatter {
   let started = false;
   let pending = '';
+  // 已出现的 ``` 个数：奇数表示当前处于代码块内（代码里的 [1] 不是引用）
+  let fence = 0;
+  /** 流式逐段对齐角标：来源没收集到的 [n] 直接不发，避免客户端出现悬空引用 */
+  const applyCitations = (text: string): string => {
+    if (!options.citationIndexes) return text;
+    const known = new Set(options.citationIndexes());
+    return text
+      .split(/(```)/)
+      .map((seg) => {
+        if (seg === '```') {
+          fence += 1;
+          return seg;
+        }
+        if (fence % 2 === 1) return seg;
+        return seg.replace(/\[(\d{1,2})\]/g, (m, n) =>
+          known.has(Number(n)) ? m : '',
+        );
+      })
+      .join('');
+  };
   const format = (chunk: string): string => {
     if (!chunk && !pending) return '';
     const merged = collapseBlankLines(stripInvisible(pending + chunk));
     const { body, held } = splitHeldTail(merged);
     pending = held;
-    let out = stripInlineUrls(body);
+    let out = applyCitations(stripInlineUrls(body));
     if (!started) {
       // 开头不留空白行：流式第一帧就出现换行/空格，手机上会顶出一截空白
       out = stripEdgeBlankLines(out);
@@ -461,7 +515,7 @@ export function createAppReplyFormatter(): AppReplyFormatter {
     pending = '';
     if (!held) return '';
     // 首尾空白一律丢（开头/结尾空白行），裸 URL 也丢；其余（含完整图片）原样补回
-    return stripEdgeBlankLines(stripInlineUrls(held));
+    return stripEdgeBlankLines(applyCitations(stripInlineUrls(held)));
   };
   return formatter;
 }

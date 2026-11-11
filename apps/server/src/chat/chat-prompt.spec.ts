@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  alignCitations,
   buildAttachmentDigest,
   buildConversationDigest,
   buildSystemPrompt,
@@ -500,6 +501,49 @@ describe('APP 端排版兜底清洗', () => {
     const streamed = chunks.map(format).join('') + format.flush();
     expect(streamed).toContain('![封面](https://a.com/x.png)');
     expect(streamed).toBe(formatAppReply(chunks.join('')));
+  });
+});
+
+describe('角标与来源一致性', () => {
+  it('有同号来源的角标保留，没有来源的角标删掉', () => {
+    expect(alignCitations('湿度 74%[1]，风力 3 级[2]', [1])).toBe(
+      '湿度 74%[1]，风力 3 级',
+    );
+    expect(alignCitations('湿度 74%[1]', [])).toBe('湿度 74%');
+    expect(alignCitations('A[3] B[10]', [10])).toBe('A B[10]');
+  });
+
+  it('代码块里的 [1] 是代码不是引用，原样保留', () => {
+    expect(
+      alignCitations('```js\nconst v = arr[1];\n```\n参考[1]', []),
+    ).toBe('```js\nconst v = arr[1];\n```\n参考');
+  });
+
+  it('流式：来源没收集到的角标不发，跨 chunk 切开也能判断', () => {
+    const known = createAppReplyFormatter({ citationIndexes: () => [1] });
+    expect(['湿度 74%[', '1', ']', '，风力[2]'].map(known).join('')).toBe(
+      '湿度 74%[1]，风力',
+    );
+
+    const empty = createAppReplyFormatter({ citationIndexes: () => [] });
+    expect(['湿度 74%[', '1', ']'].map(empty).join('') + empty.flush()).toBe(
+      '湿度 74%',
+    );
+  });
+
+  it('流式：代码块内的角标不误删', () => {
+    const format = createAppReplyFormatter({ citationIndexes: () => [] });
+    const out =
+      ['```js\nconst v = arr', '[1];\n```\n参考[1]'].map(format).join('') +
+      format.flush();
+    expect(out).toBe('```js\nconst v = arr[1];\n```\n参考');
+  });
+
+  it('不传来源集合时保持原样（老调用方行为不变）', () => {
+    const format = createAppReplyFormatter();
+    expect(['结论[1]', '\n\n'].map(format).join('') + format.flush()).toBe(
+      '结论[1]',
+    );
   });
 });
 
