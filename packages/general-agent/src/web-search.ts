@@ -188,13 +188,14 @@ export async function searchTavily(
     throw new Error('实时搜索未配置：请在后端环境变量中设置 TAVILY_API_KEY。');
   }
 
-  const date = new Date().toISOString().slice(0, 10);
   try {
     const response = await axios.post<TavilySearchResponse>(
       'https://api.tavily.com/search',
       {
         api_key: apiKey,
-        query: `${query} ${date}`,
+        // ⚠️ 不要把当天日期拼进检索词：会把「2026-11 北京活动 / 火车票」这类
+        //    带日期的资讯页全召回，问天气却搜出一堆不相关来源。时效交给 provider 参数。
+        query,
         topic: 'general',
         search_depth: 'advanced',
         max_results: MAX_RESULTS,
@@ -235,12 +236,12 @@ export async function searchBocha(
     throw new Error('实时搜索未配置：请在后端环境变量中设置 BOCHA_API_KEY。');
   }
   const endpoint = process.env.BOCHA_API_URL?.trim() || BOCHA_DEFAULT_URL;
-  const date = new Date().toISOString().slice(0, 10);
   try {
     const response = await axios.post<BochaSearchResponse>(
       endpoint,
       {
-        query: `${query} ${date}`,
+        // ⚠️ 同 Tavily：日期不进检索词，时效由 freshness 控制
+        query,
         freshness: 'noLimit',
         summary: true,
         count: MAX_RESULTS,

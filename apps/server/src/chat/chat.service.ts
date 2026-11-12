@@ -494,9 +494,13 @@ export class ChatService {
             take: 30,
           }),
           liveInfoQuery
-            ? // ✅ 天气类提问带上定位城市，检索结果才是「当地」的实时信息
+            ? // ⚠️ 只在「附近/周边/本地」类提问前置定位城市：
+              //    无条件拼会把 query 变成「北京 北京今天…」，召回一堆本地资讯页；
+              //    含「天气」的提问已被 isLiveInfoQuery 短路，本来也走不到这里。
               searchWeb(
-                location ? `${location} ${userQuery}` : userQuery,
+                location && /附近|周边|本地|当地|这附近|我这边/.test(userQuery)
+                  ? `${location} ${userQuery}`
+                  : userQuery,
                 signal,
               )
                 .then((r) => {
@@ -1232,27 +1236,26 @@ export class ChatService {
       }
 
       /**
-       * 正文一个 [n] 角标都没有时，联网来源整批不下发：客户端只要拿到 sources
-       * 就会列成一片，正文里却找不到对应角标，看着就是「有来源没引用」。
-       * 知识库来源不走 [n]（正文用【来源：xxx】标注），沿用旧行为保留。
+       * 来源严格跟着正文角标走：联网来源只下发正文里真正出现 [n] 的那几条，
+       * 知识库来源只在正文写了【来源：xxx】时下发。正文一个引用都没有 → 空数组。
+       * 客户端只要拿到来源就会列成一片，所以宁可少给也不能多给。
        * 落库、sources 事件、sourcesCount 共用这一份，历史回显不会再冒出来。
        */
       const citedNumbers = new Set<number>();
       for (const match of fullReply.matchAll(/\[(\d{1,2})\]/g)) {
         citedNumbers.add(Number(match[1]));
       }
-      const sourcesForReply = (): any[] => {
-        const all = replySources().map((source) => ({
-          ...source,
-          usedInThisReply:
-            typeof source.index === 'number'
-              ? citedNumbers.has(source.index)
-              : true,
-        }));
-        return citedNumbers.size
-          ? all
-          : all.filter((source) => typeof source.index !== 'number');
-      };
+      const hasDocCitation = /【来源[：:]/.test(fullReply);
+      const sourcesForReply = (): any[] =>
+        replySources()
+          .map((source) => ({
+            ...source,
+            usedInThisReply:
+              typeof source.index === 'number'
+                ? citedNumbers.has(source.index)
+                : hasDocCitation,
+          }))
+          .filter((source) => source.usedInThisReply);
 
       if (fullReply) {
         await this.prisma.message.create({

@@ -179,6 +179,83 @@ describe('ChatService session source metadata', () => {
     await expect(service.getSessionDetail('missing')).resolves.toBeNull();
     expect(prisma.knowledgeFile.findMany).not.toHaveBeenCalled();
   });
+
+  const sessionWithMessages = (messages: any[], files: any[] = []) => {
+    const prisma = {
+      chatSession: {
+        findUnique: vi.fn().mockResolvedValue({ id: 'session-1', messages }),
+      },
+      knowledgeFile: { findMany: vi.fn().mockResolvedValue(files) },
+    };
+    return new SessionService(prisma as never);
+  };
+
+  it('历史回显：正文没有 [n] 角标时清掉未被引用的联网来源', async () => {
+    const service = sessionWithMessages([
+      {
+        id: 'message-1',
+        role: 'assistant',
+        content: '北京现在 4℃，出门多穿点。',
+        sources: [
+          {
+            kind: 'web',
+            index: 1,
+            title: '北京11月活动',
+            url: 'https://a.com/1',
+          },
+          { kind: 'web', index: 2, title: '火车票', url: 'https://b.com/2' },
+        ],
+      },
+    ]);
+
+    const result = await service.getSessionDetail('session-1');
+
+    expect(result?.messages[0].sources).toEqual([]);
+  });
+
+  it('历史回显：正文写了 [1] 就只保留第 1 条联网来源', async () => {
+    const first = {
+      kind: 'web',
+      index: 1,
+      title: '新闻A',
+      url: 'https://a.com/1',
+    };
+    const service = sessionWithMessages([
+      {
+        id: 'message-1',
+        role: 'assistant',
+        content: '今天的新闻有这些 [1]',
+        sources: [
+          first,
+          { kind: 'web', index: 2, title: '新闻B', url: 'https://b.com/2' },
+        ],
+      },
+    ]);
+
+    const result = await service.getSessionDetail('session-1');
+
+    expect(result?.messages[0].sources).toEqual([first]);
+  });
+
+  it('历史回显：知识库来源不走 [n]，仍带启用/删除状态', async () => {
+    const service = sessionWithMessages(
+      [
+        {
+          id: 'message-1',
+          role: 'assistant',
+          content: '按产品手册的说法…',
+          sources: [{ fileId: 'f1', fileName: '产品手册.pdf' }],
+        },
+      ],
+      [{ id: 'f1', enabled: true, status: 'indexed' }],
+    );
+
+    const result = await service.getSessionDetail('session-1');
+
+    expect(result?.messages[0].sources).toMatchObject([
+      { fileId: 'f1', currentlyEnabled: true, currentStatus: 'indexed' },
+    ]);
+  });
 });
 
 describe('ChatService createSession 超额清理', () => {

@@ -113,7 +113,7 @@ pnpm --filter @repo/server exec prisma generate
 
 聊天接口还支持模型按需调用 `fetchWeatherInfo` 天气查询和 `calculator` 计算器。这些函数工具与上面的后端联网搜索相互独立。
 
-天气走 **Open-Meteo**（非商业免费层、无需 API key）：先用 Geocoding API 把中文城市名换成经纬度，再取 `current=temperature_2m,relative_humidity_2m,weather_code`，WMO 天气码在服务端映射成中文。两个端点都在境外，**国内部署前先实测可达性**；`geocoding` 或 `forecast` 任一跳失败、超时、字段缺失，都只返回明确的「天气查询不可用」文案让模型如实说明，不会把半截数据当正常播报。超时由 `WEATHER_TIMEOUT_MS` 配置（1000~30000，默认 5000）。商用需 Open-Meteo Commercial Use Licence。
+天气走 `wttr.in` 的 JSON 接口（无需 API key，超时 4s）；请求失败时只返回「暂时无法获取实时天气数据」的文案，由模型如实说明，不会编造天气。
 
 #### 知识库与流式对话
 
@@ -139,7 +139,7 @@ APP 端同样展示模型路由决策（`模型选择：…`），`🔧 调用�
 `/chat/:id/stream` 每帧 `data` 是一个 JSON 对象，`type` 取值：
 
 - `thought` / `content` / `error`：`content` 为文本；错误文案已收敛，不含内部报错原文。
-- `sources`：`sources` 为引用来源数组。知识库来源形如 `{ fileId, fileName }`；联网来源形如 `{ kind: 'web', index, title, url, publishedDate? }`，`index` 对应正文里的 `[1]` / `[2]` 角标。`usedInThisReply` 只在正文实际出现对应 `[n]` 时为 `true`，未被引用的联网来源为 `false`。**正文一个 `[n]` 角标都没有时，联网来源整批不下发（数组为空）**，避免出现「列了一串来源、正文却没有角标」；知识库来源不走 `[n]`（正文用【来源：xxx】标注），仍按旧行为保留。`Message.sources` 与 `sourcesCount` 用同一份数据，历史回显不会再冒出这些来源。
+- `sources`：`sources` 为引用来源数组。知识库来源形如 `{ fileId, fileName }`；联网来源形如 `{ kind: 'web', index, title, url, publishedDate? }`，`index` 对应正文里的 `[1]` / `[2]` 角标。**只下发正文真正引用过的条目**：联网来源要求正文出现对应 `[n]`，知识库来源要求正文写了【来源：xxx】；一条都没引用就是空数组，不会出现「列了一串来源、正文却没有角标」。`usedInThisReply` 保留为兼容字段，下发出来的恒为 `true`。`Message.sources` 与 `sourcesCount` 用同一份数据；历史会话回显也会按消息正文的角标再过滤一次，旧消息里没被引用的联网来源不会再冒出来。
 - `tool_call`：`{ name, args, index }`，`args` 是入参摘要（最长 500 字）。
 - `tool_result`：`{ name, index, result, resultLength, durationMs, status }`；`result` 为 200 字预览、`resultLength` 为原长、`durationMs` 为从 call 到 result 的墙钟耗时，`status` 取 `success | error | cached | denied`。按 `index` 与 `tool_call` 配对即可渲染可展开的工具卡片。
 - `done`：`{ tokens, model, completionTokens, inputTokens, outputTokens, reasoningTokens, cachedTokens, finishReason, truncated, ttftMs, firstAnswerTokenMs, generationDurationMs, thoughtDurationMs, answerDurationMs, durationMs, sourcesCount, historyKept, historyDropped, digestUsed }`。`inputTokens` / `outputTokens` / `reasoningTokens` 直接取上游 usage（`prompt_tokens` / `completion_tokens` / `completion_tokens_details.reasoning_tokens`，上游不报思考 token 时按思考/正文字符占比分摊），正文 token = `outputTokens - reasoningTokens`；`cachedTokens` 是命中 prompt cache 的输入，`0` 表示上游有 usage 但本轮未命中，仅本轮无用量数据（回放 / 早退）时为 `null`。`ttftMs` 是首个 token（含思考）延迟，`firstAnswerTokenMs` 是正文首字延迟；`generationDurationMs` 是思考 + 正文的吐字时长（各轮「首 token → 末 token」累加，工具执行与轮次间隔不计入），**t/s 按 `outputTokens / (generationDurationMs / 1000)` 计算**；`thoughtDurationMs` / `answerDurationMs` 分别是思考与正文的吐字耗时；`durationMs` 是服务端整轮耗时（含检索 / 工具 / 落库，不含客户端网络与打字机）。后三项是上下文记忆指标（本轮带入的历史条数、被裁掉的条数、是否启用滚动摘要）。
@@ -365,7 +365,6 @@ WEB_SEARCH_PROVIDER="tavily"                 # 联网 provider：tavily（默认
 BOCHA_API_KEY=""                             # provider=bocha 时必填；见 https://open.bochaai.com
 BOCHA_API_URL=""                             # 留空用官方 https://api.bochaai.com/v1/web-search
 WEB_SEARCH_TIMEOUT_MS="15000"                # 单次联网超时（1000~60000）
-WEATHER_TIMEOUT_MS="5000"                    # 天气单次请求超时（1000~30000）；geocoding 与 forecast 各算一次
 CHAT_SEARCH_SESSION="on"                     # 来源统一回流：on=模型补搜也下发 sources；off=回退旧行为
 ```
 

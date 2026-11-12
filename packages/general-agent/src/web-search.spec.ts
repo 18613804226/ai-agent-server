@@ -181,7 +181,8 @@ describe('searchTavily', () => {
       'https://api.tavily.com/search',
       expect.objectContaining({
         api_key: 'test-key',
-        query: expect.stringContaining('搜索微博热搜 TOP10'),
+        // 精确匹配：检索词不能再被拼上当天 ISO 日期
+        query: '搜索微博热搜 TOP10',
         search_depth: 'advanced',
         max_results: 10,
       }),
@@ -257,7 +258,8 @@ describe('searchBocha（国内 adapter）', () => {
     expect(post).toHaveBeenCalledWith(
       'https://api.bochaai.com/v1/web-search',
       expect.objectContaining({
-        query: expect.stringContaining('今天的新闻'),
+        // 精确匹配：日期不进检索词，时效由 freshness 控制
+        query: '今天的新闻',
         freshness: 'noLimit',
         summary: true,
         count: 10,

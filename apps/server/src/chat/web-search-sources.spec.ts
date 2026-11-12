@@ -284,15 +284,14 @@ describe('阶段 1：模型主动联网也下发 sources', () => {
       onChunk,
     );
 
+    // 正文只写了 [1][3]，来源也只下发这两条，不再把整池 4 条都列出来
     const payload = events.find((e) => e.type === 'sources')?.payload;
-    expect(payload.map((s: any) => s.index)).toEqual([1, 2, 3, 4]);
+    expect(payload.map((s: any) => s.index)).toEqual([1, 3]);
     expect(payload.map((s: any) => s.url)).toEqual([
       'https://a.com/1',
-      'https://b.com/2',
       'https://c.com/3',
-      'https://d.com/4',
     ]);
-    expect(result?.sourcesCount).toBe(4);
+    expect(result?.sourcesCount).toBe(2);
     expect(
       events.find((e) => e.type === 'tool_result')?.payload.result,
     ).toContain('[3] 新闻C');
@@ -342,9 +341,10 @@ describe('阶段 1：模型主动联网也下发 sources', () => {
     const second = collector();
     await service.sendMessageStream('sess-1', '你好', second.onChunk);
 
+    // 正文只写了 [1]，来源也只下发这一条；未引用的不再列出来
     expect(
       first.events.find((e) => e.type === 'sources')?.payload,
-    ).toHaveLength(2);
+    ).toHaveLength(1);
     expect(
       second.events.find((e) => e.type === 'sources')?.payload,
     ).toHaveLength(0);
@@ -427,7 +427,7 @@ describe('本轮搜索策略：引用规则 / 失败语义 / 工具表 / 引用�
     expect(systemPromptOf(create)).toContain('本轮未执行联网搜索。');
   });
 
-  it('usedInThisReply 只标正文实际出现的 [n]，未引用的来源为 false', async () => {
+  it('只下发正文引用过的 [n] 来源，未引用的不再列出来', async () => {
     vi.stubEnv('TAVILY_API_KEY', 'test-key');
     vi.stubEnv('WEB_SEARCH_PROVIDER', 'tavily');
     mockTavily(NEWS);
@@ -438,7 +438,9 @@ describe('本轮搜索策略：引用规则 / 失败语义 / 工具表 / 引用�
     await service.sendMessageStream('sess-1', '今天的新闻', onChunk);
 
     const payload = events.find((e) => e.type === 'sources')?.payload;
-    expect(payload.map((s: any) => s.usedInThisReply)).toEqual([true, false]);
+    expect(payload).toHaveLength(1);
+    expect(payload[0].index).toBe(1);
+    expect(payload.map((s: any) => s.usedInThisReply)).toEqual([true]);
   });
 
   it('正文没有 [n] 角标：联网来源不下发、不落库、计数为 0', async () => {

@@ -134,23 +134,45 @@ export class SessionService {
       : [];
     const sourceFilesById = new Map(sourceFiles.map((file) => [file.id, file]));
 
+    /**
+     * 历史回显：联网来源只保留正文里真正出现 [n] 的那几条。改动前落库的是
+     * 「本轮检索到的全部来源」，不清掉的话老会话刷新后仍会列出一串没角标的来源。
+     * 知识库来源（无 index）不走 [n]，原样保留 —— 历史来源状态提示还要用。
+     * 老数据可能没有 content 字段，此时保持原样，避免误清。
+     */
+    const citedSources = (message: any): any => {
+      if (!Array.isArray(message.sources)) return message.sources;
+      if (typeof message.content !== 'string') return message.sources;
+      const cited = new Set<number>();
+      for (const match of message.content.matchAll(/\[(\d{1,2})\]/g)) {
+        cited.add(Number(match[1]));
+      }
+      return message.sources.filter(
+        (source: any) =>
+          typeof source?.index !== 'number' || cited.has(source.index),
+      );
+    };
+
     return {
       ...session,
-      messages: session.messages.map((message: any) => ({
-        ...message,
-        sources: Array.isArray(message.sources)
-          ? message.sources.map((source: any) => {
-              // ✅ 联网来源（kind: 'web'）没有 fileId，不能套用知识库文件的启用/删除状态
-              if (typeof source?.fileId !== 'string') return source;
-              const currentFile = sourceFilesById.get(source?.fileId);
-              return {
-                ...source,
-                currentlyEnabled: currentFile?.enabled ?? false,
-                currentStatus: currentFile?.status ?? 'deleted',
-              };
-            })
-          : message.sources,
-      })),
+      messages: session.messages.map((message: any) => {
+        const sources = citedSources(message);
+        return {
+          ...message,
+          sources: Array.isArray(sources)
+            ? sources.map((source: any) => {
+                // ✅ 联网来源（kind: 'web'）没有 fileId，不能套用知识库文件的启用/删除状态
+                if (typeof source?.fileId !== 'string') return source;
+                const currentFile = sourceFilesById.get(source?.fileId);
+                return {
+                  ...source,
+                  currentlyEnabled: currentFile?.enabled ?? false,
+                  currentStatus: currentFile?.status ?? 'deleted',
+                };
+              })
+            : sources,
+        };
+      }),
     };
   }
 }
