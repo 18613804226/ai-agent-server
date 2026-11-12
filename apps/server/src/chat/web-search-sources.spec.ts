@@ -440,4 +440,25 @@ describe('本轮搜索策略：引用规则 / 失败语义 / 工具表 / 引用�
     const payload = events.find((e) => e.type === 'sources')?.payload;
     expect(payload.map((s: any) => s.usedInThisReply)).toEqual([true, false]);
   });
+
+  it('正文没有 [n] 角标：联网来源不下发、不落库、计数为 0', async () => {
+    vi.stubEnv('TAVILY_API_KEY', 'test-key');
+    vi.stubEnv('WEB_SEARCH_PROVIDER', 'tavily');
+    mockTavily(NEWS);
+    // 预检索有结果，但模型用工具数据作答、一个角标都没写（截图里的天气回答）
+    const create = vi.fn(async () => textStream('北京现在 4℃，出门多穿点。'));
+    const { service, prisma } = mkService(create);
+    const { events, onChunk } = collector();
+
+    const result = await service.sendMessageStream(
+      'sess-1',
+      '今天的新闻',
+      onChunk,
+    );
+
+    expect(events.find((e) => e.type === 'sources')?.payload).toEqual([]);
+    expect(result?.sourcesCount).toBe(0);
+    const saved = prisma.message.create.mock.calls.at(-1)?.[0]?.data;
+    expect(saved?.sources).toEqual([]);
+  });
 });

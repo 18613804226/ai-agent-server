@@ -1231,30 +1231,39 @@ export class ChatService {
         onChunk('thought', '⚠️ 回答达到长度上限，内容可能被截断。');
       }
 
+      /**
+       * 正文一个 [n] 角标都没有时，联网来源整批不下发：客户端只要拿到 sources
+       * 就会列成一片，正文里却找不到对应角标，看着就是「有来源没引用」。
+       * 知识库来源不走 [n]（正文用【来源：xxx】标注），沿用旧行为保留。
+       * 落库、sources 事件、sourcesCount 共用这一份，历史回显不会再冒出来。
+       */
+      const citedNumbers = new Set<number>();
+      for (const match of fullReply.matchAll(/\[(\d{1,2})\]/g)) {
+        citedNumbers.add(Number(match[1]));
+      }
+      const sourcesForReply = (): any[] => {
+        const all = replySources().map((source) => ({
+          ...source,
+          usedInThisReply:
+            typeof source.index === 'number'
+              ? citedNumbers.has(source.index)
+              : true,
+        }));
+        return citedNumbers.size
+          ? all
+          : all.filter((source) => typeof source.index !== 'number');
+      };
+
       if (fullReply) {
         await this.prisma.message.create({
           data: {
             sessionId,
             role: 'assistant',
             content: fullReply,
-            sources: replySources(),
+            sources: sourcesForReply(),
           },
         });
-        // ✅ 只有正文里真正出现的 [n] 才算被引用；知识库来源沿用「有资料即标注」的旧行为
-        const citedNumbers = new Set<number>();
-        for (const match of fullReply.matchAll(/\[(\d{1,2})\]/g)) {
-          citedNumbers.add(Number(match[1]));
-        }
-        onChunk(
-          'sources',
-          replySources().map((source) => ({
-            ...source,
-            usedInThisReply:
-              typeof source.index === 'number'
-                ? citedNumbers.has(source.index)
-                : true,
-          })),
-        );
+        onChunk('sources', sourcesForReply());
         // ✅ 打点：区分预检索 / 模型补搜各贡献了多少来源，便于灰度观察与排障
         if (searchSession && searchSession.size > 0) {
           console.log(
@@ -1300,7 +1309,7 @@ export class ChatService {
         thoughtDurationMs,
         answerDurationMs,
         durationMs: Date.now() - overallStartTime,
-        sourcesCount: replySources().length,
+        sourcesCount: sourcesForReply().length,
         // ✅ 记忆可观测：本轮实际带了多少历史、裁掉多少、有没有启用摘要
         historyKept: keptMessages.length,
         historyDropped: droppedForDigest.length,

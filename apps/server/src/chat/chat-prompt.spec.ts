@@ -326,17 +326,14 @@ describe('按端区分提示词', () => {
     expect(isAppPlatform(null)).toBe(false);
   });
 
-  it('APP 端整段紧凑输出，不留任何空白行', () => {
+  it('APP 端只约束空行与首尾空白，不压内容与结构', () => {
     const web = buildSystemPrompt({ ...base, platform: 'web' });
     const app = buildSystemPrompt({ ...base, platform: 'ios' });
     expect(app.startsWith('【APP 端输出规范')).toBe(true);
-    expect(app).toContain('绝对不要出现空白行');
-    expect(app).toContain('整条回复写成一段');
-    expect(app).toContain('不要主动换行');
-    expect(app).toContain('不要在末尾补追问句');
+    expect(app).toContain('绝对不要出现连续两个换行');
+    expect(app).toContain('也不要用全角空格 / 空格造伪空行');
     expect(app).toContain('开头和结尾都不得出现空白行');
-    expect(app).toContain('第一行就是正文');
-    expect(app).toContain('不复述用户问题');
+    expect(app).toContain('最后一行不要用换行');
     expect(app).toContain('内容照常充分输出');
     // 历史版本压过内容与排版（字数上限、空格/Markdown 禁令），防止回归
     expect(app).not.toContain('一般 3～6 句');
@@ -385,7 +382,7 @@ describe('按端区分提示词', () => {
       platform: 'ios',
     });
     expect(appChat.startsWith('【APP 端输出规范')).toBe(true);
-    expect(appChat).toContain('绝对不要出现空白行');
+    expect(appChat).toContain('绝对不要出现连续两个换行');
     expect(appChat).toContain('下方工具、附件、知识库来源');
     expect(appChat).toContain('【搜索结果与工具规则】');
   });

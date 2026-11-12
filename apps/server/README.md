@@ -49,6 +49,8 @@
 
 聊天接口还支持模型按需调用 `fetchWeatherInfo` 天气查询和 `calculator` 计算器。这些函数工具与上面的 Tavily 后端搜索相互独立。
 
+天气走 **Open-Meteo**（非商业免费层、无需 API key）：先用 Geocoding API 把中文城市名换成经纬度，再取 `current=temperature_2m,relative_humidity_2m,weather_code`，WMO 天气码在服务端映射成中文。两个端点都在境外，**国内部署前先实测可达性**；`geocoding` 或 `forecast` 任一跳失败、超时、字段缺失，都只返回明确的「天气查询不可用」文案让模型如实说明，不会把半截数据当正常播报。超时由 `WEATHER_TIMEOUT_MS` 配置（1000~30000，默认 5000）。商用需 Open-Meteo Commercial Use Licence。
+
 ### 知识库与流式对话
 
 - 支持上传知识库文件、生成向量并进行语义检索；匹配的资料作为 RAG 上下文提供给模型。
@@ -299,6 +301,7 @@ WEB_SEARCH_PROVIDER="tavily"                 # 联网 provider：tavily（默认
 BOCHA_API_KEY=""                             # provider=bocha 时必填；见 https://open.bochaai.com
 BOCHA_API_URL=""                             # 留空用官方 https://api.bochaai.com/v1/web-search
 WEB_SEARCH_TIMEOUT_MS="15000"                # 单次联网超时（1000~60000）
+WEATHER_TIMEOUT_MS="5000"                    # 天气单次请求超时（1000~30000）；geocoding 与 forecast 各算一次
 CHAT_SEARCH_SESSION="on"                     # 来源统一回流：on=模型补搜也下发 sources；off=回退旧行为
 ```
 

@@ -9,17 +9,124 @@ import {
 } from './web-search.js';
 import type { SearchSession } from './search-session.js';
 
+/**
+ * 天气数据源：Open-Meteo（非商业免费层无需 API key；商用需 Commercial Use Licence）。
+ * 两步：geocoding 把中文城市名换成经纬度，forecast 取当前实况。
+ * 两个端点都在境外，国内部署前请实测可达性；任一跳失败都只返回明确的
+ * 「查不到」文案，模型不会拿到半截数据继续编。
+ */
+const GEOCODING_URL = 'https://geocoding-api.open-meteo.com/v1/search';
+const FORECAST_URL = 'https://api.open-meteo.com/v1/forecast';
+const DEFAULT_WEATHER_TIMEOUT_MS = 5000;
+
+/** WMO weather interpretation codes → 中文（官方只返回数字，描述要在客户端映射） */
+const WMO_CODES: Record<number, string> = {
+  0: '晴',
+  1: '晴间多云',
+  2: '多云',
+  3: '阴',
+  45: '雾',
+  48: '雾凇',
+  51: '小毛毛雨',
+  53: '毛毛雨',
+  55: '大毛毛雨',
+  56: '轻度冻毛毛雨',
+  57: '强冻毛毛雨',
+  61: '小雨',
+  63: '中雨',
+  65: '大雨',
+  66: '轻度冻雨',
+  67: '强冻雨',
+  71: '小雪',
+  73: '中雪',
+  75: '大雪',
+  77: '雪粒',
+  80: '小阵雨',
+  81: '中阵雨',
+  82: '强阵雨',
+  85: '小阵雪',
+  86: '大阵雪',
+  95: '雷阵雨',
+  96: '雷阵雨伴小冰雹',
+  97: '强雷阵雨',
+  99: '雷阵雨伴大冰雹',
+};
+
+interface CityCoords {
+  latitude: number;
+  longitude: number;
+}
+
+/** 进程内缓存：同一城市只做一次 geocoding，省掉每次天气问答多出来的一跳 */
+const coordsCache = new Map<string, CityCoords>();
+
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
+
+function weatherTimeoutMs(): number {
+  const raw = Number(process.env.WEATHER_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw >= 1000 && raw <= 30000
+    ? raw
+    : DEFAULT_WEATHER_TIMEOUT_MS;
+}
+
+async function resolveCoords(
+  cityName: string,
+  timeout: number,
+): Promise<CityCoords> {
+  const key = cityName.trim().toLowerCase();
+  const cached = coordsCache.get(key);
+  if (cached) return cached;
+
+  const res = await axios.get(GEOCODING_URL, {
+    params: { name: cityName, count: 1, language: 'zh' },
+    timeout,
+  });
+  const first = res.data?.results?.[0];
+  if (!isFiniteNumber(first?.latitude) || !isFiniteNumber(first?.longitude)) {
+    throw new Error(`geocoding 未找到城市：${cityName}`);
+  }
+  const coords = {
+    latitude: first.latitude as number,
+    longitude: first.longitude as number,
+  };
+  coordsCache.set(key, coords);
+  return coords;
+}
+
 async function fetchWeather(cityName: string): Promise<string> {
+  const timeout = weatherTimeoutMs();
   try {
-    const encodedCity = encodeURIComponent(cityName);
-    const res = await axios.get(`https://wttr.in/${encodedCity}?format=j1`, {
-      timeout: 4000,
+    const { latitude, longitude } = await resolveCoords(cityName, timeout);
+    const res = await axios.get(FORECAST_URL, {
+      params: {
+        latitude,
+        longitude,
+        current: 'temperature_2m,relative_humidity_2m,weather_code',
+        timezone: 'auto',
+      },
+      timeout,
     });
-    const current = res.data.current_condition[0];
-    return `【实时天气播报 - ${cityName}】：当前气温 ${current.temp_C}℃，天气状况：${current.weatherDesc[0].value}，湿度：${current.humidity}%。`;
+    if (res.data?.error) {
+      throw new Error(String(res.data?.reason ?? 'Open-Meteo 返回错误'));
+    }
+    const current = res.data?.current;
+    // 字段校验：不能靠 catch 兜住 undefined 还把「undefined℃」播出去
+    if (
+      !isFiniteNumber(current?.temperature_2m) ||
+      !isFiniteNumber(current?.relative_humidity_2m) ||
+      !isFiniteNumber(current?.weather_code)
+    ) {
+      throw new Error('Open-Meteo 当前天气字段缺失或非数值');
+    }
+    const description =
+      WMO_CODES[current.weather_code as number] ??
+      `未识别天气（WMO ${current.weather_code}）`;
+    return `【实时天气播报 - ${cityName}】：当前气温 ${current.temperature_2m}℃，天气状况：${description}，湿度：${current.relative_humidity_2m}%。`;
   } catch (error) {
     console.error('获取天气接口失败:', error);
-    return `【实时天气播报】：暂时无法获取 ${cityName} 的实时天气数据。`;
+    // ⚠️ 不能再以「【实时天气播报】」开头，否则模型会把失败当成一次正常播报继续编
+    return `（天气查询不可用）：暂时无法获取 ${cityName} 的实时天气数据，请如实说明查不到，不要编造温度或天气现象。`;
   }
 }
 

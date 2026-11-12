@@ -113,6 +113,8 @@ pnpm --filter @repo/server exec prisma generate
 
 聊天接口还支持模型按需调用 `fetchWeatherInfo` 天气查询和 `calculator` 计算器。这些函数工具与上面的后端联网搜索相互独立。
 
+天气走 **Open-Meteo**（非商业免费层、无需 API key）：先用 Geocoding API 把中文城市名换成经纬度，再取 `current=temperature_2m,relative_humidity_2m,weather_code`，WMO 天气码在服务端映射成中文。两个端点都在境外，**国内部署前先实测可达性**；`geocoding` 或 `forecast` 任一跳失败、超时、字段缺失，都只返回明确的「天气查询不可用」文案让模型如实说明，不会把半截数据当正常播报。超时由 `WEATHER_TIMEOUT_MS` 配置（1000~30000，默认 5000）。商用需 Open-Meteo Commercial Use Licence。
+
 #### 知识库与流式对话
 
 - 支持上传知识库文件、生成向量并进行语义检索；匹配的资料作为 RAG 上下文提供给模型。
@@ -125,7 +127,7 @@ pnpm --filter @repo/server exec prisma generate
 
 `/chat/:id/stream` 按客户端平台选择提示词：登录时上报 `platform: 'ios' | 'android'`（也识别 `app` / `mobile` 等别名），或直接在请求体带 `platform`，请求体优先。判定为 APP 端时：
 
-- 系统提示词前置一段移动端输出规范：**整段紧凑输出，不留任何空白行**——直给答案、不复述问题；整条回复写成一段，不主动换行、不分段、不用短标题行、不把分点拆成多行，绝对不出现 `\n\n`；开头、结尾都不留空白行，结尾也不另起一段补追问或总结。内容照常充分、把话说清楚，但不靠分段撑长度，也不要刻意压短或只回结论，补充内容必须有依据、不编细节。原有的工具、附件、知识库来源与联网引用规则全部保留。
+- 系统提示词前置一段移动端输出规范：**只禁空行与首尾空白，不额外压内容与结构**——绝对不要出现连续两个换行，也不要用全角空格 / 空格造伪空行；开头和结尾都不得出现空白行，最后一行不要用换行、空格、全角空格开头或结尾，也不要说完再空一行收尾。内容照常充分输出，补充内容必须有依据、不编细节。原有的工具、附件、知识库来源与联网引用规则全部保留。
 - **联网 URL 不再贴进正文**：APP 规范明确禁止裸 URL 和 `[https://…]` 这种方括号包链接，改用 `[1]` / `[2]` 数字角标（对应【本轮联网搜索结果】的序号）；服务端在模型出第一个字之前就把结果的 `url` / `title` 放进 `sources` 事件和 `Message.sources`（`kind: 'web'`），客户端要渲染可点击链接从这里取。Web / 桌面端仍用 `[来源标题](URL)` 形式的 Markdown 链接。
 - 回复额外做排版兜底清洗：流式逐 chunk 与落库全文共用同一套空行规则——**任何位置的连续换行（含跨 chunk 边界、CRLF、只夹空格的伪空行、代码块内）一律压成单个换行**，首尾空白去掉，正文里不留下 `\n\n`（客户端会按它切块并补一行空行，一条消息就会被切成两块、末尾还会多出一块空白）。流式清洗器还会把**尾部空白与半截 URL 扣住不发**，所以末尾不会偶发多出一行空白。APP 正文里残留的裸 URL / 方括号包 URL 由同一套清洗兜底收掉，Markdown 图片 `![alt](…)` 会原样保留，不会洗坏历史图片。
 
@@ -137,7 +139,7 @@ APP 端同样展示模型路由决策（`模型选择：…`），`🔧 调用�
 `/chat/:id/stream` 每帧 `data` 是一个 JSON 对象，`type` 取值：
 
 - `thought` / `content` / `error`：`content` 为文本；错误文案已收敛，不含内部报错原文。
-- `sources`：`sources` 为引用来源数组。知识库来源形如 `{ fileId, fileName }`；联网来源形如 `{ kind: 'web', index, title, url, publishedDate? }`，`index` 对应正文里的 `[1]` / `[2]` 角标。`usedInThisReply` 只在正文实际出现对应 `[n]` 时为 `true`，未被引用的联网来源为 `false`。
+- `sources`：`sources` 为引用来源数组。知识库来源形如 `{ fileId, fileName }`；联网来源形如 `{ kind: 'web', index, title, url, publishedDate? }`，`index` 对应正文里的 `[1]` / `[2]` 角标。`usedInThisReply` 只在正文实际出现对应 `[n]` 时为 `true`，未被引用的联网来源为 `false`。**正文一个 `[n]` 角标都没有时，联网来源整批不下发（数组为空）**，避免出现「列了一串来源、正文却没有角标」；知识库来源不走 `[n]`（正文用【来源：xxx】标注），仍按旧行为保留。`Message.sources` 与 `sourcesCount` 用同一份数据，历史回显不会再冒出这些来源。
 - `tool_call`：`{ name, args, index }`，`args` 是入参摘要（最长 500 字）。
 - `tool_result`：`{ name, index, result, resultLength, durationMs, status }`；`result` 为 200 字预览、`resultLength` 为原长、`durationMs` 为从 call 到 result 的墙钟耗时，`status` 取 `success | error | cached | denied`。按 `index` 与 `tool_call` 配对即可渲染可展开的工具卡片。
 - `done`：`{ tokens, model, completionTokens, inputTokens, outputTokens, reasoningTokens, cachedTokens, finishReason, truncated, ttftMs, firstAnswerTokenMs, generationDurationMs, thoughtDurationMs, answerDurationMs, durationMs, sourcesCount, historyKept, historyDropped, digestUsed }`。`inputTokens` / `outputTokens` / `reasoningTokens` 直接取上游 usage（`prompt_tokens` / `completion_tokens` / `completion_tokens_details.reasoning_tokens`，上游不报思考 token 时按思考/正文字符占比分摊），正文 token = `outputTokens - reasoningTokens`；`cachedTokens` 是命中 prompt cache 的输入，`0` 表示上游有 usage 但本轮未命中，仅本轮无用量数据（回放 / 早退）时为 `null`。`ttftMs` 是首个 token（含思考）延迟，`firstAnswerTokenMs` 是正文首字延迟；`generationDurationMs` 是思考 + 正文的吐字时长（各轮「首 token → 末 token」累加，工具执行与轮次间隔不计入），**t/s 按 `outputTokens / (generationDurationMs / 1000)` 计算**；`thoughtDurationMs` / `answerDurationMs` 分别是思考与正文的吐字耗时；`durationMs` 是服务端整轮耗时（含检索 / 工具 / 落库，不含客户端网络与打字机）。后三项是上下文记忆指标（本轮带入的历史条数、被裁掉的条数、是否启用滚动摘要）。
@@ -363,6 +365,7 @@ WEB_SEARCH_PROVIDER="tavily"                 # 联网 provider：tavily（默认
 BOCHA_API_KEY=""                             # provider=bocha 时必填；见 https://open.bochaai.com
 BOCHA_API_URL=""                             # 留空用官方 https://api.bochaai.com/v1/web-search
 WEB_SEARCH_TIMEOUT_MS="15000"                # 单次联网超时（1000~60000）
+WEATHER_TIMEOUT_MS="5000"                    # 天气单次请求超时（1000~30000）；geocoding 与 forecast 各算一次
 CHAT_SEARCH_SESSION="on"                     # 来源统一回流：on=模型补搜也下发 sources；off=回退旧行为
 ```
 
