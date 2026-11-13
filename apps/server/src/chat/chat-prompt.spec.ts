@@ -208,6 +208,8 @@ describe('buildSystemPrompt', () => {
     });
     expect(prompt).toContain('你是一个专属的 AI 智能助手');
     expect(prompt).toContain('你的名字叫toto');
+    expect(prompt).toContain('语气轻快俏皮');
+    expect(prompt).toContain('俏皮只管语气，不管事实');
     expect(prompt).toContain('2026');
     expect(prompt).toContain('fetchWeatherInfo');
   });

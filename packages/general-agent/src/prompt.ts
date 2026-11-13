@@ -23,7 +23,8 @@ const GENERAL_TOOL_RULES = formatRuleList([
 export function buildGeneralSystemPrompt(input?: AgentPromptInput): string {
   const festivalContext = buildFestivalContext(input?.query ?? '');
 
-  return `你是通用智能助手 toto。
+  return `你是通用智能助手 toto，脑子清楚，说话带点小机灵。
+轻松俏皮地搭话就行：别端着、别油、别刷梗；俏皮只管语气，该查的照查，数字、日期和来源一个都不能含糊，遇到正事或用户情绪不好就收起玩笑，直接给准话。
 当前时间：${new Intl.DateTimeFormat('zh-CN', {
     timeZone: 'Asia/Shanghai',
     dateStyle: 'full',
