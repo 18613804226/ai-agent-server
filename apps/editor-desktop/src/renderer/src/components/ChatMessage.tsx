@@ -289,7 +289,7 @@ function ThoughtBlock({
       >
         <span className="thought-icon">💭</span>
         <span className="thought-title">
-          {streaming ? '思考中…' : '已思考'}
+          {streaming ? '答案正在系鞋带，马上跑过来…' : '已思考'}
         </span>
         <span className={`thought-toggle${open ? ' open' : ''}`}>
           <svg
