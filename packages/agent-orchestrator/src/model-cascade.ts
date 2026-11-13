@@ -69,8 +69,9 @@ function envNumber(name: string, fallback: number): number {
  * 测试也引用这个常量，避免默认值一调测试就红。
  */
 export const DEFAULT_MODELS = {
-  // ModelScope Model-Id（命名空间/名称），走 MODELSCOPE_API_KEY 的独立端点
-  priorityModel: 'Qwen/Qwen3.8-Flash-Next',
+  // 全局首选：裸模型名走主网关 OPENAI_BASE_URL；
+  // 若换成 ModelScope 的 Model-Id（命名空间/名称），需配 MODELSCOPE_API_KEY
+  priorityModel: 'Kimi-K3.1-Pro',
   visionPrimary: 'qwen3.7-flash',
   textSimple: 'glm-4.5-flash',
   textComplex: 'qwen3.7-flash',
@@ -395,8 +396,8 @@ export function isAttachmentRefusal(text: string): boolean {
 /**
  * 按模型名推导它属于哪个平台：
  * 智谱的模型都以 glm 开头（视觉系列 cogview、charglm 也归智谱），
- * ModelScope 的 Model-Id 带命名空间斜杠（Qwen/Qwen3.8-Flash-Next），
- * 其余归阿里云 DashScope（qwen 系列、text-embedding、paraformer 等）。
+ * ModelScope 的 Model-Id 带命名空间斜杠（<命名空间>/<模型名>），
+ * 其余归主网关 DashScope（qwen 系列、text-embedding、自定义别名等）。
  *
  * 之前按「档位」硬编码 provider，结果把默认值改成 qwen3.7-flash 后，
  * 模型被发到智谱端点，直接 400 模型不存在（靠降级才兜住）。
@@ -413,9 +414,9 @@ export function providerForModel(model: string): ModelProvider {
 /**
  * 前端展示用的模型短名。
  *
- * 完整 Model-Id（modelscope:Qwen/Qwen3.8-Flash-Next，36 字符）在 APP 底部模型徽标、
- * 思考流一行里会被截成省略号；展示时去掉 provider 前缀和 ModelScope 命名空间
- * （Qwen/Qwen3.8-Flash-Next → Qwen3.8-Flash-Next，顺带去掉重复的那个 Qwen）。
+ * 完整 Model-Id（modelscope:<命名空间>/<模型名>）在 APP 底部模型徽标、
+ * 思考流一行里会被截成省略号；展示时去掉 provider 前缀和 ModelScope 命名空间，
+ * 只留最后一段模型短名。
  *
  * ⚠️ 仅用于展示：请求体的 model 必须是完整 Model-Id，否则 ModelScope 找不到模型，
  *    且 providerForModel() 会因为少了斜杠把它误判成 dashscope。

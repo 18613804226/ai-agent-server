@@ -42,7 +42,9 @@ function mkService(zhipuText: string, qwenText: string) {
   );
   const orchestrator = new AgentOrchestrator({
     getClient: (provider) => clients.getClient(provider),
-    modelConfig: loadModelCascadeConfig(),
+    // 本用例验证「glm 拒答 → qwen 重试」，链首必须是 zhipu；
+    // 显式禁用全局首选，避免默认首选换模型时抢走链首。
+    modelConfig: { ...loadModelCascadeConfig(), priorityModel: '' },
     showRoutingThought: false,
     rateLimitRetries: 0,
     zhipuLock: new SimpleLock(),

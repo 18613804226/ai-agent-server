@@ -207,9 +207,9 @@ describe('buildSystemPrompt', () => {
       now,
     });
     expect(prompt).toContain('你是一个专属的 AI 智能助手');
-    expect(prompt).toContain('你的名字叫toto');
+    expect(prompt).toContain('你的名字叫 喜温');
+    expect(prompt).toContain('甜妹风格');
     expect(prompt).toContain('语气轻快俏皮');
-    expect(prompt).toContain('俏皮只管语气，不管事实');
     expect(prompt).toContain('2026');
     expect(prompt).toContain('fetchWeatherInfo');
   });
@@ -344,7 +344,7 @@ describe('按端区分提示词', () => {
     expect(app).not.toContain('不要用 Markdown');
     expect(app).not.toContain('一般 1～3 句');
     expect(app).not.toContain('能一句说清就不展开');
-    expect(app).toContain('你的名字叫toto');
+    expect(app).toContain('你的名字叫 喜温');
     expect(app).toContain('fetchWeatherInfo');
     expect(app).toContain('【引用规则】');
     expect(app.length).toBeGreaterThan(web.length);

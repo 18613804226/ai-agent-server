@@ -1,6 +1,7 @@
 import {
   AgentOrchestrator,
   loadModelCascadeConfig,
+  providerForModel,
   SimpleLock,
 } from '@repo/agent-orchestrator';
 import { ModelClients } from './model-clients.js';
@@ -20,12 +21,19 @@ function envInt(name: string, fallback: number): number {
 
 /** 用给定的客户端集构造一个编排器实例 */
 export function createOrchestrator(clients: ModelClients): AgentOrchestrator {
+  const modelConfig = loadModelCascadeConfig();
+  // 只有首选本身是 ModelScope 模型时，缺 Token 才摘掉它；
+  // 走主网关（OPENAI_BASE_URL）的首选不能被这段逻辑误伤。
+  if (
+    modelConfig.priorityModel &&
+    providerForModel(modelConfig.priorityModel) === 'modelscope' &&
+    !clients.modelscope
+  ) {
+    modelConfig.priorityModel = '';
+  }
   return new AgentOrchestrator({
     getClient: (provider) => clients.getClient(provider),
-    // 没配 ModelScope Token 时摘掉首选模型，避免展示一条根本连不上的候选
-    modelConfig: loadModelCascadeConfig(
-      clients.modelscope ? {} : { priorityModel: '' },
-    ),
+    modelConfig,
     showRoutingThought: process.env.CHAT_SHOW_ROUTING_THOUGHT !== 'false',
     rateLimitRetries: Math.max(
       0,

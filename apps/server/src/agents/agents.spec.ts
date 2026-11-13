@@ -117,7 +117,7 @@ describe('AgentRunner', () => {
 
     const messages = runnerWithCapture.getCaptured().messages as any[];
     expect(messages[0].role).toBe('system');
-    expect(messages[0].content).toContain('toto');
+    expect(messages[0].content).toContain('喜温');
     expect(messages.some((m) => m.role === 'user' && m.content === '旧问题')).toBe(true);
     expect(messages.at(-1)).toEqual({ role: 'user', content: '你好' });
   });

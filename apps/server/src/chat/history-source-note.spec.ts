@@ -53,7 +53,9 @@ function mkService(history: any[], knowledgeFiles: any[] = []) {
   );
   const orchestrator = new AgentOrchestrator({
     getClient: (provider) => clients.getClient(provider),
-    modelConfig: loadModelCascadeConfig(),
+    // 只验证评分链路里的历史来源注记，显式禁用全局首选：
+    // 否则默认首选会抢走链首，zhipu mock 捕获不到请求。
+    modelConfig: { ...loadModelCascadeConfig(), priorityModel: '' },
     showRoutingThought: false,
     rateLimitRetries: 0,
     zhipuLock: new SimpleLock(),

@@ -195,6 +195,8 @@ describe('模型分层：档位与平台匹配', () => {
     expect(providerForModel(' text-embedding-v4 ')).toBe('dashscope');
     // ModelScope Model-Id 带命名空间斜杠，必须走独立端点
     expect(providerForModel('Qwen/Qwen3.8-Flash-Next')).toBe('modelscope');
+    // 新的全局首选是裸模型名，走主网关而不是 ModelScope
+    expect(providerForModel(DEFAULT_MODELS.priorityModel)).toBe('dashscope');
   });
 
   it('复杂档默认是 qwen → 必须路由到阿里云（曾因硬编码发错平台报 400）', () => {
@@ -293,7 +295,7 @@ describe('模型分层：首选模型（不参与评分）', () => {
     expect(list.some((c) => c.model === 'glm-4.5-flash')).toBe(false);
   });
 
-  it('图片请求：默认配置下 3.8 出错直接回退到 3.7-Flash', () => {
+  it('图片请求：默认配置下首选出错直接回退到 3.7-Flash', () => {
     clearModelEnv();
     const cfg = loadModelCascadeConfig();
     const list = resolveModelCandidates(
@@ -302,7 +304,7 @@ describe('模型分层：首选模型（不参与评分）', () => {
       { zhipuAvailable: true },
     );
     expect(list).toEqual([
-      { provider: 'modelscope', model: 'Qwen/Qwen3.8-Flash-Next' },
+      { provider: 'dashscope', model: DEFAULT_MODELS.priorityModel },
       { provider: 'dashscope', model: 'qwen3.7-flash' },
     ]);
   });
