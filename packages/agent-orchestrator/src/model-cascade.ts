@@ -69,9 +69,9 @@ function envNumber(name: string, fallback: number): number {
  * 测试也引用这个常量，避免默认值一调测试就红。
  */
 export const DEFAULT_MODELS = {
-  // 全局首选：裸模型名走主网关 OPENAI_BASE_URL；
-  // 若换成 ModelScope 的 Model-Id（命名空间/名称），需配 MODELSCOPE_API_KEY
-  priorityModel: 'Kimi-K3.1-Pro',
+  // 全局首选：ModelScope 完整 Model-Id（命名空间/名称:变体），带斜杠 →
+  // 走 MODELSCOPE_BASE_URL + MODELSCOPE_API_KEY 独立端点；缺 key 时该候选自动摘掉
+  priorityModel: 'moonshotai/Kimi-K3.1-Pro:DashScope',
   visionPrimary: 'qwen3.7-flash',
   textSimple: 'glm-4.5-flash',
   textComplex: 'qwen3.7-flash',
@@ -418,18 +418,23 @@ export function providerForModel(model: string): ModelProvider {
  * 思考流一行里会被截成省略号；展示时去掉 provider 前缀和 ModelScope 命名空间，
  * 只留最后一段模型短名。
  *
- * ⚠️ 仅用于展示：请求体的 model 必须是完整 Model-Id，否则 ModelScope 找不到模型，
- *    且 providerForModel() 会因为少了斜杠把它误判成 dashscope。
+ * ⚠️ 仅用于展示：请求体的 model 必须是完整 Model-Id（含 :变体后缀），
+ *    否则 ModelScope 找不到模型，providerForModel() 也会因少了斜杠误判成 dashscope。
  */
 export function displayModelName(model: string): string {
   const name = (model || '').trim();
   if (!name) return '';
-  const withoutProvider = name.includes(':')
-    ? name.slice(name.lastIndexOf(':') + 1)
-    : name;
-  return withoutProvider.includes('/')
+  // 只去掉开头的 provider 前缀：ModelScope 的 Model-Id 本身可能带 :变体后缀
+  // （moonshotai/Kimi-K3.1-Pro:DashScope），按最后一个冒号切会只剩 "DashScope"。
+  const withoutProvider = name.replace(
+    /^(modelscope|dashscope|zhipu):/i,
+    '',
+  );
+  const shortName = withoutProvider.includes('/')
     ? withoutProvider.slice(withoutProvider.lastIndexOf('/') + 1)
     : withoutProvider;
+  // 展示名再去掉 :变体后缀
+  return shortName.split(':')[0];
 }
 
 /**

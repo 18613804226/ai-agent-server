@@ -195,8 +195,11 @@ describe('模型分层：档位与平台匹配', () => {
     expect(providerForModel(' text-embedding-v4 ')).toBe('dashscope');
     // ModelScope Model-Id 带命名空间斜杠，必须走独立端点
     expect(providerForModel('Qwen/Qwen3.8-Flash-Next')).toBe('modelscope');
-    // 新的全局首选是裸模型名，走主网关而不是 ModelScope
-    expect(providerForModel(DEFAULT_MODELS.priorityModel)).toBe('dashscope');
+    // 全局首选是 ModelScope 完整 Model-Id，必须走独立端点
+    expect(providerForModel(DEFAULT_MODELS.priorityModel)).toBe('modelscope');
+    expect(providerForModel('moonshotai/Kimi-K3.1-Pro:DashScope')).toBe(
+      'modelscope',
+    );
   });
 
   it('复杂档默认是 qwen → 必须路由到阿里云（曾因硬编码发错平台报 400）', () => {
@@ -304,7 +307,7 @@ describe('模型分层：首选模型（不参与评分）', () => {
       { zhipuAvailable: true },
     );
     expect(list).toEqual([
-      { provider: 'dashscope', model: DEFAULT_MODELS.priorityModel },
+      { provider: 'modelscope', model: DEFAULT_MODELS.priorityModel },
       { provider: 'dashscope', model: 'qwen3.7-flash' },
     ]);
   });
@@ -699,6 +702,15 @@ describe('展示短名（APP 徽标 / 思考流放得下）', () => {
     );
     expect(displayModelName('Qwen/Qwen3.8-Flash-Next')).toBe(
       'Qwen3.8-Flash-Next',
+    );
+  });
+
+  it('ModelScope 的 :变体后缀不会被当成 provider 前缀', () => {
+    expect(
+      displayModelName('modelscope:moonshotai/Kimi-K3.1-Pro:DashScope'),
+    ).toBe('Kimi-K3.1-Pro');
+    expect(displayModelName('moonshotai/Kimi-K3.1-Pro:DashScope')).toBe(
+      'Kimi-K3.1-Pro',
     );
   });
 

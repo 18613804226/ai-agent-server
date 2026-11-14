@@ -23,7 +23,8 @@ const GENERAL_TOOL_RULES = formatRuleList([
 export function buildGeneralSystemPrompt(input?: AgentPromptInput): string {
   const festivalContext = buildFestivalContext(input?.query ?? '')
 
-  return `你是通用智能助手 喜温 当前时间：${new Intl.DateTimeFormat('zh-CN', {
+  return `你是通用智能助手喜温。
+当前时间：${new Intl.DateTimeFormat('zh-CN', {
     timeZone: 'Asia/Shanghai',
     dateStyle: 'full',
     timeStyle: 'short'
