@@ -232,6 +232,29 @@ describe('AgentOrchestrator.run', () => {
     expect(plain.create.mock.calls[0][0].temperature).toBeUndefined();
   });
 
+  it('Kimi K3 候选不下发 temperature/top_p，保留 max_tokens', async () => {
+    const chunks = [{ choices: [{ delta: { content: 'ok' } }] }];
+    const modelscope = fakeClient([[...chunks]]);
+    await collect(
+      new AgentOrchestrator(config({ getClient: () => modelscope.client })),
+      {
+        messages: [],
+        candidates: [
+          {
+            provider: 'modelscope',
+            model: 'moonshotai/Kimi-K3.1-Pro:DashScope',
+          },
+        ],
+        sampling: { temperature: 0.7, top_p: 0.8, max_tokens: 4096 },
+      },
+    );
+    const body = modelscope.create.mock.calls[0][0];
+    expect(body.temperature).toBeUndefined();
+    expect(body.top_p).toBeUndefined();
+    expect(body.max_tokens).toBe(4096);
+    expect(body.thinking).toBeUndefined();
+  });
+
   it('宿主注入 max_tokens 时下发给所有候选', async () => {
     const chunks = [{ choices: [{ delta: { content: 'ok' } }] }];
     const sampling = { temperature: 0.85, top_p: 0.9, max_tokens: 200 };
@@ -434,6 +457,77 @@ describe('AgentOrchestrator.run', () => {
     expect(messages.some((m) => m.role === 'tool')).toBe(true);
     // 两次模型调用（工具轮 + 最终轮）
     expect(create).toHaveBeenCalledTimes(2);
+    // 没产出思考内容的普通模型，不要凭空补 reasoning_content
+    expect(messages.find((m) => m.role === 'assistant')).not.toHaveProperty(
+      'reasoning_content',
+    );
+  });
+
+  it('推理模型工具轮：reasoning_content 与 tool_calls 一起回传下一轮', async () => {
+    const toolDelta = {
+      choices: [
+        {
+          delta: {
+            reasoning_content: '再报结果。',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_1',
+                type: 'function',
+                function: {
+                  name: 'calculator',
+                  arguments: '{"expression":"1+1"}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const { client, create } = fakeClient([
+      [
+        { choices: [{ delta: { reasoning_content: '先算 1+1，' } }] },
+        toolDelta,
+      ],
+      [{ choices: [{ delta: { content: '结果是 2' } }] }],
+    ]);
+    const tools: RegisteredTool[] = [
+      {
+        definition: {
+          type: 'function',
+          function: {
+            name: 'calculator',
+            description: '计算器',
+            parameters: { type: 'object', properties: {} },
+          },
+        },
+        handler: () => '计算结果：2',
+      },
+    ];
+    const orch = new AgentOrchestrator(config({ getClient: () => client }));
+    const messages: Array<Record<string, unknown>> = [
+      { role: 'user', content: '1+1=?' },
+    ];
+    await collect(orch, {
+      messages,
+      tools,
+      candidates: [
+        {
+          provider: 'modelscope',
+          model: 'moonshotai/Kimi-K3.1-Pro:DashScope',
+        },
+      ],
+    });
+
+    expect(create).toHaveBeenCalledTimes(2);
+    const assistant = messages.find(
+      (m) => m.role === 'assistant' && Array.isArray(m.tool_calls),
+    );
+    expect(assistant?.reasoning_content).toBe('先算 1+1，再报结果。');
+    const calls = assistant?.tool_calls as
+      | Array<{ function: { name: string } }>
+      | undefined;
+    expect(calls?.[0].function.name).toBe('calculator');
   });
 
   it('多轮工具调用：tool_call / tool_result 序号跨轮唯一', async () => {

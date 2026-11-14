@@ -13,6 +13,7 @@ import {
   providerForModel,
   resolveModelCandidates,
   resolveZhipuCredentials,
+  samplingForModel,
   zhipuChatSamplingParam,
   zhipuThinkingParam,
   type Complexity,
@@ -567,6 +568,18 @@ describe('模型分层：配置与凭据', () => {
       process.env.CHAT_GLM_THINKING = off;
       expect(zhipuThinkingParam()).toEqual({ thinking: { type: 'disabled' } });
     }
+  });
+
+  it('采样参数按模型过滤：Kimi K3 不下发 temperature/top_p', () => {
+    const casual = { temperature: 0.7, top_p: 0.8 };
+    const kimi = 'moonshotai/Kimi-K3.1-Pro:DashScope';
+    expect(samplingForModel(casual, kimi)).toEqual({});
+    expect(samplingForModel({ ...casual, max_tokens: 4096 }, kimi)).toEqual({
+      max_tokens: 4096,
+    });
+    expect(samplingForModel(casual, 'qwen3.7-flash')).toEqual(casual);
+    expect(samplingForModel(casual, 'GLM-4.7-Flash')).toEqual(casual);
+    expect(samplingForModel(undefined, 'qwen3.7-flash')).toEqual({});
   });
 
   it('问答档采样：按任务分档，可用环境变量覆盖，非法值回落档位预设', () => {

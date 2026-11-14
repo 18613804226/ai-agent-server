@@ -6,6 +6,7 @@ import {
   isDegradableError,
   isRateLimitError,
   resolveModelCandidates,
+  samplingForModel,
   zhipuThinkingParam,
   type ModelCascadeConfig,
   type ModelCandidate,
@@ -270,13 +271,13 @@ export class AgentOrchestrator {
       const maxTries = this.config.rateLimitRetries + 1;
       for (let attempt = 1; attempt <= maxTries; attempt++) {
         try {
-          // thinking 是智谱私有参数，只给智谱；temperature/top_p/max_tokens 各平台通用，
-          // 首选换成 qwen 后四档采样（含情绪档）仍要生效，所以对所有候选都下发。
+          // thinking 是智谱私有参数，只给智谱；采样参数对多数候选都下发（含降级到 qwen），
+          // 但 Kimi K3 这类推理模型不接受 temperature/top_p，按候选模型过滤。
           const body = {
             ...payload,
             model: candidate.model,
             ...(candidate.provider === 'zhipu' ? zhipuThinkingParam() : {}),
-            ...sampling,
+            ...samplingForModel(sampling, candidate.model),
           };
           const stream = await withTimeout(
             client.chat.completions.create(body as any, {
@@ -494,6 +495,8 @@ export class AgentOrchestrator {
       const streamStartTime = Date.now();
       const toolAcc: ToolCallAccumulator = {};
       let roundReply = '';
+      /** 本轮模型产出的思考内容：推理模型要求连同 tool_calls 一起回传下一轮 */
+      let roundReasoning = '';
       let roundTtft: number | null = null;
       // 本轮的吐字时刻：轮末累加进全局 generationMs / thoughtMs / answerMs
       let roundFirstTokenAt: number | null = null;
@@ -622,6 +625,7 @@ export class AgentOrchestrator {
           roundLastTokenAt = chunkAt;
 
           if (reasoningContent) {
+            roundReasoning += reasoningContent;
             thoughtChars += reasoningContent.length;
             roundFirstThoughtAt ??= chunkAt;
             roundLastThoughtAt = chunkAt;
@@ -743,10 +747,15 @@ export class AgentOrchestrator {
       }
       if (signal?.aborted) return;
 
-      // 有工具要调：把 assistant(tool_calls) 与执行结果追加进上下文，再来一轮流式
+      // 有工具要调：把 assistant(tool_calls) 与执行结果追加进上下文，再来一轮流式。
+      // Kimi K3 等推理模型要求把完整 assistant 消息原样回传，流式里读到的
+      // reasoning_content 必须跟着 tool_calls 一起进下一轮 messages，否则工具轮
+      // 可能报 400 或思维链断裂。只在确实产出过思考内容时下发，避免给不认
+      // 该字段的模型发未知参数。
       messages.push({
         role: 'assistant',
         content: roundReply || null,
+        ...(roundReasoning ? { reasoning_content: roundReasoning } : {}),
         tool_calls: toolCalls,
       });
       const results = new Map<string, string>();

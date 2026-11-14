@@ -150,6 +150,33 @@ export function zhipuThinkingParam(): Record<string, unknown> {
   };
 }
 
+/** 请求体里按任务分档下发的采样参数（代码 Agent 链路不传） */
+export type ChatSamplingParams = {
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
+};
+
+/**
+ * 按候选模型过滤采样参数。
+ *
+ * Kimi K3 系列是推理模型，不接受 temperature / top_p：实测传过去会 400
+ * "Parameter 'temperature'=0.7 is not supported for kimi-k3 model."。
+ * 官方示例只传 max_tokens + reasoning_effort，所以这里保留 max_tokens。
+ */
+export function samplingForModel(
+  sampling: ChatSamplingParams | undefined,
+  model: string,
+): ChatSamplingParams {
+  if (!sampling) return {};
+  if (/kimi-k3/i.test(model || '')) {
+    return sampling.max_tokens === undefined
+      ? {}
+      : { max_tokens: sampling.max_tokens };
+  }
+  return { ...sampling };
+}
+
 /** 问答档位：闲聊要活泼，基于资料/附件的回答要严谨，实时信息居中，倾诉要松弛 */
 export type ChatSamplingProfile =
   | 'casual'

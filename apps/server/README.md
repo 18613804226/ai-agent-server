@@ -248,7 +248,7 @@ pnpm --filter @repo/server start:dev
 
 思考链默认开启（智谱候选一律显式下发 `thinking:{type:'enabled'}`）：客户端要靠它展示「思考 M + 正文 N」的 token 拆分。代价是首字变慢——「你好」这类问候也会先产出上千字推理，追求快首字时配 `CHAT_GLM_THINKING=false`（也接受 `off` / `0` / `no` / `disabled`）关闭。思考内容还需要推理模型，`glm-4-flash` 等非推理型号即使开启也不会产出 `reasoning_content`。实测（`glm-4.5-flash` 流式）上游 usage 只给 `prompt_tokens` / `completion_tokens` / `prompt_tokens_details.cached_tokens`，不返回 `completion_tokens_details.reasoning_tokens`，所以 `done.reasoningTokens` 由后端按思考/正文字符占比分摊，是估算值而非上游精确值。
 
-智能问答链路按任务分档给 GLM 下发采样参数（只作用于智谱候选）：闲聊 `temperature=0.7`（比 0.65 基准档更活泼）、知识库/附件问答 `0.4`（严格基于资料、少编造）、实时搜索 `0.5`，`top_p` 统一 `0.8` 以收敛发散、少加空行。代码 Agent 链路和降级到 qwen 的请求不下发，保持服务端默认。`CHAT_GLM_TEMPERATURE` / `CHAT_GLM_TOP_P` 会覆盖所有档位，取值需在 `(0, 1]`，非法值回落到当前档预设。
+智能问答链路按任务分档下发采样参数：闲聊 `temperature=0.7`（比 0.65 基准档更活泼）、知识库/附件问答 `0.4`（严格基于资料、少编造）、实时搜索 `0.5`，`top_p` 统一 `0.8` 以收敛发散、少加空行。参数对所有候选下发（含降级到 qwen 的请求），代码 Agent 链路不传；但 Kimi K3 这类不接受采样的推理模型会自动去掉 `temperature` / `top_p`、只保留 `max_tokens`，否则上游会 400 `Parameter 'temperature' ... is not supported`。`CHAT_GLM_TEMPERATURE` / `CHAT_GLM_TOP_P` 会覆盖所有档位，取值需在 `(0, 1]`，非法值回落到当前档预设。
 
 提示词也按场景分档：工具、附件、知识库来源与引用规则两档共用、始终完整保留，保证 Demo 里工具调用链和来源标注随时可见；本轮没有资料/附件/联网结果/工具需求时，只是额外前置一段「口语直给」的对话风格要求（含 APP 排版规范），让闲聊不显得死板。
 
