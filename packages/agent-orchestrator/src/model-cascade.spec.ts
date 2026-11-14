@@ -11,6 +11,7 @@ import {
   isRateLimitError,
   loadModelCascadeConfig,
   providerForModel,
+  reasoningEffortForModel,
   resolveModelCandidates,
   resolveZhipuCredentials,
   samplingForModel,
@@ -567,6 +568,30 @@ describe('模型分层：配置与凭据', () => {
     for (const off of ['false', 'off', '0', 'no', 'disabled']) {
       process.env.CHAT_GLM_THINKING = off;
       expect(zhipuThinkingParam()).toEqual({ thinking: { type: 'disabled' } });
+    }
+  });
+
+  it('Kimi K3 思考强度：默认 low，可配置，非法值回落，其他模型不下发', () => {
+    const kimi = 'moonshotai/Kimi-K3.1-Pro:DashScope';
+    const prev = process.env.CHAT_KIMI_REASONING_EFFORT;
+    try {
+      delete process.env.CHAT_KIMI_REASONING_EFFORT;
+      expect(reasoningEffortForModel(kimi)).toEqual({
+        reasoning_effort: 'low',
+      });
+      process.env.CHAT_KIMI_REASONING_EFFORT = 'HIGH';
+      expect(reasoningEffortForModel(kimi)).toEqual({
+        reasoning_effort: 'high',
+      });
+      process.env.CHAT_KIMI_REASONING_EFFORT = 'ultra';
+      expect(reasoningEffortForModel(kimi)).toEqual({
+        reasoning_effort: 'low',
+      });
+      expect(reasoningEffortForModel('qwen3.7-flash')).toEqual({});
+      expect(reasoningEffortForModel('GLM-4.7-Flash')).toEqual({});
+    } finally {
+      if (prev === undefined) delete process.env.CHAT_KIMI_REASONING_EFFORT;
+      else process.env.CHAT_KIMI_REASONING_EFFORT = prev;
     }
   });
 

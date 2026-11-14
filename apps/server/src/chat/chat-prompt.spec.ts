@@ -332,8 +332,8 @@ describe('按端区分提示词', () => {
     const web = buildSystemPrompt({ ...base, platform: 'web' });
     const app = buildSystemPrompt({ ...base, platform: 'ios' });
     expect(app.startsWith('【APP 端输出规范')).toBe(true);
-    expect(app).toContain('绝对不要出现连续两个换行');
-    expect(app).toContain('也不要用全角空格 / 空格造伪空行');
+    expect(app).toContain('一定不要用空行收尾');
+    expect(app).toContain('内容照常充分输出');
     expect(app).toContain('开头和结尾都不得出现空白行');
     expect(app).toContain('最后一行不要用换行');
     expect(app).toContain('内容照常充分输出');
@@ -384,7 +384,7 @@ describe('按端区分提示词', () => {
       platform: 'ios',
     });
     expect(appChat.startsWith('【APP 端输出规范')).toBe(true);
-    expect(appChat).toContain('绝对不要出现连续两个换行');
+    expect(appChat).toContain('一定不要用空行收尾');
     expect(appChat).toContain('下方工具、附件、知识库来源');
     expect(appChat).toContain('【搜索结果与工具规则】');
   });

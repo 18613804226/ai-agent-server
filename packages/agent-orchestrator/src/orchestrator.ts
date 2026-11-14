@@ -6,6 +6,7 @@ import {
   isDegradableError,
   isRateLimitError,
   resolveModelCandidates,
+  reasoningEffortForModel,
   samplingForModel,
   zhipuThinkingParam,
   type ModelCascadeConfig,
@@ -271,13 +272,14 @@ export class AgentOrchestrator {
       const maxTries = this.config.rateLimitRetries + 1;
       for (let attempt = 1; attempt <= maxTries; attempt++) {
         try {
-          // thinking 是智谱私有参数，只给智谱；采样参数对多数候选都下发（含降级到 qwen），
-          // 但 Kimi K3 这类推理模型不接受 temperature/top_p，按候选模型过滤。
+          // thinking 只给智谱；采样参数对多数候选下发，但 Kimi K3 不接受
+          // temperature/top_p，改由按模型过滤 + 下发专属 reasoning_effort。
           const body = {
             ...payload,
             model: candidate.model,
             ...(candidate.provider === 'zhipu' ? zhipuThinkingParam() : {}),
             ...samplingForModel(sampling, candidate.model),
+            ...reasoningEffortForModel(candidate.model),
           };
           const stream = await withTimeout(
             client.chat.completions.create(body as any, {

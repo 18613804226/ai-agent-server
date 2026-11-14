@@ -177,6 +177,24 @@ export function samplingForModel(
   return { ...sampling };
 }
 
+/**
+ * Kimi K3 的思考强度：顶层字段 reasoning_effort，支持 low / high / max。
+ *
+ * 官方默认 max（思考最重、首字最慢），这里压到 low 换更快响应与更低 token；
+ * CHAT_KIMI_REASONING_EFFORT 可覆盖，非法值回落 low。
+ * 其他模型不下发该字段，避免给不认识它的端点发未知参数。
+ */
+export function reasoningEffortForModel(
+  model: string,
+): Record<string, string> {
+  if (!/kimi-k3/i.test(model || '')) return {};
+  const raw = (process.env.CHAT_KIMI_REASONING_EFFORT ?? '')
+    .trim()
+    .toLowerCase();
+  const effort = ['low', 'high', 'max'].includes(raw) ? raw : 'low';
+  return { reasoning_effort: effort };
+}
+
 /** 问答档位：闲聊要活泼，基于资料/附件的回答要严谨，实时信息居中，倾诉要松弛 */
 export type ChatSamplingProfile =
   | 'casual'

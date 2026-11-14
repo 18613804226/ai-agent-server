@@ -220,6 +220,7 @@ describe('AgentOrchestrator.run', () => {
       top_p: 0.8,
     });
     expect(dash.create.mock.calls[0][0].thinking).toBeUndefined();
+    expect(dash.create.mock.calls[0][0].reasoning_effort).toBeUndefined();
 
     const plain = fakeClient([[...chunks]]);
     await collect(
@@ -252,6 +253,7 @@ describe('AgentOrchestrator.run', () => {
     expect(body.temperature).toBeUndefined();
     expect(body.top_p).toBeUndefined();
     expect(body.max_tokens).toBe(4096);
+    expect(body.reasoning_effort).toBe('low');
     expect(body.thinking).toBeUndefined();
   });
 

@@ -279,6 +279,7 @@ CHAT_EXPERT_THRESHOLD="5"                    # 得分达到该值算「高难度
 CHAT_GLM_THINKING="true"                     # 是否保留思考链（默认开；配 false/off 关闭）
 CHAT_GLM_TEMPERATURE=""                      # 留空按任务分档 0.7/0.4/0.5；填值则覆盖所有档位
 CHAT_GLM_TOP_P=""                            # 留空用 0.8；填值则覆盖所有档位
+CHAT_KIMI_REASONING_EFFORT="low"             # Kimi K3 思考强度 low/high/max（官方默认 max，这里压到 low）
 CHAT_DEMO_REPLAY=""                          # 留空=失败时兜底回放；true=纯离线演示；off=关闭
 CHAT_LIVE_HISTORY_MESSAGES="12"              # 实时查询保留的历史消息条数（6~30，默认 12 ≈ 6 轮）
 CHAT_MAX_INPUT_TOKENS="6000"                 # 初始上下文窗口基准；编排器预算 = 该值 + 18000
