@@ -70,6 +70,7 @@ function mkService(create: () => Promise<any>) {
     message: {
       create: vi.fn().mockResolvedValue({}),
       findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn().mockResolvedValue(null),
     },
     chatSession: {
       findUnique: vi.fn().mockResolvedValue({ id: 'sess-1' }),
@@ -159,6 +160,32 @@ describe('文档整理意图：本地内容处理，不联网', () => {
       );
     },
   );
+});
+
+describe('文档追问：对上一轮文档再加工，不联网', () => {
+  it('重点突出…：上一轮回复是文档时，不预检索、不提供 web_search', async () => {
+    vi.stubEnv('TAVILY_API_KEY', 'test-key');
+    vi.stubEnv('WEB_SEARCH_PROVIDER', 'tavily');
+    const post = mockTavily(NEWS);
+    const create = vi.fn(async (_body?: any) =>
+      textStream('```markdown\n# 周报\n```'),
+    );
+    const { service, prisma } = mkService(create);
+    prisma.message.findFirst.mockResolvedValueOnce({
+      content: '```markdown\n# 本周工作汇报\n```',
+    });
+    const { onChunk } = collector();
+
+    await service.sendMessageStream(
+      'sess-1',
+      '重点突出 钢构智造 App 工作量',
+      onChunk,
+    );
+
+    expect(post).not.toHaveBeenCalled();
+    const tools = create.mock.calls[0][0].tools ?? [];
+    expect(tools.map((t: any) => t.function.name)).not.toContain('web_search');
+  });
 });
 
 describe('联网来源：现状 characterization（阶段 1 不得改变）', () => {

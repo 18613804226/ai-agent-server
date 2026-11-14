@@ -89,6 +89,9 @@ const RAG_FOLLOWUP_HINT =
   /刚才|前面|上面|再说|展开|详细|继续|这点|那段|上述|第一点|第二点/;
 /** 预检索结果少于这个数就保留 web_search，让模型有机会换词补搜 */
 const MIN_WEB_RESULTS = 3;
+/** 对上一轮文档的再加工指令：精简 / 突出重点 / 调整结构，不涉及新事实查询 */
+const DOC_EDIT_INTENT =
+  /精简|简洁|压缩|缩短|扩写|展开|突出|强调|重点|篇幅|排版|结构调整|调整结构|润色|重写|合并|拆分|分点|太长|短一点|再详细/;
 
 /**
  * 用户画像开关：默认开启，但只记「用户明确要求记住」的白名单四类偏好。
@@ -388,7 +391,22 @@ export class ChatService {
       );
       // ✅ 纯文档整理（含「润色后整理成 word」）属于本地内容处理：
       //    不触发预检索、不产生来源角标，留给模型按【文档输出能力】输出正文。
-      const docIntent = isDocumentIntentQuery(userQuery);
+      const explicitDocIntent = isDocumentIntentQuery(userQuery);
+      // ✅ 对上一轮文档的再加工（「重点突出…」「精简一下」）同样不联网：
+      //    先确认最近一条回答里确实有 ```markdown / ```docx 文档围栏，
+      //    避免把普通追问里的「重点 / 精简」误判成文档轮。
+      let docFollowUp = false;
+      if (!explicitDocIntent && DOC_EDIT_INTENT.test(userQuery)) {
+        const prevReply = await this.prisma.message.findFirst({
+          where: { sessionId, role: 'assistant' },
+          orderBy: { createdAt: 'desc' },
+          select: { content: true },
+        });
+        docFollowUp = /^`{3,}(?:markdown|md|docx?|word|document)\b/im.test(
+          String(prevReply?.content ?? ''),
+        );
+      }
+      const docIntent = explicitDocIntent || docFollowUp;
       const liveInfoQuery = !docIntent && isLiveInfoQuery(userQuery);
       // ✅ 本轮联网结果的唯一事实来源。per-request 创建：ChatService 是单例，
       //    绝不能挂到 this.tools 或模块作用域，否则并发会把 A 的来源串到 B。
