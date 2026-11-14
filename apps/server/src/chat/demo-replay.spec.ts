@@ -312,6 +312,8 @@ describe('上下文记忆：滚动摘要与可观测指标', () => {
       sources: null,
     }));
     prisma.message.findMany.mockResolvedValue(longHistory);
+    // 固定一个较小的预算，确保长历史确实被裁掉（与产品默认值解耦）
+    process.env.CHAT_MAX_INPUT_TOKENS = '6000';
 
     const result = await service.sendMessageStream(
       'sess-1',

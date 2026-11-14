@@ -55,7 +55,7 @@ export function createOrchestrator(clients: ModelClients): AgentOrchestrator {
     contextOptions: {
       maxInputTokens: envInt(
         'CHAT_CONTEXT_MAX_INPUT_TOKENS',
-        envInt('CHAT_MAX_INPUT_TOKENS', 6_000) + 18_000,
+        envInt('CHAT_MAX_INPUT_TOKENS', 16_000) + 18_000,
       ),
       keepRecentToolResults: envInt('CHAT_CONTEXT_KEEP_RECENT_TOOLS', 3),
       keepRecentToolCallRounds: envInt(

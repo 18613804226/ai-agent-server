@@ -74,7 +74,7 @@ const DIGEST_MAX_CHARS = 300;
 const ATTACHMENT_DIGEST_MAX_CHARS = 400;
 const DIGEST_TOKEN_RESERVE = 760;
 // ✅ 初始上下文窗口：与编排器工具循环预算同源（见 orchestrator.factory.ts）
-const DEFAULT_MAX_INPUT_TOKENS = 6000;
+const DEFAULT_MAX_INPUT_TOKENS = 16000;
 function readMaxInputTokens(): number {
   const value = Number(process.env.CHAT_MAX_INPUT_TOKENS);
   return Number.isFinite(value) && value >= 1000
@@ -611,7 +611,7 @@ export class ChatService {
       const historyForSources = historyForModel.slice();
       // ✅ 被窗口裁掉的旧消息留作「此前对话要点」，避免长会话里约束被一次性忘光。
       const trimmedForDigest: Array<{ role: string; content: string }> = [];
-      // ✅ 实时查询窗口可配（默认 6 轮）；下面还有 6000 token 预算兜底，不必硬砍到 3 轮。
+      // ✅ 实时查询窗口可配（默认 6 轮）；下面还有 16000 token 预算兜底，不必硬砍到 3 轮。
       const envLimit = Number(process.env.CHAT_LIVE_HISTORY_MESSAGES);
       const liveHistoryLimit =
         Number.isFinite(envLimit) && envLimit >= 6
