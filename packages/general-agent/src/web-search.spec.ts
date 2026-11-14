@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   formatIndexedWebSearchContext,
   formatWebSearchContext,
+  isDocumentIntentQuery,
   isEmotionalTurn,
   isLiveInfoQuery,
   searchBocha,
@@ -15,6 +16,30 @@ import {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+});
+
+describe('isDocumentIntentQuery', () => {
+  it.each([
+    '整理成 word',
+    '把这段导出成 markdown',
+    '转成 docx',
+    '给我一份 .md 文档',
+    '润色后整理成 word',
+    '重写一遍再整理成 md',
+  ])('纯文档整理命中：%s', (query) => {
+    expect(isDocumentIntentQuery(query)).toBe(true);
+  });
+
+  it.each([
+    '查一下最新资料整理成 word',
+    '帮我找 markdown 转 word 的在线工具',
+    '搜索一下文档格式规范',
+    '今天天气怎么样',
+    '你好呀',
+    '怎么把 Markdown 转 docx',
+  ])('显式查资料或非文档请求不命中：%s', (query) => {
+    expect(isDocumentIntentQuery(query)).toBe(false);
+  });
 });
 
 describe('isLiveInfoQuery', () => {

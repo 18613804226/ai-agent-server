@@ -123,6 +123,25 @@ export const isEmotionalTurn = (query: string): boolean => {
   return EMOTIONAL_TALK.test(trimmed) && !EXPLICIT_TASK.test(trimmed);
 };
 
+/**
+ * 纯文档整理意图：用户要的是「把已有内容整理成 word/md」，属于本地内容处理，
+ * 不该联网检索，也不该让模型去搜「怎么转 Word」。
+ *
+ * 前端已在发送入口拦截「原样整理」并本地转换，这里覆盖剩下的两类：
+ * ① 带润色 / 重写诉求的整理（前端不拦截，交给后端按【文档输出能力】输出正文）；
+ * ② 非 Web 端或没命中前端拦截的请求。
+ * 用户同时明确要查资料（SEARCH_INTENT）时仍按正常联网处理。
+ */
+const DOC_INTENT =
+  /(整理|生成|导出|转成|输出|做成|写成|给我|制作|下载).{0,20}?(word|docx?|markdown|\bmd\b|\.md\b|文档)/i;
+const SEARCH_INTENT =
+  /(查一下|搜一下|搜索|检索|最新|新闻|资料|网址|链接|帮我找)/i;
+
+export const isDocumentIntentQuery = (query: string): boolean => {
+  const trimmed = query.trim();
+  return DOC_INTENT.test(trimmed) && !SEARCH_INTENT.test(trimmed);
+};
+
 /** 强检索信号：出现即按实时查询处理 */
 const STRONG_LIVE_SIGNAL =
   /实时|热搜|热榜|热点|热度|新闻|榜单|排行榜|微博|股价|汇率|搜索|搜一下|搜搜|帮我搜|查一下|查查|查询|帮我查|top\s*\d+|上映|开播|夺冠|开奖|财报/i;

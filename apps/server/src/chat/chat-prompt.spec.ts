@@ -25,7 +25,7 @@ describe('联网引用规则与检索失败语义', () => {
     const prompt = buildSystemPrompt(promptBase);
     expect(prompt).toContain('每个事实后面用 [1]、[2] 这类数字角标标注来源');
     expect(prompt).not.toContain('用简短锚文本的 Markdown 链接标注来源');
-    expect(prompt).toContain('不要复述本段系统注记');
+    expect(prompt).toContain('不要复述系统注记');
   });
 
   it('没搜到：说明资料不足、带上检索词、允许换词补搜', () => {
@@ -206,12 +206,14 @@ describe('buildSystemPrompt', () => {
       webSearchContext: '',
       now,
     });
-    expect(prompt).toContain('你是一个专属的 AI 智能助手');
-    expect(prompt).toContain('你的名字叫 喜温');
-    expect(prompt).toContain('甜妹风格');
-    expect(prompt).toContain('语气轻快俏皮');
+    expect(prompt).toContain('【核心人设');
+    expect(prompt).toContain('「喜温」');
+    expect(prompt).toContain('甜妹助手');
     expect(prompt).toContain('2026');
     expect(prompt).toContain('fetchWeatherInfo');
+    expect(prompt).toContain('【文档输出能力】');
+    expect(prompt).toContain('```markdown');
+    expect(prompt).toContain('文档轮跳过【主动追问】');
   });
 
   it('注入参考资料 / 历史来源 / 联网搜索结果', () => {
@@ -331,12 +333,15 @@ describe('按端区分提示词', () => {
   it('APP 端只约束空行与首尾空白，不压内容与结构', () => {
     const web = buildSystemPrompt({ ...base, platform: 'web' });
     const app = buildSystemPrompt({ ...base, platform: 'ios' });
-    expect(app.startsWith('【APP 端输出规范')).toBe(true);
-    expect(app).toContain('一定不要用空行收尾');
-    expect(app).toContain('内容照常充分输出');
-    expect(app).toContain('开头和结尾都不得出现空白行');
-    expect(app).toContain('最后一行不要用换行');
-    expect(app).toContain('内容照常充分输出');
+    expect(app.startsWith('【APP 端排版与引用规范')).toBe(true);
+    expect(app).toContain('首尾顶格输出');
+    expect(app).toContain('严禁使用超过 3 列的表格');
+    expect(app).toContain('正文严禁出现任何完整 URL');
+    expect(app).toContain('「喜温」');
+    expect(app).toContain('fetchWeatherInfo');
+    expect(app).toContain('【引用规则】');
+    expect(app).toContain('【文档输出能力】');
+    expect(app.length).toBeGreaterThan(web.length);
     // 历史版本压过内容与排版（字数上限、空格/Markdown 禁令），防止回归
     expect(app).not.toContain('一般 3～6 句');
     expect(app).not.toContain('80～200');
@@ -344,12 +349,6 @@ describe('按端区分提示词', () => {
     expect(app).not.toContain('不要用 Markdown');
     expect(app).not.toContain('一般 1～3 句');
     expect(app).not.toContain('能一句说清就不展开');
-    expect(app).toContain('你的名字叫 喜温');
-    expect(app).toContain('fetchWeatherInfo');
-    expect(app).toContain('【引用规则】');
-    expect(app.length).toBeGreaterThan(web.length);
-    // APP 正文不贴 URL，改用 [1]/[2] 角标；链接由 sources 事件下发
-    expect(app).toContain('正文中禁止出现任何完整 URL');
     expect(app).toContain('[1]、[2]');
     expect(app).not.toContain('联网事实的链接直接跟在对应句子后面');
     expect(web).toContain('禁止把裸 URL');
@@ -359,7 +358,9 @@ describe('按端区分提示词', () => {
     expect(buildSystemPrompt(base)).toBe(
       buildSystemPrompt({ ...base, platform: 'desktop' }),
     );
-    expect(buildSystemPrompt(base)).not.toContain('【APP 端输出规范');
+    expect(buildSystemPrompt(base)).not.toContain(
+      '【APP 端排版与引用规范',
+    );
   });
 
   it('闲聊档同样携带完整工具/引用规则，只额外叠加口语要求', () => {
@@ -370,8 +371,8 @@ describe('按端区分提示词', () => {
     expect(chat).toContain('festival_info');
     expect(chat).toContain('【引用规则】');
     expect(chat).toContain('【历史对话来源状态】');
-    expect(chat).toContain('【本轮对话风格】');
-    expect(chat).toContain('别只回一两个词');
+    expect(chat).toContain('【本轮对话风格｜甜妹互动增强】');
+    expect(chat).toContain('先接住用户的情绪或话茬');
     expect(chat.length).toBeGreaterThan(full.length);
     // 规则部分与完整档一字不差，只是前置了一段对话风格要求
     expect(chat.endsWith(full)).toBe(true);
@@ -383,9 +384,8 @@ describe('按端区分提示词', () => {
       promptProfile: 'chat',
       platform: 'ios',
     });
-    expect(appChat.startsWith('【APP 端输出规范')).toBe(true);
-    expect(appChat).toContain('一定不要用空行收尾');
-    expect(appChat).toContain('下方工具、附件、知识库来源');
+    expect(appChat.startsWith('【APP 端排版与引用规范')).toBe(true);
+    expect(appChat).toContain('首尾顶格输出');
     expect(appChat).toContain('【搜索结果与工具规则】');
   });
 });

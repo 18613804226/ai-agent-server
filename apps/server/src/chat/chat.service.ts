@@ -23,6 +23,7 @@ import {
   buildFestivalContext,
   createChatTools,
   formatWebSearchContext,
+  isDocumentIntentQuery,
   isEmotionalTurn,
   isLiveInfoQuery,
   searchWeb,
@@ -385,7 +386,10 @@ export class ChatService {
       const isCasualChat = /你的名字|你是谁|你好|在干嘛|hi|hello/.test(
         userQuery,
       );
-      const liveInfoQuery = isLiveInfoQuery(userQuery);
+      // ✅ 纯文档整理（含「润色后整理成 word」）属于本地内容处理：
+      //    不触发预检索、不产生来源角标，留给模型按【文档输出能力】输出正文。
+      const docIntent = isDocumentIntentQuery(userQuery);
+      const liveInfoQuery = !docIntent && isLiveInfoQuery(userQuery);
       // ✅ 本轮联网结果的唯一事实来源。per-request 创建：ChatService 是单例，
       //    绝不能挂到 this.tools 或模块作用域，否则并发会把 A 的来源串到 B。
       const searchSession = searchSessionEnabled()
@@ -728,7 +732,8 @@ export class ChatService {
       //    结果不足（含空/失败）时保留 web_search，让模型换词补搜。
       const webSearchScarce =
         liveInfoQuery && webSearchResults.length < MIN_WEB_RESULTS;
-      const excludeWebSearch = liveInfoQuery && !webSearchScarce;
+      const excludeWebSearch =
+        docIntent || (liveInfoQuery && !webSearchScarce);
       // ✅ session 模式下每轮新建工具集，让 web_search 的结果回流到本轮来源池；
       //    开关关闭时复用共享实例。
       const baseTools = searchSession
@@ -801,6 +806,7 @@ export class ChatService {
       // ✅ 闲聊增强档：本轮没有资料/附件/联网结果/工具需求时，额外前置口语直给要求；
       //    工具 / 附件 / 引用规则两档共用同一份文本，Demo 的工具调用展示不受影响。
       const casualTurn =
+        !docIntent &&
         !liveInfoQuery &&
         !context &&
         !webSearchContext &&
@@ -1123,13 +1129,15 @@ export class ChatService {
           // ✅ 按任务分档采样：只作用于免费层 GLM-4.5-Flash，代码 Agent 链路不传
           //    情绪档优先级最高，且只在 casualTurn 允许的纯闲聊轮次生效
           sampling: zhipuChatSamplingParam(
-            emotionalTurn
-              ? 'emotional'
-              : liveInfoQuery
-                ? 'live'
-                : groundedTurn
-                  ? 'knowledge'
-                  : 'casual',
+            docIntent
+              ? 'knowledge'
+              : emotionalTurn
+                ? 'emotional'
+                : liveInfoQuery
+                  ? 'live'
+                  : groundedTurn
+                    ? 'knowledge'
+                    : 'casual',
           ),
           signal,
         },

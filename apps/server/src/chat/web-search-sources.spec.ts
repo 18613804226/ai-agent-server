@@ -137,6 +137,30 @@ const ENOUGH = [
   { title: '新闻C', url: 'https://c.com/3', content: '摘要C' },
 ];
 
+describe('文档整理意图：本地内容处理，不联网', () => {
+  it.each(['整理成 word', '润色后整理成 word'])(
+    '%s：不预检索、不提供 web_search 工具',
+    async (query) => {
+      vi.stubEnv('TAVILY_API_KEY', 'test-key');
+      vi.stubEnv('WEB_SEARCH_PROVIDER', 'tavily');
+      const post = mockTavily(NEWS);
+      const create = vi.fn(async (_body?: any) =>
+        textStream('```markdown\n# 文档\n```'),
+      );
+      const { service } = mkService(create);
+      const { onChunk } = collector();
+
+      await service.sendMessageStream('sess-1', query, onChunk);
+
+      expect(post).not.toHaveBeenCalled();
+      const tools = create.mock.calls[0][0].tools ?? [];
+      expect(tools.map((t: any) => t.function.name)).not.toContain(
+        'web_search',
+      );
+    },
+  );
+});
+
 describe('联网来源：现状 characterization（阶段 1 不得改变）', () => {
   it('规则命中 + 后端预检索成功：末尾推结构化 web sources 并落库', async () => {
     vi.stubEnv('TAVILY_API_KEY', 'test-key');
