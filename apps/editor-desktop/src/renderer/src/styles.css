@@ -1547,6 +1547,28 @@ body {
   opacity: 0.9;
 }
 
+.diff-stats {
+  display: inline-flex;
+  flex: none;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.diff-revert-btn {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.diff-revert-btn:hover {
+  border-color: #444;
+  color: var(--text);
+}
+
 .diff-hunk {
   border-bottom: 1px solid var(--border);
 }
@@ -1942,6 +1964,40 @@ body {
   font-size: 11px;
   color: var(--text-dim);
   margin-bottom: 4px;
+}
+
+.message-changes-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.message-changes-toggle svg {
+  transition: transform 0.15s ease;
+}
+
+.message-changes-toggle.open svg {
+  transform: rotate(90deg);
+}
+
+/* 标题文字同样可点击折叠，外观保持纯文本 */
+.message-changes-summary {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.message-changes-summary:hover {
+  color: var(--text);
 }
 
 .message-changes-save {
@@ -4072,6 +4128,25 @@ button:disabled {
   background: var(--bg);
   color: var(--text);
   font-size: 12px;
+}
+
+/* 数据库表单里的自定义下拉：与同排 input 的尺寸/配色保持一致 */
+.db-field .select-trigger {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.db-field .select-trigger:hover,
+.db-field .select-trigger:focus-visible {
+  border-color: var(--accent);
 }
 
 .db-field.db-check {

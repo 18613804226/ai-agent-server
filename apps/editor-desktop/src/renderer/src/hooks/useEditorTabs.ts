@@ -82,7 +82,14 @@ export function useEditorTabs({
         setSavedContentState(content);
       }
     } catch (e: any) {
-      setError(e?.message || String(e));
+      const message = e?.message || String(e);
+      // IPC 会包一层 "Error invoking remote method ..."；二进制文件属于预期情况，
+      // 给一句可读的提示，不把底层调用栈样式的错误顶到界面上。
+      setError(
+        message.includes('二进制文件')
+          ? `无法预览二进制文件：${path}`
+          : message,
+      );
     }
   };
 

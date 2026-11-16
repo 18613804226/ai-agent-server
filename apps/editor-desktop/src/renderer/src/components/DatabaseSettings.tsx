@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type {
   DatabaseConfig,
   DatabaseConnectionInput,
 } from '../mode/types';
 import { DEMO_DB_ID } from '../mode/types';
+import { SelectMenu } from './SelectMenu';
 
 const DRIVERS: Array<{
   id: 'sqlite' | 'postgres' | 'mysql';
@@ -13,6 +14,8 @@ const DRIVERS: Array<{
   { id: 'postgres', label: 'PostgreSQL' },
   { id: 'mysql', label: 'MySQL' },
 ];
+
+const DRIVER_OPTIONS = DRIVERS.map((d) => ({ value: d.id, label: d.label }));
 
 const EMPTY: DatabaseConnectionInput = {
   id: '',
@@ -67,21 +70,13 @@ function ConnectionForm({
       </label>
       <label className="db-field">
         <span>类型</span>
-        <select
+        <SelectMenu
           value={draft.driver}
-          onChange={(e) =>
-            set(
-              'driver',
-              e.target.value as DatabaseConnectionInput['driver'],
-            )
+          options={DRIVER_OPTIONS}
+          onChange={(value) =>
+            set('driver', value as DatabaseConnectionInput['driver'])
           }
-        >
-          {DRIVERS.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.label}
-            </option>
-          ))}
-        </select>
+        />
       </label>
 
       {isSqlite ? (
@@ -185,6 +180,17 @@ export function DatabaseSettings() {
   const [editing, setEditing] = useState<DatabaseConnectionInput | null>(null);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  /** 新增连接后要滚到的条目 id（等列表渲染完再滚） */
+  const [scrollToId, setScrollToId] = useState<string | null>(null);
+  const itemRefs = useRef(new Map<string, HTMLLIElement>());
+
+  useEffect(() => {
+    if (!scrollToId) return;
+    itemRefs.current
+      .get(scrollToId)
+      ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    setScrollToId(null);
+  }, [config, scrollToId]);
 
   const reload = async () => {
     try {
@@ -203,10 +209,13 @@ export function DatabaseSettings() {
     setBusy(true);
     setMessage('');
     try {
+      const isNew = !conn.id;
       const toSave = conn.id ? conn : { ...conn, id: crypto.randomUUID() };
       setConfig(await window.electron.database.save(toSave));
       setEditing(null);
       setMessage('已保存');
+      // 新加的连接在列表末尾：等列表渲染后滚到它
+      if (isNew) setScrollToId(toSave.id);
     } catch (e: any) {
       setMessage(e?.message || String(e));
     } finally {
@@ -279,7 +288,13 @@ export function DatabaseSettings() {
       ) : (
         <ul className="provider-list">
           {config.connections.map((c) => (
-            <li key={c.id}>
+            <li
+              key={c.id}
+              ref={(el) => {
+                if (el) itemRefs.current.set(c.id, el);
+                else itemRefs.current.delete(c.id);
+              }}
+            >
               <div className="provider-info">
                 <div className="provider-name">
                   <input

@@ -1,46 +1,22 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { FileChange } from '../mode/types';
-import { diffLines, groupHunks, mergeHunks, type DiffLine } from '../diff';
-
-interface DiffRow {
-  before?: DiffLine;
-  after?: DiffLine;
-}
-
-/** 把行级 diff 配对成并排行（左旧右新） */
-function pairDiff(before: string, after: string): DiffRow[] {
-  const lines = diffLines(before, after);
-  const rows: DiffRow[] = [];
-  let pendingDel: DiffRow['before'][] = [];
-  for (const line of lines) {
-    if (line.type === 'same') {
-      for (const d of pendingDel) rows.push({ before: d });
-      pendingDel = [];
-      rows.push({ before: line, after: line });
-    } else if (line.type === 'del') {
-      pendingDel.push(line);
-    } else {
-      const del = pendingDel.shift();
-      rows.push({ before: del, after: line });
-    }
-  }
-  for (const d of pendingDel) rows.push({ before: d });
-  return rows;
-}
+import { diffLines, groupHunks, mergeHunks } from '../diff';
 
 /**
- * 改动对比：左旧右新并排 + hunk 逐块选择（接受/拒绝后应用）。
+ * 改动对比：单栏统一 diff（旧行 / 新行），按块勾选后应用。
+ * 不勾选的块保持修改前内容，因此「全部取消 + 应用」等价于回滚。
  */
 export function DiffView({
   change,
   onApply,
+  onRevert,
 }: {
   change: FileChange;
   onApply: (content: string) => void;
+  onRevert?: (change: FileChange) => void;
 }) {
   const before = change.before ?? '';
   const after = change.after ?? '';
-  const rows = useMemo(() => pairDiff(before, after), [before, after]);
   const hunks = useMemo(
     () => groupHunks(diffLines(before, after)),
     [before, after],
@@ -49,7 +25,15 @@ export function DiffView({
     () => new Set(hunks.map((h) => h.id)),
   );
 
-  const allAccepted = accepted.size === hunks.length;
+  // 切换到另一个文件/另一轮改动时重置勾选；否则会沿用上一个文件的块状态，
+  // 新文件的块可能被误判为「已拒绝」，应用后写回旧内容。
+  useEffect(() => {
+    setAccepted(new Set(hunks.map((h) => h.id)));
+  }, [hunks]);
+
+  const allAccepted = hunks.length > 0 && accepted.size === hunks.length;
+  const added = hunks.reduce((n, h) => n + h.afterLines.length, 0);
+  const deleted = hunks.reduce((n, h) => n + h.beforeLines.length, 0);
 
   if (change.kind === 'renamed') {
     return (
@@ -81,57 +65,39 @@ export function DiffView({
         <span className="diff-blocks-title" title={change.path}>
           {change.path}
         </span>
+        <span className="diff-stats">
+          <span className="changes-added">+{added}</span>
+          <span className="changes-deleted">-{deleted}</span>
+        </span>
         <label className="diff-blocks-all">
           <input type="checkbox" checked={allAccepted} onChange={toggleAll} />
           全选
         </label>
+        {onRevert ? (
+          <button
+            type="button"
+            className="diff-revert-btn"
+            onClick={() => onRevert(change)}
+            title="放弃该文件的改动，恢复为修改前（新建文件会被删除）"
+          >
+            回滚此文件
+          </button>
+        ) : null}
         <button
           type="button"
           className="diff-apply-btn"
+          disabled={!hunks.length}
           onClick={() => onApply(mergeHunks(before, after, accepted))}
+          title="只把勾选的块写入文件；未勾选的块保持修改前内容"
         >
-          应用改动
+          应用所选块
         </button>
       </div>
 
-      {/* 并排对比：左旧右新 */}
-      <div className="diff-split">
-        <div className="diff-pane">
-          <div className="diff-pane-title">旧版本</div>
-          <div className="diff-pane-body">
-            {rows.map((r, i) => (
-              <div
-                key={i}
-                className={`diff-row ${r.before ? r.before.type : 'empty'}`}
-              >
-                <span className="diff-no">{r.before?.oldNo ?? ''}</span>
-                <span className="diff-text">{r.before?.text ?? ''}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="diff-pane">
-          <div className="diff-pane-title">新版本</div>
-          <div className="diff-pane-body">
-            {rows.map((r, i) => (
-              <div
-                key={i}
-                className={`diff-row ${r.after ? r.after.type : 'empty'}`}
-              >
-                <span className="diff-no">{r.after?.newNo ?? ''}</span>
-                <span className="diff-text">{r.after?.text ?? ''}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* hunk 逐块选择 */}
       {hunks.length === 0 ? (
         <div className="diff-empty">没有差异</div>
       ) : (
         <div className="diff-hunks">
-          <div className="diff-hunks-title">按块选择</div>
           {hunks.map((hunk) => (
             <div
               key={hunk.id}

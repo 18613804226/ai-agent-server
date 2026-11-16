@@ -265,18 +265,28 @@ function ThoughtBlock({
 }) {
   const [open, setOpen] = useState(streaming);
   const bodyRef = useRef<HTMLPreElement>(null);
+  /** 是否跟随最新思考内容：用户手动上滚后停止，滚回底部恢复 */
+  const followBottomRef = useRef(true);
 
   useEffect(() => {
     setOpen(streaming);
+    if (streaming) followBottomRef.current = true;
   }, [streaming]);
 
-  // 展开且仍在思考时，窗口内部自动贴底，保证看到最新思考内容
+  // 展开且仍在思考时，窗口内部自动贴底，保证看到最新思考内容；
+  // 但用户已经向上滚动查看旧内容时不再抢滚动位置。
   useEffect(() => {
-    if (open && streaming) {
-      const el = bodyRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    }
+    if (!open || !streaming || !followBottomRef.current) return;
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [text, open, streaming]);
+
+  const handleThoughtScroll = () => {
+    const el = bodyRef.current;
+    if (!el) return;
+    followBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+  };
 
   return (
     <div className={`thought${open ? ' open' : ''}`}>
@@ -308,7 +318,11 @@ function ThoughtBlock({
         </span>
       </button>
       {open ? (
-        <pre className="thought-body" ref={bodyRef}>
+        <pre
+          className="thought-body"
+          ref={bodyRef}
+          onScroll={handleThoughtScroll}
+        >
           {text}
         </pre>
       ) : null}
@@ -324,6 +338,7 @@ export const ChatMessage = memo(function ChatMessage({
   onOpenBrowser,
   onSelectDiff,
   onApplyDiff,
+  onRevertChanges,
   onSaveChanges,
 }: {
   msg: ChatMsg;
@@ -333,10 +348,13 @@ export const ChatMessage = memo(function ChatMessage({
   onOpenBrowser?: (url: string) => void;
   onSelectDiff?: (c: FileChange) => void;
   onApplyDiff?: (path: string, content: string) => void;
+  onRevertChanges?: (changes: FileChange[]) => void;
   onSaveChanges?: () => void;
 }) {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
+  /** 改动文件列表默认折叠，点标题前的箭头展开 */
+  const [changesOpen, setChangesOpen] = useState(false);
   const blocks = useMemo(() => buildMessageBlocks(msg), [msg]);
   /** 四项统计（总量 / 生成 / 耗时 / 速度）全部到齐，复制按钮才出现 */
   const statsReady =
@@ -491,9 +509,39 @@ export const ChatMessage = memo(function ChatMessage({
       {msg.changes?.length ? (
         <div className="message-changes">
           <div className="message-changes-title">
-            {pendingChanges.length
-              ? `${pendingChanges.length} 个文件待确认`
-              : `${msg.changes.length} 个文件已修改`}
+            <button
+              type="button"
+              className={`message-changes-toggle${changesOpen ? ' open' : ''}`}
+              onClick={() => setChangesOpen((v) => !v)}
+              aria-expanded={changesOpen}
+              aria-label={changesOpen ? '收起改动列表' : '展开改动列表'}
+              title={changesOpen ? '收起改动列表' : '展开改动列表'}
+            >
+              <svg
+                viewBox="0 0 16 16"
+                width="12"
+                height="12"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                <path d="m6 4 4 4-4 4" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="message-changes-summary"
+              onClick={() => setChangesOpen((v) => !v)}
+              aria-expanded={changesOpen}
+              title={changesOpen ? '收起改动列表' : '展开改动列表'}
+            >
+              {pendingChanges.length
+                ? `${pendingChanges.length} 个文件待确认`
+                : `${msg.changes.length} 个文件已修改`}
+            </button>
             {pendingChanges.length ? (
               <>
                 <button
@@ -535,9 +583,11 @@ export const ChatMessage = memo(function ChatMessage({
                   type="button"
                   className="message-changes-revert"
                   onClick={() =>
-                    msg.changes?.forEach((c) =>
-                      onApplyDiff?.(c.path, c.before ?? ''),
-                    )
+                    onRevertChanges
+                      ? onRevertChanges(msg.changes ?? [])
+                      : msg.changes?.forEach((c) =>
+                          onApplyDiff?.(c.path, c.before ?? ''),
+                        )
                   }
                   title="放弃全部改动，恢复为修改前"
                 >
@@ -546,34 +596,36 @@ export const ChatMessage = memo(function ChatMessage({
               </>
             )}
           </div>
-          <ul className="message-changes-list">
-            {changesWithStats.map(({ change: c, added, deleted }, i) => (
-              <li key={`${c.kind}-${c.path}-${i}`}>
-                <div className="message-change-row">
-                  <span className="message-change-file">
-                    <span className={`badge badge-${c.kind}`}>
-                      {changeLabel(c.kind)}
+          {changesOpen ? (
+            <ul className="message-changes-list">
+              {changesWithStats.map(({ change: c, added, deleted }, i) => (
+                <li key={`${c.kind}-${c.path}-${i}`}>
+                  <div className="message-change-row">
+                    <span className="message-change-file">
+                      <span className={`badge badge-${c.kind}`}>
+                        {changeLabel(c.kind)}
+                      </span>
+                      <span className="message-changes-path">{c.path}</span>
                     </span>
-                    <span className="message-changes-path">{c.path}</span>
-                  </span>
-                  <span className="message-change-stats">
-                    <span className="changes-added">+{added}</span>
-                    <span className="changes-deleted">-{deleted}</span>
-                  </span>
-                  <button
-                    type="button"
-                    className="message-change-view"
-                    onClick={() => onSelectDiff?.(c)}
-                  >
-                    View Diff
-                  </button>
-                  {c.pending ? (
-                    <span className="message-changes-pending">待确认</span>
-                  ) : null}
-                </div>
-              </li>
-            ))}
-          </ul>
+                    <span className="message-change-stats">
+                      <span className="changes-added">+{added}</span>
+                      <span className="changes-deleted">-{deleted}</span>
+                    </span>
+                    <button
+                      type="button"
+                      className="message-change-view"
+                      onClick={() => onSelectDiff?.(c)}
+                    >
+                      View Diff
+                    </button>
+                    {c.pending ? (
+                      <span className="message-changes-pending">待确认</span>
+                    ) : null}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
       {previewIndex !== null && msg.images?.length ? (

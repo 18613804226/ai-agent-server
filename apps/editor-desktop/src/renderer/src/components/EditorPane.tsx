@@ -65,10 +65,11 @@ export function EditorPane({
   onRequestCloseTabs,
   onTabContextMenu,
   onCloseDiff,
+  onApplyDiff,
+  onRevertDiff,
   onEditorChange,
   onAskAI,
   onCloseTerminal,
-  onApplyDiff,
   browserUrl,
   onCloseBrowser,
   browserTabActive,
@@ -89,6 +90,7 @@ export function EditorPane({
   onRequestCloseTabs: (paths: string[]) => void;
   onTabContextMenu: (menu: { x: number; y: number; path: string } | null) => void;
   onCloseDiff: () => void;
+  onRevertDiff?: (change: FileChange) => void;
   onEditorChange: (content: string) => void;
   onAskAI: (path: string, selection?: string) => void;
   onCloseTerminal: () => void;
@@ -318,13 +320,6 @@ export function EditorPane({
             </button>
           </div>
         ) : null}
-        {activeDiff ? (
-          <div className="editor-actions">
-            <button className="ghost small" onClick={onCloseDiff}>
-              关闭对比
-            </button>
-          </div>
-        ) : null}
       </div>
       <div className="editor-content">
         {databaseOpen ? (
@@ -342,7 +337,8 @@ export function EditorPane({
             {activeDiff ? (
               <DiffView
                 change={activeDiff}
-                onApply={(content) => onApplyDiff(activeDiff.path, content)}
+                onApply={(content) => onApplyDiff?.(activeDiff.path, content)}
+                onRevert={onRevertDiff}
               />
             ) : activeFile ? (
               <CodeEditor

@@ -58,12 +58,14 @@ export function ChatPanel({
   onToggleApproval,
   onOpenBrowser,
   onApplyDiff,
+  onRevertChanges,
   onSaveChanges,
 }: {
   mode: AgentMode;
   sessionId: string;
   onOpenBrowser?: (url: string) => void;
   onApplyDiff: (path: string, content: string) => void;
+  onRevertChanges?: (changes: FileChange[]) => void;
   onSaveChanges: () => void;
   sessions: ChatSession[];
   activeId: string;
@@ -190,6 +192,7 @@ export function ChatPanel({
             onOpenBrowser={onOpenBrowser}
             onSelectDiff={onSelectDiff}
             onApplyDiff={onApplyDiff}
+            onRevertChanges={onRevertChanges}
             onSaveChanges={onSaveChanges}
           />
         ))}

@@ -75,6 +75,20 @@ function createBackend(mode: AgentMode): {
   };
 }
 
+/** 新建一个空会话；保证任何时刻都有可写入的 activeSession，
+ *  否则受控输入框的 setInput 没有落点，表现为「有光标但打不出字」。 */
+function createEmptySession(): ChatSession {
+  return {
+    id: crypto.randomUUID(),
+    title: '新任务',
+    messages: [],
+    input: '',
+    images: [],
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+
 export function App() {
   const { mode, setMode } = useMode();
   const { theme, toggleTheme } = useTheme();
@@ -268,27 +282,23 @@ export function App() {
           setSessions(h as ChatSession[]);
           setActiveId((h as ChatSession[])[0].id);
         } else {
-          const id = crypto.randomUUID();
-          setSessions([
-            {
-              id,
-              title: '新任务',
-              messages: [],
-              input: '',
-              images: [],
-              createdAt: Date.now(),
-              updatedAt: Date.now(),
-            },
-          ]);
-          setActiveId(id);
+          const session = createEmptySession();
+          setSessions([session]);
+          setActiveId(session.id);
         }
       })
-      .catch(() => {});
+      // 读取失败也要保证有一个可输入的空会话，不能停在 sessions=[] 的状态
+      .catch(() => {
+        const session = createEmptySession();
+        setSessions([session]);
+        setActiveId(session.id);
+      });
   }, []);
 
-  // 兜底：如果 activeId 为空但已有会话，自动选中第一个
+  // 兜底：activeId 为空或指向已不存在的会话时，自动选中第一个
   useEffect(() => {
-    if (!activeId && sessions.length) {
+    if (!sessions.length) return;
+    if (!sessions.some((s) => s.id === activeId)) {
       setActiveId(sessions[0].id);
     }
   }, [sessions, activeId]);
@@ -311,26 +321,22 @@ export function App() {
   }, [sessions, activeId]);
 
   const createSession = () => {
-    const id = crypto.randomUUID();
-    setSessions((prev) => [
-      ...prev,
-      {
-        id,
-        title: '新任务',
-        messages: [],
-        input: '',
-        images: [],
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      },
-    ]);
-    setActiveId(id);
+    const session = createEmptySession();
+    setSessions((prev) => [...prev, session]);
+    setActiveId(session.id);
   };
 
   const deleteSession = (id: string) => {
     const next = sessions.filter((s) => s.id !== id);
+    // 删掉最后一个会话时立刻补一个空会话，避免 activeId 指向不存在的会话
+    if (!next.length) {
+      const session = createEmptySession();
+      setSessions([session]);
+      setActiveId(session.id);
+      return;
+    }
     setSessions(next);
-    if (activeId === id) setActiveId(next[0]?.id ?? '');
+    if (activeId === id) setActiveId(next[0].id);
   };
 
   useEffect(() => {
@@ -428,6 +434,48 @@ export function App() {
     if (activeFile === path) {
       setFileContent(content);
       setSavedContent(content);
+    }
+  };
+
+  /** 回滚一条消息的改动：新建文件删除、修改/删除写回 before、重命名还原；
+   *  pending（尚未落盘）的项只从列表移除，不动磁盘。 */
+  const revertChanges = async (list: FileChange[]) => {
+    const failures: string[] = [];
+    for (const c of [...list].reverse()) {
+      if (c.pending) continue;
+      try {
+        if (c.kind === 'created') {
+          await window.electron.workspace.delete(c.path);
+        } else if (c.kind === 'renamed') {
+          if (c.from) {
+            await backend.workspace.writeFile?.(c.from, c.before ?? '');
+          }
+          await window.electron.workspace.delete(c.path);
+        } else {
+          await backend.workspace.writeFile?.(c.path, c.before ?? '');
+        }
+      } catch (e: any) {
+        failures.push(`${c.path}: ${e?.message || String(e)}`);
+      }
+    }
+    const reverted = new Set(list.map((c) => c.path));
+    setChanges((prev) => prev.filter((c) => !reverted.has(c.path)));
+    // 当前打开的对比若属于被回滚的文件，直接关闭，避免停留在旧内容上
+    setActiveDiff((prev) => (prev && reverted.has(prev.path) ? null : prev));
+    await reload();
+    setError(failures.length ? `回滚失败：${failures.join('；')}` : '');
+    if (activeFile) {
+      try {
+        const content = await backend.workspace.readFile(activeFile);
+        setFileContent(content);
+        setSavedContent(content);
+      } catch {
+        // 文件已被回滚删除：关掉对应标签，不停留在报错状态
+        setEditorTabs((prev) => prev.filter((t) => t.path !== activeFile));
+        setActiveFile('');
+        setFileContent('');
+        setSavedContent('');
+      }
     }
   };
 
@@ -604,6 +652,7 @@ export function App() {
           onAskAI={askAI}
           onCloseTerminal={() => setTerminalOpen(false)}
           onApplyDiff={(path, content) => void applyDiff(path, content)}
+          onRevertDiff={(c) => void revertChanges([c])}
           browserUrl={browserUrl}
           onCloseBrowser={closeBrowser}
           browserTabActive={browserTabActive}
@@ -672,6 +721,7 @@ export function App() {
           onToggleApproval={toggleApproval}
           onOpenBrowser={openBrowser}
           onApplyDiff={(path, content) => void applyDiff(path, content)}
+          onRevertChanges={(list) => void revertChanges(list)}
           onSaveChanges={() => void saveAllDirty()}
         />
       </div>
