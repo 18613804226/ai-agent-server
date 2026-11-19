@@ -164,16 +164,16 @@ export const isLiveInfoQuery = (query: string): boolean => {
   if (isEmotionalTurn(trimmed)) return false;
   if (STRONG_LIVE_SIGNAL.test(trimmed)) return true;
   if (WEAK_TIME.test(trimmed) && QUERY_SIGNAL.test(trimmed)) return true;
-  // 短查询兜底：默认不搜，只有「像实体/术语」的短输入才按实时查询处理。
-  // 正向信号：含数字/字母/书名号（型号、榜单、作品名），或 2-6 个汉字。
+  // 短查询兜底：默认不搜，只对含「字母+数字型号 / 3+字母专名 / 书名号」的短输入走预检索。
+  // 不再对纯 2-6 汉字、纯数字（666/111）或英文口语短词（ok/yes/haha/emm）做自动预检索，
+  // 其余交给模型工具链按需调用 web_search。
   // 反向过滤：命中问候/确认/请求句式、叠词拟声，或含句法成分（语气词、代词、疑问词、能愿动词等），
   //          说明它是一句话而不是一个词，交给普通对话/工具链处理。
-  // 这样「好吧」「嘻嘻」「哈哈哈」不会被当成搜索，「特朗普」「李二毛」「iPhone 16」仍会命中。
   if (trimmed.length > 0 && trimmed.length <= 20) {
     const looksLikeEntity =
-      /[0-9A-Za-z]/.test(trimmed) ||
-      /[《「『“《]/.test(trimmed) ||
-      /^[\u4e00-\u9fa5]{2,6}[。.!！?？]?$/.test(trimmed);
+      (/[A-Za-z]/.test(trimmed) && /\d/.test(trimmed)) ||
+      /[A-Za-z]{3,}/.test(trimmed) ||
+      /[《「『“]/.test(trimmed);
     if (!looksLikeEntity) return false;
     const isUtterance =
       /^([\u4e00-\u9fa5])\1+$/.test(trimmed) || // AA/AAA：嘻嘻、哈哈、嘿嘿
@@ -181,7 +181,10 @@ export const isLiveInfoQuery = (query: string): boolean => {
       /^([\u4e00-\u9fa5])\1([\u4e00-\u9fa5])\2$/.test(trimmed) || // AABB：嘻嘻哈哈
       /^([\u4e00-\u9fa5]{2})\1$/.test(trimmed) || // ABAB：研究研究
       /^([\u4e00-\u9fa5])[不没]\1$/.test(trimmed) || // A不A/A没A：好不好、是不是
-      /^(你好|您好|hi|hello|早上好|晚上好|下午好|谢谢|再见|拜拜|好的|好吧|好嘞|好滴|行吧|行啊|嗯嗯|嗯啊|是的|不是|嗯|啊|哦|你是)/i.test(
+      /^(你好|您好|hi|hello|hey|早上好|晚上好|下午好|谢谢|再见|拜拜|好的|好吧|好嘞|好滴|行吧|行啊|嗯嗯|嗯啊|是的|不是|嗯|啊|哦|你是)/i.test(
+        trimmed,
+      ) ||
+      /^(ok|okay|yes|yeah|yep|no|nope|good|nice|cool|great|thanks|thank\s+you|thx|bye|goodbye|sorry|haha+|hehe+|lol|emm+|umm+|hmm+|wow|omg|gn|gm)[.!?！。？]*$/i.test(
         trimmed,
       ) ||
       /怎么|为什么|如何|是什么|什么是|解释|吗$|呢$|？|\?|天气/.test(trimmed) ||
