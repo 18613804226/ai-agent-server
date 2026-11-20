@@ -6,7 +6,7 @@ import {
   type RefObject,
 } from 'react';
 import type { CodeEditorHandle } from '../components/CodeEditor';
-import type { ChatEvent, ChatHistoryItem, AgentPromptContext, AgentMode, AgentTransport, WorkspaceProvider, FileChange, ApprovalPreview } from '../mode/types';
+import type { ChatEvent, ChatHistoryItem, AgentPromptContext, AgentMode, AgentTransport, WorkspaceProvider, FileChange, ApprovalPreview, TodoItem } from '../mode/types';
 import type { ChatMsg } from '../components/ChatMessage';
 
 /** 当前会话的可变状态（由外部会话管理注入） */
@@ -36,6 +36,14 @@ interface PendingApproval {
   toolName: string;
   args: Record<string, unknown>;
   preview?: ApprovalPreview[];
+}
+
+/** 澄清请求（ask_user）：等待用户点选选项或自定义输入 */
+interface PendingClarification {
+  id: string;
+  question: string;
+  options: string[];
+  allowCustom: boolean;
 }
 
 interface UseAgentRunDeps {
@@ -103,6 +111,10 @@ export function useAgentRun(deps: UseAgentRunDeps) {
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(
     null,
   );
+  const [pendingClarification, setPendingClarification] =
+    useState<PendingClarification | null>(null);
+  /** 当前任务清单（todo_write 工具更新，渲染为聊天区的任务面板） */
+  const [todos, setTodos] = useState<TodoItem[]>([]);
   const [runState, setRunState] = useState<string>('idle');
   const [checkpoint, setCheckpoint] = useState<RunCheckpointInfo | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -141,6 +153,21 @@ export function useAgentRun(deps: UseAgentRunDeps) {
           args: ev.args ?? {},
           preview: ev.preview,
         });
+        return;
+      }
+      if (ev.type === 'clarification_request') {
+        setPendingClarification({
+          id: ev.id ?? '',
+          question: ev.question ?? '',
+          options: Array.isArray(ev.options)
+            ? ev.options.map((o) => String(o))
+            : [],
+          allowCustom: ev.allowCustom !== false,
+        });
+        return;
+      }
+      if (ev.type === 'todo_list' && Array.isArray(ev.todos)) {
+        setTodos(ev.todos as TodoItem[]);
         return;
       }
       if (ev.type === 'done' && ev.changes) {
@@ -336,6 +363,7 @@ export function useAgentRun(deps: UseAgentRunDeps) {
 
     updateSession({ input: '', images: [] });
     setChanges([]);
+    setTodos([]);
     const assistantId = crypto.randomUUID();
     // 一次写入 user + assistant 两条消息，避免分两次更新相互覆盖；
     // 首个任务消息同时作为会话标题（默认「新任务」时替换为摘要）
@@ -407,6 +435,7 @@ export function useAgentRun(deps: UseAgentRunDeps) {
     } finally {
       setStreaming(false);
       abortRef.current = null;
+      setPendingClarification(null);
       void backend.transport.getRunState?.().then((info) => {
         setRunState(info.state);
         setCheckpoint(info.checkpoint);
@@ -495,6 +524,7 @@ export function useAgentRun(deps: UseAgentRunDeps) {
     } finally {
       setStreaming(false);
       abortRef.current = null;
+      setPendingClarification(null);
       const state = await backend.transport.getRunState?.();
       if (state) {
         setRunState(state.state);
@@ -510,6 +540,17 @@ export function useAgentRun(deps: UseAgentRunDeps) {
     setPendingApproval(null);
     void window.electron.agent.respondApproval(request.id, approved);
   }, [pendingApproval]);
+
+  /** 提交澄清回答：点选选项或自定义输入后立即回传，清空卡片 */
+  const respondClarification = useCallback(
+    (answer: string) => {
+      const request = pendingClarification;
+      if (!request) return;
+      setPendingClarification(null);
+      void window.electron.agent.respondClarification(request.id, answer);
+    },
+    [pendingClarification],
+  );
 
   const undoLastRun = useCallback(async () => {
     if (!changes.length) return;
@@ -539,6 +580,9 @@ export function useAgentRun(deps: UseAgentRunDeps) {
     setChanges,
     pendingApproval,
     setPendingApproval,
+    pendingClarification,
+    setPendingClarification,
+    todos,
     runState,
     setRunState,
     checkpoint,
@@ -551,6 +595,7 @@ export function useAgentRun(deps: UseAgentRunDeps) {
     cancelRun,
     resumeRun,
     respondApproval,
+    respondClarification,
     undoLastRun,
   };
 }

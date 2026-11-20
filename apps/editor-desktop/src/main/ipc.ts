@@ -424,6 +424,14 @@ export function registerIpc(): void {
     },
   );
 
+  ipcMain.handle(
+    'agent:respondClarification',
+    (_event, payload: { id: string; answer: string }) => {
+      getAgent().respondClarification(payload.id, payload.answer);
+      return true;
+    },
+  );
+
   ipcMain.handle('agent:undo', () => getAgent().undoLastRun());
 
   ipcMain.handle('agent:getChanges', () => getAgent().getChanges());

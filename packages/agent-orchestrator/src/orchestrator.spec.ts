@@ -1158,6 +1158,189 @@ describe('AgentOrchestrator.run', () => {
     ).toBe('命令输出');
   });
 
+  it('澄清工具 ask_user：挂起调用钩子，答案作为工具结果回填', async () => {
+    const toolDelta = {
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'c1',
+                type: 'function',
+                function: {
+                  name: 'ask_user',
+                  arguments:
+                    '{"question":"用哪种方案？","options":["A","B"],"allowCustom":true}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const { client } = fakeClient([
+      [toolDelta],
+      [{ choices: [{ delta: { content: '按 A 处理' } }] }],
+    ]);
+    const handler = vi.fn(() => '不该执行');
+    const tools: RegisteredTool[] = [
+      {
+        definition: {
+          type: 'function',
+          function: {
+            name: 'ask_user',
+            description: '向用户提问',
+            parameters: {
+              type: 'object',
+              properties: {
+                question: { type: 'string' },
+                options: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['question', 'options'],
+            },
+          },
+        },
+        handler,
+      },
+    ];
+    const clarify = vi.fn(async () => 'A');
+    const orch = new AgentOrchestrator(config({ getClient: () => client }));
+    const events = await collect(orch, {
+      messages: [],
+      tools,
+      candidates: [dashscope('qwen')],
+      requestClarification: clarify,
+    });
+
+    expect(clarify).toHaveBeenCalledTimes(1);
+    expect(clarify.mock.calls[0][0]).toMatchObject({
+      toolName: 'ask_user',
+      question: '用哪种方案？',
+      options: ['A', 'B'],
+      allowCustom: true,
+    });
+    expect(handler).not.toHaveBeenCalled();
+    expect(events.find((e) => e.type === 'tool_result')?.result).toBe(
+      '用户的选择：A',
+    );
+  });
+
+  it('澄清工具未配置钩子：作为普通工具执行（云端模式经 tool_request 转客户端）', async () => {
+    const toolDelta = {
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'c1',
+                type: 'function',
+                function: {
+                  name: 'ask_user',
+                  arguments: '{"question":"选哪个？","options":["A","B"]}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const { client } = fakeClient([
+      [toolDelta],
+      [{ choices: [{ delta: { content: '继续' } }] }],
+    ]);
+    const handler = vi.fn(() => '（用户未响应）');
+    const tools: RegisteredTool[] = [
+      {
+        definition: {
+          type: 'function',
+          function: {
+            name: 'ask_user',
+            description: '向用户提问',
+            parameters: {
+              type: 'object',
+              properties: {
+                question: { type: 'string' },
+                options: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['question', 'options'],
+            },
+          },
+        },
+        handler,
+      },
+    ];
+    const orch = new AgentOrchestrator(config({ getClient: () => client }));
+    const events = await collect(orch, {
+      messages: [],
+      tools,
+      candidates: [dashscope('qwen')],
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(events.find((e) => e.type === 'tool_result')?.result).toBe(
+      '（用户未响应）',
+    );
+  });
+
+  it('todo_write：吐 todo_list 事件供宿主渲染任务清单', async () => {
+    const toolDelta = {
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'c1',
+                type: 'function',
+                function: {
+                  name: 'todo_write',
+                  arguments:
+                    '{"todos":[{"content":"第一步","status":"completed","group":"前端"},{"content":"第二步","status":"in_progress"},{"status":"pending"}]}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const { client } = fakeClient([
+      [toolDelta],
+      [{ choices: [{ delta: { content: 'ok' } }] }],
+    ]);
+    const tools: RegisteredTool[] = [
+      {
+        definition: {
+          type: 'function',
+          function: {
+            name: 'todo_write',
+            description: '任务清单',
+            parameters: {
+              type: 'object',
+              properties: {
+                todos: { type: 'array', items: { type: 'object' } },
+              },
+              required: ['todos'],
+            },
+          },
+        },
+        handler: vi.fn(() => '（已更新）'),
+      },
+    ];
+    const orch = new AgentOrchestrator(config({ getClient: () => client }));
+    const events = await collect(orch, {
+      messages: [],
+      tools,
+      candidates: [dashscope('qwen')],
+    });
+
+    expect(events.find((e) => e.type === 'todo_list')?.todos).toEqual([
+      { content: '第一步', status: 'completed', group: '前端' },
+      { content: '第二步', status: 'in_progress' },
+    ]);
+  });
+
   it('只读工具并行执行', async () => {
     const delta = {
       choices: [

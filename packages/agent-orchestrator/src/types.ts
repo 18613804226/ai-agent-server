@@ -15,7 +15,16 @@ export type AgentEventType =
   | 'error'
   | 'done'
   | 'file_edit'
+  | 'todo_list'
   | 'browser_open';
+
+/** 任务清单项（todo_write 工具产出，宿主可渲染为面板） */
+export interface TodoItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  /** 分组名；未填归「任务」 */
+  group?: string;
+}
 
 /** 一次工具调用的流式分片（由 tool-call-accumulator 归并） */
 export interface ToolCallLike {
@@ -101,6 +110,21 @@ export interface ApprovalContext {
 /** 审批钩子：true 允许执行，false 拒绝（拒绝结果会作为 tool_result 回填） */
 export type ApprovalHook = (context: ApprovalContext) => Promise<boolean>;
 
+/** 澄清上下文：模型信息不足、需要用户决策时触发（ask_user 工具） */
+export interface ClarificationContext {
+  toolName: string;
+  /** 要向用户提出的问题 */
+  question: string;
+  /** 候选选项（2-5 个） */
+  options: string[];
+  /** 是否允许用户自定义输入，默认 true */
+  allowCustom: boolean;
+  signal?: AbortSignal;
+}
+
+/** 澄清钩子：返回用户的选择/输入，作为 tool_result 回填给模型 */
+export type ClarificationHook = (context: ClarificationContext) => Promise<string>;
+
 /** 工具审批策略：allow 直接执行 / ask 询问 / deny 直接拒绝 */
 export type ApprovalPolicy = (
   toolName: string,
@@ -134,6 +158,10 @@ export interface AgentDefinition {
   approvalPolicy?: ApprovalPolicy;
   /** 审批钩子；policy 为 ask 但未配置时按拒绝处理 */
   requestApproval?: ApprovalHook;
+  /** 澄清钩子；命中 clarificationToolNames 的工具在执行前调用，答案作为工具结果 */
+  requestClarification?: ClarificationHook;
+  /** 触发澄清的工具名，默认 ['ask_user'] */
+  clarificationToolNames?: string[];
 }
 
 /** 一次文件改动（编辑器工具产出，宿主可据此展示 diff） */
@@ -242,6 +270,8 @@ export interface AgentEvent {
   url?: string;
   /** file_edit 事件携带的编辑意图（流式动画用） */
   edit?: FileEdit;
+  /** todo_list 事件携带的任务清单 */
+  todos?: TodoItem[];
 }
 
 /**
@@ -278,6 +308,10 @@ export interface AgentInput {
   approvalPolicy?: ApprovalPolicy;
   /** 审批钩子（覆盖 agent 定义） */
   requestApproval?: ApprovalHook;
+  /** 澄清钩子（覆盖 agent 定义） */
+  requestClarification?: ClarificationHook;
+  /** 触发澄清的工具名（覆盖 agent 定义），默认 ['ask_user'] */
+  clarificationToolNames?: string[];
   /** 候选链覆盖；不传则用 complexity 推导 */
   candidates?: import('./model-cascade.js').ModelCandidate[];
   /** 复杂度；candidates 缺省时用于推导候选链 */

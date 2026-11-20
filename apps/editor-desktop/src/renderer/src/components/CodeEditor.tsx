@@ -295,9 +295,9 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
       try {
         const diffs = diffLines(before, after);
         const changeCount = diffs.filter((d) => d.type !== 'same').length;
-        // 大 diff 加快节奏，避免动画拖太久
-        const stepDelay = changeCount > 60 ? 25 : changeCount > 30 ? 45 : 80;
-        const delHoldMs = Math.min(200, stepDelay * 2);
+        // 大 diff 进一步加快节奏，保证修改近乎实时呈现
+        const stepDelay = changeCount > 60 ? 12 : changeCount > 30 ? 20 : 35;
+        const delHoldMs = Math.min(100, stepDelay * 2);
 
         let lineNo = 1;
 
@@ -405,8 +405,8 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
           model.setValue(after);
         }
 
-        // 高亮持续 600ms 后清除
-        await new Promise((r) => setTimeout(r, 600));
+        // 高亮短暂保留后清除，避免动画拖尾
+        await new Promise((r) => setTimeout(r, 200));
         editor.deltaDecorations(addedDecorations, []);
         console.log('[CodeEditor] streaming edit done');
       } catch (e) {

@@ -885,6 +885,77 @@ export function createEditorTools(
         return content ?? `未找到 artifact：${id}`;
       },
     ),
+    // 澄清工具：模型信息不足/需要用户决策时调用，由宿主挂起等待用户选择或输入。
+    // 不标 readOnly：需要串行执行，保证提问发生在后续写操作之前。
+    tool(
+      {
+        type: 'function',
+        function: {
+          name: 'ask_user',
+          description:
+            '当任务信息不足、存在多种合理方案或需要用户偏好时，向用户提问并等待回答。给出 2-5 个具体选项，用户也可以自定义输入。仅在关键决策点使用，不要事事提问。',
+          parameters: {
+            type: 'object',
+            properties: {
+              question: { type: 'string', description: '要向用户提出的问题' },
+              options: {
+                type: 'array',
+                items: { type: 'string' },
+                description: '2-5 个候选答案，要具体、互斥',
+              },
+              allowCustom: {
+                type: 'boolean',
+                description: '是否允许用户输入自定义答案，默认 true',
+              },
+            },
+            required: ['question', 'options'],
+          },
+        },
+      },
+      async () => '（用户未响应）',
+    ),
+    // 任务清单：模型规划/跟踪任务进度，宿主渲染为面板（分组 + 状态）。
+    // 不标 readOnly：串行执行，保证清单更新按调用顺序生效。
+    tool(
+      {
+        type: 'function',
+        function: {
+          name: 'todo_write',
+          description:
+            '维护任务清单：任务开始前列出计划，执行中更新状态（pending / in_progress / completed），完成后核对。可用 group 给条目分组。每次调用传入完整清单（整体覆盖）。',
+          parameters: {
+            type: 'object',
+            properties: {
+              todos: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    content: { type: 'string', description: '任务内容' },
+                    status: {
+                      type: 'string',
+                      enum: ['pending', 'in_progress', 'completed'],
+                      description: '状态：待办 / 进行中 / 已完成',
+                    },
+                    group: {
+                      type: 'string',
+                      description: '分组名（可选），如「前端」「修复」',
+                    },
+                  },
+                  required: ['content', 'status'],
+                },
+                description: '完整任务清单（整体覆盖，不是增量）',
+              },
+            },
+            required: ['todos'],
+          },
+        },
+      },
+      async (args) => {
+        const count = Array.isArray(args.todos) ? args.todos.length : 0;
+        return `（任务清单已更新，共 ${count} 项）`;
+      },
+    ),
   ];
 
   // 只读工具可以并行执行；写操作串行 + 审批

@@ -106,6 +106,7 @@ declare global {
         ): Promise<string>;
         abort(): Promise<void>;
         respondApproval(id: string, approved: boolean): Promise<boolean>;
+        respondClarification(id: string, answer: string): Promise<boolean>;
         undoAgent(): Promise<{ restored: string[]; failed: string[] }>;
         getChanges(): Promise<
           Array<{

@@ -202,18 +202,27 @@ export function useEditorTabs({
 
   /** 保存所有未保存（dirty）的文件 */
   const saveAllDirty = useCallback(async () => {
+    if (!backend.workspace.writeFile) return;
     for (const tab of editorTabs) {
       if (tab.content === tab.savedContent) continue;
-      if (!backend.workspace.writeFile) continue;
       try {
         await backend.workspace.writeFile(tab.path, tab.content);
-        setSavedContent(tab.content);
+        // 直接更新被保存标签的 savedContent：setSavedContent 只作用于
+        // activeFile，用它会导致非活动标签的未保存圆点不消失。
+        setEditorTabs((tabs) =>
+          tabs.map((item) =>
+            item.path === tab.path
+              ? { ...item, savedContent: item.content }
+              : item,
+          ),
+        );
+        if (tab.path === activeFile) setSavedContentState(tab.content);
         setError('');
       } catch (e: any) {
         setError(e?.message || String(e));
       }
     }
-  }, [editorTabs, backend, setSavedContent, setError]);
+  }, [editorTabs, backend, activeFile, setError]);
 
   return {
     editorTabs,

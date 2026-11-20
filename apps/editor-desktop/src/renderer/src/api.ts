@@ -3,7 +3,7 @@
  * 后端已开 CORS（origin: '*'），渲染进程直接 fetch 即可。
  */
 import { CLOUD_BACKEND_URL } from './cloud';
-import type { RunStateInfo } from './mode/types';
+import type { RunStateInfo, TodoItem } from './mode/types';
 
 const backendUrl = CLOUD_BACKEND_URL.replace(/\/+$/, '');
 
@@ -18,6 +18,8 @@ export interface ServerEvent {
   id?: string;
   name?: string;
   args?: Record<string, unknown>;
+  /** todo_list 事件携带的任务清单 */
+  todos?: TodoItem[];
 }
 
 export interface WorkspaceNode {

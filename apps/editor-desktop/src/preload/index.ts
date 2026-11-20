@@ -137,6 +137,8 @@ const api = {
       approved: boolean,
     ): Promise<boolean> =>
       ipcRenderer.invoke('agent:respondApproval', { id, approved }),
+    respondClarification: (id: string, answer: string): Promise<boolean> =>
+      ipcRenderer.invoke('agent:respondClarification', { id, answer }),
     undoAgent: (): Promise<{ restored: string[]; failed: string[] }> =>
       ipcRenderer.invoke('agent:undo'),
     getChanges: (): Promise<AgentFileChange[]> =>

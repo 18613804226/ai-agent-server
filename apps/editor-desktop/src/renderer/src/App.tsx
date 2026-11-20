@@ -109,6 +109,8 @@ export function App() {
   const [browserTabActive, setBrowserTabActive] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  /** 澄清卡片（ask_user）的自定义输入内容 */
+  const [clarificationInput, setClarificationInput] = useState('');
   const [streamingEditPath, setStreamingEditPath] = useState<string | null>(
     null,
   );
@@ -200,6 +202,8 @@ export function App() {
     changes,
     setChanges,
     pendingApproval,
+    pendingClarification,
+    todos,
     runState,
     setRunState,
     checkpoint,
@@ -211,6 +215,7 @@ export function App() {
     cancelRun,
     resumeRun,
     respondApproval,
+    respondClarification,
     undoLastRun,
   } = useAgentRun({
     backend,
@@ -435,6 +440,8 @@ export function App() {
       setFileContent(content);
       setSavedContent(content);
     }
+    // 写盘后刷新目录树：新建文件立即出现在侧边栏
+    await reload();
   };
 
   /** 回滚一条消息的改动：新建文件删除、修改/删除写回 before、重命名还原；
@@ -681,6 +688,7 @@ export function App() {
           streaming={streaming}
           elapsedMs={elapsedMs}
           changes={changes}
+          todos={todos}
           activeDiff={activeDiff}
           runState={runState}
           checkpoint={checkpoint}
@@ -722,7 +730,11 @@ export function App() {
           onOpenBrowser={openBrowser}
           onApplyDiff={(path, content) => void applyDiff(path, content)}
           onRevertChanges={(list) => void revertChanges(list)}
-          onSaveChanges={() => void saveAllDirty()}
+          onSaveChanges={async () => {
+            await saveAllDirty();
+            // 保存写盘后刷新目录树，新建文件立即出现在侧边栏
+            await reload();
+          }}
         />
       </div>
 
@@ -852,6 +864,56 @@ export function App() {
                 拒绝
               </button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {pendingClarification ? (
+        <div className="modal-overlay">
+          <div className="approval-modal clarification-modal">
+            <div className="modal-title">AI 向你提问</div>
+            <div className="clarification-question">
+              {pendingClarification.question}
+            </div>
+            {pendingClarification.options.length ? (
+              <div className="clarification-options">
+                {pendingClarification.options.map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    className="clarification-option"
+                    onClick={() => respondClarification(option)}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {pendingClarification.allowCustom ? (
+              <form
+                className="clarification-custom"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const value = clarificationInput.trim();
+                  if (!value) return;
+                  respondClarification(value);
+                  setClarificationInput('');
+                }}
+              >
+                <input
+                  className="dialog-input"
+                  value={clarificationInput}
+                  onChange={(e) => setClarificationInput(e.target.value)}
+                  placeholder="自定义回答…"
+                  autoFocus
+                />
+                <div className="approval-actions">
+                  <button type="submit" disabled={!clarificationInput.trim()}>
+                    提交
+                  </button>
+                </div>
+              </form>
+            ) : null}
           </div>
         </div>
       ) : null}

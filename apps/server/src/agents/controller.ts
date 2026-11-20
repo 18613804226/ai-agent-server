@@ -218,6 +218,11 @@ export class AgentController {
                   data: { type: 'file_edit', edit: ev.edit },
                 } as MessageEvent);
                 break;
+              case 'todo_list':
+                subscriber.next({
+                  data: { type: 'todo_list', todos: ev.todos },
+                } as MessageEvent);
+                break;
               case 'error':
                 subscriber.next({
                   data: { type: 'error', content: ev.content ?? '' },

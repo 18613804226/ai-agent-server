@@ -31,11 +31,16 @@ import type {
   AgentInput,
   ApprovalHook,
   ApprovalPolicy,
+  ClarificationHook,
   ContentGate,
   ContextStats,
   FileEdit,
   RegisteredTool,
+  TodoItem,
 } from './types.js';
+
+/** 默认触发澄清（向用户提问）的工具名 */
+const DEFAULT_CLARIFICATION_TOOL_NAMES = ['ask_user'];
 
 /**
  * 流式内容清洗：剥掉模型偶尔吐出的 XML 风格「伪工具」标签
@@ -372,12 +377,38 @@ export class AgentOrchestrator {
       signal?: AbortSignal;
       approvalPolicy?: ApprovalPolicy;
       requestApproval?: ApprovalHook;
+      requestClarification?: ClarificationHook;
+      clarificationToolNames?: string[];
       tools: RegisteredTool[];
       artifacts?: ArtifactStore;
       resultCache: Map<string, string>;
       preApproved?: boolean;
     },
   ): Promise<string> {
+    // 澄清工具（ask_user）：配置了钩子就挂起等用户选择/输入；
+    // 未配置（云端模式）则作为普通工具执行，经 tool_request 转到客户端处理。
+    const clarificationNames =
+      context.clarificationToolNames ?? DEFAULT_CLARIFICATION_TOOL_NAMES;
+    if (
+      clarificationNames.includes(call.function.name) &&
+      context.requestClarification &&
+      !context.signal?.aborted
+    ) {
+      const question = String(args.question ?? '');
+      const options = Array.isArray(args.options)
+        ? args.options.map((o) => String(o))
+        : [];
+      const allowCustom = args.allowCustom !== false;
+      const answer = await context.requestClarification({
+        toolName: call.function.name,
+        question,
+        options,
+        allowCustom,
+        signal: context.signal,
+      });
+      return `用户的选择：${answer}`;
+    }
+
     const tool = context.tools.find(
       (t) => t.definition.function.name === call.function.name,
     );
@@ -436,6 +467,8 @@ export class AgentOrchestrator {
       editToolNames,
       approvalPolicy,
       requestApproval,
+      requestClarification,
+      clarificationToolNames,
       sampling,
     } = input;
 
@@ -825,12 +858,18 @@ export class AgentOrchestrator {
         }
 
         if ((policy !== 'deny') && edit) yield { type: 'file_edit', edit };
+        // todo_write：解析后立即吐清单事件，UI 实时刷新任务面板
+        if (call.function.name === 'todo_write') {
+          yield { type: 'todo_list', todos: parseTodoList(args) };
+        }
         results.set(
           call.id,
           await this.executeToolCall(call, args, {
             signal,
             approvalPolicy,
             requestApproval,
+            requestClarification,
+            clarificationToolNames,
             tools,
             artifacts,
             resultCache,
@@ -850,6 +889,8 @@ export class AgentOrchestrator {
               signal,
               approvalPolicy,
               requestApproval,
+              requestClarification,
+              clarificationToolNames,
               tools,
               artifacts,
               resultCache,
@@ -972,6 +1013,26 @@ function splitTokensByChars(
   const sum = thoughtChars + answerChars;
   if (!sum) return 0;
   return Math.round((total * thoughtChars) / sum);
+}
+
+/**
+ * 把 todo_write 工具的入参解析成规范清单：过滤空项、归一化状态。
+ * 编排器不持久化清单，只透传给宿主渲染。
+ */
+function parseTodoList(args: Record<string, unknown>): TodoItem[] {
+  const list = Array.isArray(args.todos) ? (args.todos as any[]) : [];
+  const items: TodoItem[] = [];
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const content = String(item.content ?? '').trim();
+    if (!content) continue;
+    const raw = String(item.status ?? 'pending');
+    const status =
+      raw === 'in_progress' || raw === 'completed' ? raw : 'pending';
+    const group = String(item.group ?? '').trim() || undefined;
+    items.push({ content, status, ...(group ? { group } : {}) });
+  }
+  return items;
 }
 
 /**

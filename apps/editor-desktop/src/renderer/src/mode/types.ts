@@ -115,6 +115,12 @@ export interface ChatEvent {
   id?: string;
   toolName?: string;
   preview?: ApprovalPreview[];
+  /** clarification_request 事件（ask_user）：问题、候选选项、是否允许自定义输入 */
+  question?: string;
+  options?: string[];
+  allowCustom?: boolean;
+  /** todo_list 事件携带的任务清单 */
+  todos?: TodoItem[];
   /** tool_call / tool_result 的本轮序号，UI 据此匹配 */
   index?: number;
 }
@@ -129,6 +135,13 @@ export interface FileEdit {
   to?: string;
   old_string?: string;
   new_string?: string;
+}
+
+/** 任务清单项（todo_write 工具产出，渲染为面板） */
+export interface TodoItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  group?: string;
 }
 
 export interface WorkspaceProvider {

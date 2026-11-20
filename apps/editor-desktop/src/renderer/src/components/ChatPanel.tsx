@@ -7,12 +7,14 @@ import {
 } from 'react';
 import { ChatMessage, formatElapsed, type ChatMsg } from './ChatMessage';
 import { Composer } from './Composer';
+import { TodoPanel } from './TodoPanel';
 import { changeLabel, diffLines } from '../diff';
 import type { RunCheckpointInfo } from '../electron';
 import type {
   AgentMode,
   AppConfig,
   FileChange,
+  TodoItem,
 } from '../mode/types';
 import type { ChatSession } from './ChatMessage';
 
@@ -32,6 +34,7 @@ export function ChatPanel({
   streaming,
   elapsedMs,
   changes,
+  todos,
   activeDiff,
   runState,
   checkpoint,
@@ -76,6 +79,7 @@ export function ChatPanel({
   streaming: boolean;
   elapsedMs: number;
   changes: FileChange[];
+  todos: TodoItem[];
   activeDiff: FileChange | null;
   runState: string;
   checkpoint: RunCheckpointInfo | null;
@@ -178,6 +182,7 @@ export function ChatPanel({
         </button>
       </div>
       <div className="chat-body" ref={chatRef} onScroll={onScroll}>
+        {todos.length ? <TodoPanel todos={todos} /> : null}
         {messages.length === 0 && (
           <div className="muted chat-hint">
             试试：帮我看下工作区里有哪些文件 / 读一下 xxx 文件

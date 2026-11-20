@@ -9,6 +9,7 @@ import {
     type AgentPromptContext,
     type ApprovalHook,
     type ApprovalPolicy,
+    type ClarificationHook,
     type FileChange,
     type FileEdit,
   } from '@repo/agent-orchestrator';
@@ -51,6 +52,8 @@ export class LocalAgent {
   private deferWrite = false;
   /** 等待渲染层响应的审批请求 */
   private readonly pendingApprovals = new Map<string, (approved: boolean) => void>();
+  /** 等待渲染层响应的澄清请求（ask_user） */
+  private readonly pendingClarifications = new Map<string, (answer: string) => void>();
   /** 审批事件出口；未设置时自动放行（避免无 UI 场景挂起） */
   private eventSink: ((ev: unknown) => void) | null = null;
   /** 断点续跑状态机 */
@@ -117,6 +120,44 @@ export class LocalAgent {
   respondApproval(id: string, approved: boolean): void {
     this.pendingApprovals.get(id)?.(approved);
     this.pendingApprovals.delete(id);
+  }
+
+  /** 渲染层响应澄清（用户点选选项或自定义输入） */
+  respondClarification(id: string, answer: string): void {
+    this.pendingClarifications.get(id)?.(answer);
+    this.pendingClarifications.delete(id);
+  }
+
+  /**
+   * 向用户提问并等待回答：发澄清事件给渲染层，用户响应后返回答案。
+   * 超时（60s）返回空串，由调用方兜底，避免任务卡死。
+   */
+  private async requestClarification(context: {
+    question: string;
+    options: string[];
+    allowCustom: boolean;
+  }): Promise<string> {
+    if (!this.eventSink) return '';
+    const id = randomUUID();
+    const answer = await new Promise<string>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (value: string) => {
+        if (timer) clearTimeout(timer);
+        this.pendingClarifications.delete(id);
+        resolve(value);
+      };
+      timer = setTimeout(() => settle(''), 60_000); // 用户不响应则超时，模型自行继续
+      timer.unref?.();
+      this.pendingClarifications.set(id, settle);
+      this.eventSink!({
+        type: 'clarification_request',
+        id,
+        question: context.question,
+        options: context.options,
+        allowCustom: context.allowCustom,
+      });
+    });
+    return answer;
   }
 
   /** 撤销最近一轮的文件改动 */
@@ -233,6 +274,18 @@ export class LocalAgent {
     name: string,
     args: Record<string, unknown>,
   ): Promise<string> {
+    // 澄清工具：走 UI 提问（云端模式下后端不配澄清钩子，ask_user 会经
+    // tool_request 转到这里），等用户点选/输入后把答案作为工具结果回传
+    if (name === 'ask_user') {
+      const answer = await this.requestClarification({
+        question: String(args.question ?? ''),
+        options: Array.isArray(args.options)
+          ? args.options.map((o) => String(o))
+          : [],
+        allowCustom: args.allowCustom !== false,
+      });
+      return `用户的选择：${answer}`;
+    }
     const agent = this.ensureAgent();
     const tool = agent.tools.find(
       (t) => t.definition.function.name === name,
@@ -275,10 +328,13 @@ export class LocalAgent {
       this.needsApproval(name, args) ? 'ask' : 'allow';
     const requestApproval: ApprovalHook = (context) =>
       this.requestApproval(context);
+    const requestClarification: ClarificationHook = (context) =>
+      this.requestClarification(context);
     this.agent = {
       ...base,
       approvalPolicy,
       requestApproval,
+      requestClarification,
     };
   }
 
