@@ -103,8 +103,10 @@ export function App() {
   const [terminalOpen, setTerminalOpen] = useState(false);
   /** 内置浏览器预览地址；null 表示未打开 */
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
-  /** 数据库面板是否打开 */
+  /** 数据库面板是否打开（tab 是否存在） */
   const [databaseOpen, setDatabaseOpen] = useState(false);
+  /** 数据库标签是否激活（切走到文件后 tab 保留，可再切回） */
+  const [databaseTabActive, setDatabaseTabActive] = useState(false);
   /** 浏览器标签是否处于激活（可与文件标签切换） */
   const [browserTabActive, setBrowserTabActive] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
@@ -246,6 +248,7 @@ export function App() {
     nodes,
     reload,
     openFolder,
+    openDemoFolder,
     removeRoot,
     clearWorkspace,
   } = useWorkspace({
@@ -549,7 +552,11 @@ export function App() {
         </button>
         <button
           className="ghost"
-          onClick={() => setDatabaseOpen((v) => !v)}
+          onClick={() => {
+            const next = !databaseOpen;
+            setDatabaseOpen(next);
+            setDatabaseTabActive(next);
+          }}
         >
           数据库
         </button>
@@ -650,9 +657,11 @@ export function App() {
           editorRef={editorRef}
           onSelectTab={(path) => {
             setBrowserTabActive(false);
+            setDatabaseTabActive(false);
             void selectEditorTab(path);
           }}
           onRequestCloseTabs={requestCloseEditorTabs}
+          onOpenDemoWorkspace={() => void openDemoFolder()}
           onTabContextMenu={(menu) => setTabContextMenu(menu)}
           onCloseDiff={() => setActiveDiff(null)}
           onEditorChange={setFileContent}
@@ -663,10 +672,21 @@ export function App() {
           browserUrl={browserUrl}
           onCloseBrowser={closeBrowser}
           browserTabActive={browserTabActive}
-          onSelectBrowserTab={() => setBrowserTabActive(true)}
+          onSelectBrowserTab={() => {
+            setBrowserTabActive(true);
+            setDatabaseTabActive(false);
+          }}
           onOpenBrowser={openBrowser}
           databaseOpen={databaseOpen}
-          onCloseDatabase={() => setDatabaseOpen(false)}
+          databaseTabActive={databaseTabActive}
+          onSelectDatabaseTab={() => {
+            setDatabaseTabActive(true);
+            setBrowserTabActive(false);
+          }}
+          onCloseDatabase={() => {
+            setDatabaseOpen(false);
+            setDatabaseTabActive(false);
+          }}
         />
 
         <div

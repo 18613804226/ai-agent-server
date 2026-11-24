@@ -1074,6 +1074,82 @@ body {
   color: #e68a5c;
 }
 
+.editor-file-icon-go {
+  color: #00add8;
+}
+
+.editor-file-icon-java {
+  color: #b07219;
+  font-size: 7px;
+}
+
+.editor-file-icon-python {
+  color: #3572a5;
+}
+
+.editor-file-icon-c {
+  color: #a8b9cc;
+}
+
+.editor-file-icon-cpp {
+  color: #f34b7d;
+  font-size: 7px;
+}
+
+.editor-file-icon-csharp {
+  color: #68217a;
+}
+
+.editor-file-icon-php {
+  color: #777bb4;
+  font-size: 7px;
+}
+
+.editor-file-icon-ruby {
+  color: #cc342d;
+}
+
+.editor-file-icon-rust {
+  color: #dea584;
+}
+
+.editor-file-icon-swift {
+  color: #f05138;
+  font-size: 7px;
+}
+
+.editor-file-icon-kotlin {
+  color: #7f52ff;
+}
+
+.editor-file-icon-shell {
+  color: #89e051;
+}
+
+.editor-file-icon-sql {
+  color: #e38c00;
+  font-size: 7px;
+}
+
+.editor-file-icon-vue {
+  color: #41b883;
+  font-size: 7px;
+}
+
+.editor-file-icon-yaml {
+  color: #cb171e;
+  font-size: 7px;
+}
+
+.editor-file-icon-xml {
+  color: #e68a5c;
+}
+
+.editor-file-icon-toml {
+  color: #9c4221;
+  font-size: 7px;
+}
+
 .editor-tab-label {
   min-width: 0;
   overflow: hidden;
@@ -3075,6 +3151,16 @@ body {
 
 .welcome > * {
   max-width: 860px;
+}
+
+.welcome-demo {
+  margin-top: 20px;
+}
+
+.welcome-demo-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-muted, #808080);
 }
 
 .welcome h1 {

@@ -89,6 +89,16 @@ export function useWorkspace({
     }
   };
 
+  const openDemoFolder = async () => {
+    if (!backend.workspace.openDemo) return;
+    try {
+      await backend.workspace.openDemo();
+      await reload();
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    }
+  };
+
   const removeRoot = async (name: string) => {
     const root = roots.find((r) => r.name === name);
     if (!root || !backend.workspace.removeRoot) return;
@@ -126,6 +136,7 @@ export function useWorkspace({
     nodes,
     reload,
     openFolder,
+    openDemoFolder,
     removeRoot,
     clearWorkspace,
   };

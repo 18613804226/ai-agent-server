@@ -159,6 +159,8 @@ export interface WorkspaceProvider {
   clear?(): Promise<void>;
   /** 添加文件夹（多选） */
   open?(): Promise<void>;
+  /** 打开内置演示文件夹 */
+  openDemo?(): Promise<void>;
   /** 移除某个文件夹 */
   removeRoot?(path: string): Promise<void>;
 }

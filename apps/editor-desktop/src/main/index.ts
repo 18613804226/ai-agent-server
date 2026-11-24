@@ -2,6 +2,7 @@ import { app, BrowserWindow, Menu, nativeTheme, shell } from 'electron';
 import { existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { registerIpc, titleBarOverlayFor } from './ipc.js';
+import { ensureDemoWorkspace } from './demo-workspace.js';
 import { loadEnv } from './env.js';
 
 // 必须在 registerIpc / getConfig 之前加载，provider 的 key 从 env 读取
@@ -87,6 +88,7 @@ function createWindow(): void {
 app.whenReady().then(() => {
   // 去掉 Electron 默认的英文菜单栏：它由系统绘制，配色不跟随应用主题
   Menu.setApplicationMenu(null);
+  ensureDemoWorkspace();
   registerIpc();
   createWindow();
   // 内置浏览器（<webview>）调试：开发模式自动打开 DevTools，并打印加载失败

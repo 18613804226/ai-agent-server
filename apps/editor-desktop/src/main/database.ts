@@ -476,6 +476,24 @@ export class DatabaseManager {
   private driverConnId: string | null = null;
   private connecting: Promise<Driver> | null = null;
   private connectingConnId: string | null = null;
+  /** 写操作完成后的监听器（用于通知渲染层刷新） */
+  private readonly changeListeners = new Set<() => void>();
+
+  /** 订阅写操作完成事件，返回取消订阅函数 */
+  onChange(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => this.changeListeners.delete(listener);
+  }
+
+  private notifyChanged(): void {
+    for (const listener of this.changeListeners) {
+      try {
+        listener();
+      } catch {
+        /* 单个监听器失败不影响其他订阅者 */
+      }
+    }
+  }
 
   activeConnection(): DatabaseConnection | null {
     const cfg = loadDatabaseConfig();
@@ -537,8 +555,12 @@ export class DatabaseManager {
     return {
       isConfigured: () => Boolean(this.activeConnection()),
       query: (sql) => this.queryReadOnly(sql),
-      execute: (sql, params) =>
-        this.ensureDriver().then((d) => d.execute(sql, params)),
+      execute: async (sql, params) => {
+        const driver = await this.ensureDriver();
+        const result = await driver.execute(sql, params);
+        this.notifyChanged();
+        return result;
+      },
       schema: () => this.ensureDriver().then((d) => d.schema()),
     };
   }
@@ -598,7 +620,9 @@ export class DatabaseManager {
 
   async execute(sql: string): Promise<{ rowsAffected?: number }> {
     const driver = await this.ensureDriver();
-    return driver.execute(sql);
+    const result = await driver.execute(sql);
+    this.notifyChanged();
+    return result;
   }
 
   /** 清空并重建演示数据（仅默认演示连接 + 默认路径 + SQLite） */

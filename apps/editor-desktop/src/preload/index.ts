@@ -63,6 +63,8 @@ const api = {
       ipcRenderer.invoke('workspace:roots'),
     open: (): Promise<Array<{ name: string; path: string }>> =>
       ipcRenderer.invoke('workspace:open'),
+    openDemo: (): Promise<Array<{ name: string; path: string }>> =>
+      ipcRenderer.invoke('workspace:openDemo'),
     remove: (
       path: string,
     ): Promise<Array<{ name: string; path: string }>> =>
@@ -188,6 +190,11 @@ const api = {
       ipcRenderer.invoke('database:tableRows', name, limit),
     resetDemo: (): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('database:resetDemo'),
+    onChanged: (callback: () => void): (() => void) => {
+      const listener = () => callback();
+      ipcRenderer.on('database:changed', listener);
+      return () => ipcRenderer.removeListener('database:changed', listener);
+    },
   },
   browser: {
     create: (url: string): Promise<number> =>

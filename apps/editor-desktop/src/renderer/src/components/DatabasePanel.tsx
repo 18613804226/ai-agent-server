@@ -71,6 +71,16 @@ export function DatabasePanel() {
     }
   }, []);
 
+  // AI 的 execute_sql / 面板写操作完成后，主进程广播 changed，实时刷新
+  useEffect(() => {
+    return window.electron.database.onChanged(() => {
+      void loadSchema();
+      // 当前是只读查询则同步刷新结果；写操作仅刷新表结构，不重复执行
+      const text = sql.trim();
+      if (text && isReadOnlySql(text)) void run(text);
+    });
+  }, [loadSchema, run, sql]);
+
   const openTable = useCallback(
     async (name: string) => {
       // 显示用 SQL；实际取数走服务端按驱动方言引用标识符，避免注入

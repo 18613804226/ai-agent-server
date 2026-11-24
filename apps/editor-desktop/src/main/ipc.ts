@@ -14,6 +14,7 @@ import {
   writeWorkspaceFile,
 } from '@repo/editor-agent';
 import { LocalAgent } from './agent/local-agent.js';
+import { ensureDemoWorkspace } from './demo-workspace.js';
 import { browserManager } from './browser.js';
 import { getDatabaseManager } from './database.js';
 import type { DatabaseConnectionInput } from '../shared/database.js';
@@ -146,6 +147,15 @@ export function registerIpc(): void {
 
   ipcMain.handle('workspace:remove', (_event, path: string) => {
     getAgent().removeWorkspace(path);
+    persistRoots();
+    terminalCwd = null;
+    return rootInfo();
+  });
+
+  // 打开内置演示文件夹（userData/demo-workspace），不弹系统对话框
+  ipcMain.handle('workspace:openDemo', () => {
+    const dir = ensureDemoWorkspace();
+    getAgent().addWorkspace(dir);
     persistRoots();
     terminalCwd = null;
     return rootInfo();
@@ -483,6 +493,12 @@ export function registerIpc(): void {
   );
 
   // 数据库连接与查询（密码不出主进程）
+  // 写操作完成后广播，让渲染层（含 AI 工具执行的 execute_sql）实时刷新
+  getDatabaseManager().onChange(() => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('database:changed');
+    }
+  });
   ipcMain.handle('database:list', () => getDatabaseManager().listConfig());
   ipcMain.handle('database:save', (_event, conn: DatabaseConnectionInput) =>
     getDatabaseManager().saveConnection(conn),

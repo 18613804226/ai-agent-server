@@ -112,6 +112,10 @@ export class LocalWorkspace implements WorkspaceProvider {
     await window.electron.workspace.open();
   }
 
+  async openDemo(): Promise<void> {
+    await window.electron.workspace.openDemo();
+  }
+
   async removeRoot(path: string): Promise<void> {
     await window.electron.workspace.remove(path);
   }

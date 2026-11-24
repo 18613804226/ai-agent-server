@@ -54,6 +54,7 @@ declare global {
       workspace: {
         roots(): Promise<Array<{ name: string; path: string }>>;
         open(): Promise<Array<{ name: string; path: string }>>;
+        openDemo(): Promise<Array<{ name: string; path: string }>>;
         remove(
           path: string,
         ): Promise<Array<{ name: string; path: string }>>;
@@ -144,6 +145,7 @@ declare global {
           limit?: number,
         ): Promise<{ rows: unknown[] }>;
         resetDemo(): Promise<{ ok: boolean }>;
+        onChanged(cb: () => void): () => void;
       };
       browser: {
         create(url: string): Promise<number>;

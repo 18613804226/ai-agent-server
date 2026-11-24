@@ -18,37 +18,90 @@ function fileName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
 
+/** 扩展名 → 图标类型 */
+const ICON_KINDS: Record<string, string> = {
+  tsx: 'react',
+  jsx: 'react',
+  ts: 'typescript',
+  mts: 'typescript',
+  cts: 'typescript',
+  js: 'javascript',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  json: 'json',
+  jsonc: 'json',
+  css: 'style',
+  scss: 'style',
+  less: 'style',
+  md: 'markdown',
+  mdx: 'markdown',
+  html: 'html',
+  htm: 'html',
+  go: 'go',
+  java: 'java',
+  py: 'python',
+  c: 'c',
+  cpp: 'cpp',
+  cc: 'cpp',
+  cxx: 'cpp',
+  h: 'cpp',
+  hpp: 'cpp',
+  hh: 'cpp',
+  cs: 'csharp',
+  php: 'php',
+  rb: 'ruby',
+  rs: 'rust',
+  swift: 'swift',
+  kt: 'kotlin',
+  kts: 'kotlin',
+  sh: 'shell',
+  bash: 'shell',
+  zsh: 'shell',
+  bat: 'shell',
+  cmd: 'shell',
+  sql: 'sql',
+  vue: 'vue',
+  yaml: 'yaml',
+  yml: 'yaml',
+  xml: 'xml',
+  toml: 'toml',
+};
+
+/** 图标类型 → 显示文本 */
+const ICON_LABELS: Record<string, string> = {
+  react: '<>',
+  typescript: 'TS',
+  javascript: 'JS',
+  json: '{}',
+  style: '#',
+  markdown: 'M',
+  html: '5',
+  go: 'GO',
+  java: 'JAVA',
+  python: 'PY',
+  c: 'C',
+  cpp: 'C++',
+  csharp: 'C#',
+  php: 'PHP',
+  ruby: 'RB',
+  rust: 'RS',
+  swift: 'Swift',
+  kotlin: 'KT',
+  shell: 'SH',
+  sql: 'SQL',
+  vue: 'Vue',
+  yaml: 'YML',
+  xml: 'XML',
+  toml: 'TOML',
+};
+
 function fileIconKind(path: string): string {
-  const extension = fileName(path).split('.').pop()?.toLowerCase();
-  if (['tsx', 'jsx'].includes(extension ?? '')) return 'react';
-  if (['ts', 'mts', 'cts'].includes(extension ?? '')) return 'typescript';
-  if (['js', 'mjs', 'cjs'].includes(extension ?? '')) return 'javascript';
-  if (['json', 'jsonc'].includes(extension ?? '')) return 'json';
-  if (['css', 'scss', 'less'].includes(extension ?? '')) return 'style';
-  if (['md', 'mdx'].includes(extension ?? '')) return 'markdown';
-  if (['html', 'htm'].includes(extension ?? '')) return 'html';
-  return 'default';
+  const extension = fileName(path).split('.').pop()?.toLowerCase() ?? '';
+  return ICON_KINDS[extension] ?? 'default';
 }
 
 function fileIconLabel(path: string): string {
-  switch (fileIconKind(path)) {
-    case 'react':
-      return '<>';
-    case 'typescript':
-      return 'TS';
-    case 'javascript':
-      return 'JS';
-    case 'json':
-      return '{}';
-    case 'style':
-      return '#';
-    case 'markdown':
-      return 'M';
-    case 'html':
-      return '5';
-    default:
-      return '·';
-  }
+  return ICON_LABELS[fileIconKind(path)] ?? '·';
 }
 
 /** 中间编辑区：标签栏 + 编辑器/对比/欢迎页 + 终端 */
@@ -63,6 +116,7 @@ export function EditorPane({
   editorRef,
   onSelectTab,
   onRequestCloseTabs,
+  onOpenDemoWorkspace,
   onTabContextMenu,
   onCloseDiff,
   onApplyDiff,
@@ -76,6 +130,8 @@ export function EditorPane({
   onSelectBrowserTab,
   onOpenBrowser,
   databaseOpen,
+  databaseTabActive,
+  onSelectDatabaseTab,
   onCloseDatabase,
 }: {
   editorTabs: EditorTab[];
@@ -88,6 +144,7 @@ export function EditorPane({
   editorRef: RefObject<CodeEditorHandle | null>;
   onSelectTab: (path: string) => void;
   onRequestCloseTabs: (paths: string[]) => void;
+  onOpenDemoWorkspace: () => void;
   onTabContextMenu: (menu: { x: number; y: number; path: string } | null) => void;
   onCloseDiff: () => void;
   onRevertDiff?: (change: FileChange) => void;
@@ -101,6 +158,8 @@ export function EditorPane({
   onSelectBrowserTab: () => void;
   onOpenBrowser: (url: string) => void;
   databaseOpen: boolean;
+  databaseTabActive: boolean;
+  onSelectDatabaseTab: () => void;
   onCloseDatabase: () => void;
 }) {
   const [terminalHeight, setTerminalHeight] = useState(
@@ -157,7 +216,7 @@ export function EditorPane({
           {editorTabs.map((tab) => {
             const isActive =
               !browserTabActive &&
-              !databaseOpen &&
+              !databaseTabActive &&
               activeFile === tab.path &&
               !activeDiff;
             const isDirty = tab.content !== tab.savedContent;
@@ -212,7 +271,7 @@ export function EditorPane({
                 </div>
               );
           })}
-          {activeDiff && !browserTabActive ? (
+          {activeDiff && !browserTabActive && !databaseTabActive ? (
             <div className="editor-tab-item active">
               <span className="editor-tab-button editor-tab-label">
                 diff: {fileName(activeDiff.path)}
@@ -253,8 +312,16 @@ export function EditorPane({
             </div>
           ) : null}
           {databaseOpen ? (
-            <div className="editor-tab-item active">
-              <span className="editor-tab-button editor-tab-label">数据库</span>
+            <div
+              className={`editor-tab-item${databaseTabActive ? ' active' : ''}`}
+            >
+              <button
+                type="button"
+                className="editor-tab-button"
+                onClick={onSelectDatabaseTab}
+              >
+                <span className="editor-tab-label">数据库</span>
+              </button>
               <button
                 type="button"
                 className="editor-tab-close"
@@ -322,7 +389,7 @@ export function EditorPane({
         ) : null}
       </div>
       <div className="editor-content">
-        {databaseOpen ? (
+        {databaseOpen && databaseTabActive ? (
           <DatabasePanel />
         ) : browserUrl && browserTabActive ? (
           <BrowserPanel initialUrl={browserUrl} onClose={onCloseBrowser} />
@@ -349,7 +416,7 @@ export function EditorPane({
                 onAskAI={onAskAI}
               />
             ) : (
-              <Welcome />
+              <Welcome onOpenDemo={onOpenDemoWorkspace} />
             )}
           </>
         )}

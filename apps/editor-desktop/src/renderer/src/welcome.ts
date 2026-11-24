@@ -16,6 +16,7 @@ export const WELCOME_MD = `# AI Editor
 
 1. 在 \`apps/editor-desktop/.env\` 配置 API Key（参考 \`.env.example\`，例如 \`GLM_API_KEY\`）
 2. 点左上角 **打开文件夹**，选择你的项目；可以多次「添加」把多个文件夹一起展示
+   - 或者直接点下方 **打开内置演示文件夹**，无需自己准备项目
 3. 点 **设置 → 提供商** 管理提供商和模型（默认 \`${DEFAULT_MODEL_ID}\`）
 4. 在右侧输入指令，例如：
    - \`帮我看下这个项目是做什么的\`
