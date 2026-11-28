@@ -7,8 +7,10 @@ import {
   PROVIDER_PRESETS,
   type ModelConfig,
 } from '../shared/providers.js';
+import type { McpServerConfig } from '../shared/mcp.js';
 
 export type { ModelConfig };
+export type { McpServerConfig };
 
 export interface ProviderConfig {
   id: string;
@@ -39,6 +41,8 @@ export interface AppConfig {
   fileApproval: ApprovalMode;
   /** 数据库写操作审批（execute_sql）：ask 询问 / auto 自动放行 */
   databaseApproval: ApprovalMode;
+  /** MCP Server 列表：启用后其工具会注入 agent（本地模式） */
+  mcpServers: McpServerConfig[];
   local: {
     /** 上次打开的多个工作区文件夹（下次启动恢复） */
     workspaceRoots?: string[];
@@ -73,6 +77,7 @@ const DEFAULTS: AppConfig = {
   commandApproval: 'ask',
   fileApproval: 'ask',
   databaseApproval: 'ask',
+  mcpServers: [],
   local: { workspaceRoots: [] },
   remote: { model: '' },
 };
@@ -113,6 +118,26 @@ export function getConfig(): AppConfig {
           : 'ask',
       databaseApproval:
         raw.databaseApproval === 'auto' ? 'auto' : 'ask',
+      mcpServers: Array.isArray(raw.mcpServers)
+        ? raw.mcpServers
+            .filter((s: any) => s && typeof s.id === 'string')
+            .map((s: any) => ({
+              id: s.id,
+              name: typeof s.name === 'string' && s.name ? s.name : s.id,
+              enabled: s.enabled !== false,
+              transport: s.transport === 'http' ? 'http' : 'stdio',
+              command: typeof s.command === 'string' ? s.command : '',
+              args: Array.isArray(s.args) ? s.args.map(String) : [],
+              env:
+                s.env && typeof s.env === 'object'
+                  ? Object.fromEntries(
+                      Object.entries(s.env).map(([k, v]) => [k, String(v)]),
+                    )
+                  : {},
+              cwd: typeof s.cwd === 'string' ? s.cwd : '',
+              url: typeof s.url === 'string' ? s.url : '',
+            }))
+        : [],
       local: {
         workspaceRoots: Array.isArray(raw.local?.workspaceRoots)
           ? raw.local.workspaceRoots

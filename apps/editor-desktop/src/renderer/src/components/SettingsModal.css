@@ -1,0 +1,125 @@
+/* 设置弹窗专用样式：全部限定在 .settings-modal 下，不影响其他弹窗 */
+
+/* 6. 底部操作栏固定：弹窗改为纵向 flex，只有 body 滚动 */
+.modal.settings-modal {
+  display: flex;
+  flex-direction: column;
+  max-height: 85vh;
+  overflow: hidden;
+}
+
+.modal.settings-modal > .modal-title {
+  flex-shrink: 0;
+}
+
+.modal.settings-modal > .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.modal.settings-modal > .modal-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-modal);
+}
+
+/* 1. 主次按钮：保存为主色，禁用时明显减弱；取消保持次按钮样式，鼠标点击不出现焦点高亮 */
+.modal.settings-modal .modal-actions .settings-save {
+  background: var(--accent-strong);
+  color: var(--tc-ffffff, #fff);
+  border: 1px solid var(--accent-strong);
+}
+
+.modal.settings-modal .modal-actions .settings-save:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 取消：强制次按钮外观。选择器里重复写 class 来提高优先级，
+   这样即使全局规则也带 !important，这里依然能盖过它 */
+.modal.settings-modal.settings-modal .modal-actions.modal-actions button.ghost.ghost,
+.modal.settings-modal.settings-modal .modal-actions.modal-actions button.ghost.ghost:focus,
+.modal.settings-modal.settings-modal .modal-actions.modal-actions button.ghost.ghost:focus-visible,
+.modal.settings-modal.settings-modal .modal-actions.modal-actions button.ghost.ghost:active,
+.modal.settings-modal.settings-modal .modal-actions.modal-actions button.ghost.ghost:disabled {
+  background: var(--surface-raised) !important;
+  background-image: none !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+}
+
+.modal.settings-modal.settings-modal .modal-actions.modal-actions button.ghost.ghost:hover:not(:disabled) {
+  background: var(--bg-hover) !important;
+  border-color: #4a5261 !important;
+}
+
+.modal.settings-modal .modal-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.modal.settings-modal .modal-actions .ghost:focus:not(:focus-visible) {
+  outline: none;
+  box-shadow: none;
+}
+
+.modal.settings-modal .modal-actions button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+/* 5. 列表行（提供商 / 数据库）：垂直居中，长文本省略 */
+.modal.settings-modal .provider-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.modal.settings-modal .provider-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.modal.settings-modal .provider-info > .muted {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal.settings-modal .provider-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.modal.settings-modal .provider-name input[type='radio'] {
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.modal.settings-modal .provider-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 4. MCP 状态栏：状态文字在左，刷新按钮在右，同一行对齐 */
+.modal.settings-modal .mcp-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.modal.settings-modal .mcp-status-text {
+  margin-right: auto;
+}

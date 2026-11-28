@@ -52,6 +52,7 @@ describe('createEditorTools', () => {
       'search_files',
       'glob',
       'run_terminal',
+      'http_request',
       'open_in_browser',
       'git_status',
       'git_diff',
@@ -199,6 +200,77 @@ describe('文件改动回调', () => {
     expect(changes.map((c) => c.kind)).toEqual(['modified', 'modified']);
     expect(changes[0]).toMatchObject({ path: 'a.txt', before: 'A', after: 'AA' });
     expect(changes[1]).toMatchObject({ path: 'b.txt', before: 'B', after: 'BB' });
+  });
+
+  it('deferWrite 模式所有写操作都只产出 pending，不改磁盘', async () => {
+    writeFileSync(join(root, 'a.txt'), 'A', 'utf8');
+    const changes: any[] = [];
+    tools = createEditorTools(root, (c) => changes.push(c), undefined, true);
+
+    await run('write_file', { path: 'new.txt', content: 'N' });
+    expect(changes.at(-1)).toMatchObject({ path: 'new.txt', pending: true });
+    expect(existsSync(join(root, 'new.txt'))).toBe(false);
+
+    // 同一轮内 pending 内容可继续编辑（尚未落盘也能叠加）
+    await run('edit_file', {
+      path: 'new.txt',
+      old_string: 'N',
+      new_string: 'NN',
+    });
+    expect(changes.at(-1)).toMatchObject({
+      path: 'new.txt',
+      pending: true,
+      before: undefined,
+      after: 'NN',
+    });
+    expect(existsSync(join(root, 'new.txt'))).toBe(false);
+
+    await run('edit_file', {
+      path: 'a.txt',
+      old_string: 'A',
+      new_string: 'AA',
+    });
+    expect(changes.at(-1)).toMatchObject({ pending: true, after: 'AA' });
+    expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('A');
+
+    await run('apply_patch', {
+      edits: [{ path: 'a.txt', old_string: 'AA', new_string: 'AAA' }],
+    });
+    expect(changes.at(-1)).toMatchObject({ pending: true, after: 'AAA' });
+    expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('A');
+
+    // 同一次 apply_patch 内多次编辑同一文件也要叠加
+    await run('apply_patch', {
+      edits: [
+        { path: 'a.txt', old_string: 'AAA', new_string: 'AB' },
+        { path: 'a.txt', old_string: 'AB', new_string: 'ABC' },
+      ],
+    });
+    expect(changes.at(-1)).toMatchObject({ pending: true, after: 'ABC' });
+    expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('A');
+
+    await run('move_file', { from: 'a.txt', to: 'b.txt' });
+    expect(changes.at(-1)).toMatchObject({
+      pending: true,
+      path: 'b.txt',
+      after: 'ABC',
+    });
+    expect(existsSync(join(root, 'a.txt'))).toBe(true);
+    expect(existsSync(join(root, 'b.txt'))).toBe(false);
+
+    await run('delete_file', { path: 'a.txt' });
+    expect(changes.at(-1)).toMatchObject({ pending: true, kind: 'deleted' });
+    expect(existsSync(join(root, 'a.txt'))).toBe(true);
+  });
+
+  it('deferWrite 模式拒绝删除二进制文件', async () => {
+    writeFileSync(join(root, 'bin.dat'), Buffer.from([0, 1, 2, 3]));
+    const changes: any[] = [];
+    tools = createEditorTools(root, (c) => changes.push(c), undefined, true);
+    const out = await run('delete_file', { path: 'bin.dat' });
+    expect(out).toContain('不支持删除二进制文件');
+    expect(changes).toHaveLength(0);
+    expect(existsSync(join(root, 'bin.dat'))).toBe(true);
   });
 });
 
@@ -435,7 +507,7 @@ describe('createEditorAgent', () => {
   it('返回绑定 root 的 editor 定义', () => {
     const agent = createEditorAgent(root);
     expect(agent.id).toBe('editor');
-    expect(agent.tools).toHaveLength(21);
+    expect(agent.tools).toHaveLength(22);
     expect(agent.buildSystemPrompt()).toContain(root);
     const names = agent.tools.map((t) => t.definition.function.name);
     expect(names).toContain('verify_workspace');

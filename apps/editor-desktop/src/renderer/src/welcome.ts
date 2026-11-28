@@ -52,7 +52,9 @@ export const WELCOME_MD = `# AI Editor
 
 \`read_file\` / \`write_file\` / \`edit_file\` / \`apply_patch\` / \`delete_file\` /
 \`move_file\` / \`create_directory\` / \`list_dir\` / \`search_files\` / \`glob\` /
-\`run_terminal\` / \`git_status\` / \`git_diff\`
+\`run_terminal\` / \`http_request\` / \`git_status\` / \`git_diff\`
+
+设置里可以接入 MCP Server，工具以 \`mcp_*\` 命名注入。
 
 ## 安全说明
 

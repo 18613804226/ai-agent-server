@@ -115,11 +115,26 @@ backend（云端模式）
 
 `read_file` / `write_file` / `edit_file` / `apply_patch` / `delete_file` / `move_file` /
 `create_directory` / `list_dir` / `search_files` / `glob` / `run_terminal` /
-`git_status` / `git_diff` / `open_in_browser`
+`http_request` / `git_status` / `git_diff` / `open_in_browser`
+
+> `http_request` 等价 curl，用来调试接口：支持 method / headers / body，
+> 返回状态码、耗时、响应头和响应体（默认 30s 超时、结果截断）。
+> MCP Server 的工具会额外注入，命名为 `mcp_<服务>_<工具>`。
+
+## MCP Server
+
+在「设置 → MCP Server」里添加，保存后自动重连（本地模式生效）：
+
+- **stdio**：填启动命令、参数（每行一个）、可选工作目录与环境变量，
+  例如 `npx` + `-y` + `@modelcontextprotocol/server-filesystem` + `.`
+- **HTTP**：填 Streamable HTTP 地址，如 `http://127.0.0.1:3001/mcp`
+
+连接状态和工具数量可在设置里刷新查看。MCP 工具按「命令执行审批」开关决定是否弹确认。
 
 ## 功能
 
 - 左侧工作区文件树（本地 IPC），支持**多个文件夹**（VS Code 多根），目录可展开/折叠
+- 文件树下方 **Git 变更面板**：分支、暂存/未暂存/未跟踪分组，点文件展开只读 diff，刷新按钮 + 窗口聚焦自动刷新
 - 可添加/移除文件夹、清空工作区
 - 文件树右键菜单：新建文件/文件夹、重命名、删除、问 AI
 - 中间代码编辑器：Monaco，按扩展名语法高亮，**可手动编辑 + Ctrl+S 保存**
@@ -130,8 +145,10 @@ backend（云端模式）
 - 输入框支持 `@` 引用工作区文件，发送时自动把文件内容带给 agent
 - 多会话：右侧任务标签栏，新建/切换/删除任务，消息/输入独立，持久化到 `chat-sessions.json`
 - 每轮结束后在消息里列出「已修改文件」（含 +N -N 与 View Diff），点击打开并排 diff（左旧右新 + hunk 逐块接受/拒绝）
-- diff 块审批：文件操作审批开启时，AI 改动显示「待确认」，确认后才写入文件
-- 工具审批拆分：命令执行 / 文件操作 两个独立开关
+- diff 块审批：文件操作审批开启时，写/删/移动/批量补丁都只生成「待确认」，确认后一次性写入；同一轮内多次编辑同一文件会按顺序叠加。任一文件失败自动回滚已写入部分，并清除待确认标记
+- 二进制文件不支持 diff 审批删除（会直接拒绝，避免回滚时写空内容）
+- diff 审批模式下自动验证会关闭（改动还没落盘，验证旧内容没有意义），确认写入后再运行验证
+- 工具审批拆分：命令执行 / 文件操作 两个独立开关；命令执行同时覆盖 `http_request` 与 MCP 工具
 - 生成中可「停止」，会 abort 上游请求
 
 ## 快捷键
@@ -160,5 +177,7 @@ backend（云端模式）
 
 - 所有文件工具都限制在工作区根目录内，越界路径直接拒绝。
 - `run_terminal` 有破坏性命令黑名单；`delete_file` 只能删文件。
+- `http_request` 只允许 http/https，默认 30s 超时。
+- MCP Server 由你自行配置，工具按「命令执行审批」开关决定是否弹确认。
 - 模型 API Key 存在 Electron `userData/config.json`，`safeStorage` 可用时用系统钥匙串加密。
 - 本地模式支持「工具直接写入」与「diff 块审批」：文件操作审批开启时，AI 改动先不落盘，消息里显示「待确认」，确认后才写入；也可在 diff 视图逐块接受/拒绝。

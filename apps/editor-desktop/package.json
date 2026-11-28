@@ -15,6 +15,7 @@
     "typecheck": "pnpm run typecheck:node && pnpm run typecheck:web"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@repo/agent-orchestrator": "workspace:*",
     "@repo/editor-agent": "workspace:*",
     "dotenv": "^18.0.1",

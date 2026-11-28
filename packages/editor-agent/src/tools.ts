@@ -1,4 +1,4 @@
-﻿import { spawn } from 'child_process';
+import { spawn } from 'child_process';
 import {
   existsSync,
   mkdirSync,
@@ -30,6 +30,16 @@ import { decodeProcOutput, execAsync, execFileAsync } from './exec.js';
 
 const MAX_RESULT_CHARS = 4000;
 const MAX_WALK_FILES = 2000;
+/** deferWrite 模式下所有改动都没落盘，统一在工具结果里提示模型 */
+const PENDING_NOTE =
+  '（当前为 diff 审批模式，文件尚未写入磁盘，用户确认后才会落盘）';
+
+/** 同一轮内 pending 改动的叠加状态：后续编辑基于未落盘内容计算 */
+export interface PendingEditState {
+  before?: string;
+  after: string;
+}
+export type PendingEditStore = Map<string, PendingEditState>;
 const IGNORE_DIRS = new Set([
   'node_modules',
   '.git',
@@ -62,6 +72,47 @@ function truncate(s: string): string {
   return s.length > MAX_RESULT_CHARS
     ? `${s.slice(0, MAX_RESULT_CHARS)}\n…（结果过长，已截断）`
     : s;
+}
+
+/** HTTP 响应体字节上限：先限流读取，避免大响应整段进内存 */
+const MAX_HTTP_BODY_BYTES = 1_000_000;
+
+async function readResponseBody(
+  res: Response,
+): Promise<{ text: string; bytes: number; truncated: boolean }> {
+  if (!res.body) return { text: '', bytes: 0, truncated: false };
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let truncated = false;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value?.length) continue;
+    const remain = MAX_HTTP_BODY_BYTES - bytes;
+    if (value.length > remain) {
+      if (remain > 0) {
+        chunks.push(value.subarray(0, remain));
+        bytes += remain;
+      }
+      truncated = true;
+      try {
+        await reader.cancel();
+      } catch {
+        // 取消失败不影响已读内容
+      }
+      break;
+    }
+    chunks.push(value);
+    bytes += value.length;
+  }
+  return {
+    text: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString(
+      'utf8',
+    ),
+    bytes,
+    truncated,
+  };
 }
 
 /** 超过这个长度就转 artifact，避免大文件全文进上下文 */
@@ -289,9 +340,18 @@ export function createEditorTools(
   onBrowserOpen?: (url: string) => void,
   /** true=文件改动不直接落盘，产出 pending diff 等用户确认 */
   deferWrite?: boolean,
+  /** 同一轮 pending 改动的叠加状态（宿主在每轮开始时清空） */
+  pendingEdits?: PendingEditStore,
 ): RegisteredTool[] {
   const roots = normalizeRoots(rootsInput);
   const primary = roots[0]?.path || process.cwd();
+
+  /** pending 叠加：同路径连续编辑时基于上一条 after 计算，避免互相覆盖 */
+  const pendingKey = (p: string) => cleanPath(p);
+  const pendingStore =
+    pendingEdits ??
+    (deferWrite ? new Map<string, PendingEditState>() : undefined);
+  const priorEdit = (p: string) => pendingStore?.get(pendingKey(p));
 
   /** 把用户给的路径解析成某个工作区根内的绝对路径；越界抛错 */
   const safeResolve = (p: string): string => resolveInRoots(roots, p);
@@ -353,22 +413,25 @@ export function createEditorTools(
         const path = String(args.path);
         const abs = safeResolve(path);
         const content = String(args.content ?? '');
-        const before = tryReadText(abs);
+        const key = pendingKey(path);
+        const prior = priorEdit(path);
+        const before = prior ? prior.before : tryReadText(abs);
         // deferWrite：只产出待确认 diff，不写文件
         if (deferWrite) {
+          pendingStore?.set(key, { before, after: content });
           onChange?.({
-            path: cleanPath(path),
+            path: key,
             kind: before === undefined ? 'created' : 'modified',
             before,
             after: content,
             pending: true,
           });
-          return `已生成对 ${path} 的改动，等待用户确认后写入`;
+          return `已生成对 ${path} 的改动，等待用户确认后写入${PENDING_NOTE}`;
         }
         mkdirSync(dirname(abs), { recursive: true });
         writeFileSync(abs, content, 'utf8');
         onChange?.({
-          path: cleanPath(path),
+          path: key,
           kind: before === undefined ? 'created' : 'modified',
           before,
           after: content,
@@ -395,9 +458,14 @@ export function createEditorTools(
         },
       },
       async (args) => {
-        const abs = safeResolve(String(args.path));
-        if (!existsSync(abs)) return `文件不存在：${args.path}`;
-        const raw = readFileSync(abs, 'utf8');
+        const path = String(args.path);
+        const abs = safeResolve(path);
+        const key = pendingKey(path);
+        const prior = priorEdit(path);
+        if (!prior && !existsSync(abs)) return `文件不存在：${args.path}`;
+        // pending 叠加：本轮先生成但未落盘的改动也要作为后续编辑的基础
+        const raw = prior?.after ?? readFileSync(abs, 'utf8');
+        const before = prior ? prior.before : raw;
         const oldStr = String(args.old_string ?? '');
         if (!oldStr) return 'old_string 不能为空';
         if (!raw.includes(oldStr)) {
@@ -406,20 +474,21 @@ export function createEditorTools(
         const next = raw.split(oldStr).join(String(args.new_string ?? ''));
         // deferWrite：只产出待确认 diff，不写文件
         if (deferWrite) {
+          pendingStore?.set(key, { before, after: next });
           onChange?.({
-            path: cleanPath(String(args.path)),
-            kind: 'modified',
-            before: raw,
+            path: key,
+            kind: before === undefined ? 'created' : 'modified',
+            before,
             after: next,
             pending: true,
           });
-          return `已生成对 ${args.path} 的改动，等待用户确认后写入`;
+          return `已生成对 ${args.path} 的改动，等待用户确认后写入${PENDING_NOTE}`;
         }
         writeFileSync(abs, next, 'utf8');
         onChange?.({
-          path: cleanPath(String(args.path)),
-          kind: 'modified',
-          before: raw,
+          path: key,
+          kind: before === undefined ? 'created' : 'modified',
+          before,
           after: next,
         });
         return `已更新 ${args.path}（替换 ${raw.split(oldStr).length - 1} 处）`;
@@ -463,57 +532,79 @@ export function createEditorTools(
         if (!edits.length) return 'edits 不能为空';
         const planned: Array<{
           path: string;
+          key: string;
           abs: string;
           before?: string;
           next: string;
           label: string;
         }> = [];
+        // 同一次 apply_patch 内多个 edit 命中同一文件时也按顺序叠加
+        const staged = new Map<string, PendingEditState>();
         for (const e of edits) {
           const path = String(e?.path);
+          const key = pendingKey(path);
           const abs = safeResolve(path);
+          const prior = staged.get(key) ?? priorEdit(path);
           if (typeof e?.content === 'string') {
+            const before = prior ? prior.before : tryReadText(abs);
             planned.push({
               path,
+              key,
               abs,
-              before: tryReadText(abs),
+              before,
               next: e.content,
               label: `${path}（整文件）`,
             });
+            staged.set(key, { before, after: e.content });
             continue;
           }
-          if (!existsSync(abs)) {
+          if (!prior && !existsSync(abs)) {
             return `文件不存在：${path}（整批未应用）`;
           }
           const oldStr = String(e?.old_string ?? '');
           if (!oldStr) {
             return `edit ${path} 缺少 old_string 或 content（整批未应用）`;
           }
-          const raw = readFileSync(abs, 'utf8');
-          if (!raw.includes(oldStr)) {
+          const base = prior?.after ?? readFileSync(abs, 'utf8');
+          if (!base.includes(oldStr)) {
             return `未找到要替换的文本：${path}（整批未应用）`;
           }
-          const count = raw.split(oldStr).length - 1;
+          const before = prior ? prior.before : base;
+          const next = base.split(oldStr).join(String(e?.new_string ?? ''));
           planned.push({
             path,
+            key,
             abs,
-            before: raw,
-            next: raw.split(oldStr).join(String(e?.new_string ?? '')),
-            label: `${path}（替换 ${count} 处）`,
+            before,
+            next,
+            label: `${path}（替换 ${base.split(oldStr).length - 1} 处）`,
           });
+          staged.set(key, { before, after: next });
         }
         for (const p of planned) {
+          if (deferWrite) {
+            pendingStore?.set(p.key, { before: p.before, after: p.next });
+            onChange?.({
+              path: p.key,
+              kind: p.before === undefined ? 'created' : 'modified',
+              before: p.before,
+              after: p.next,
+              pending: true,
+            });
+            continue;
+          }
           mkdirSync(dirname(p.abs), { recursive: true });
           writeFileSync(p.abs, p.next, 'utf8');
           onChange?.({
-            path: cleanPath(p.path),
+            path: p.key,
             kind: p.before === undefined ? 'created' : 'modified',
             before: p.before,
             after: p.next,
           });
         }
-        return `已应用 ${planned.length} 个修改：\n${planned
+        return `${deferWrite ? '已生成' : '已应用'} ${planned.length} 个修改：\n${planned
           .map((p) => `- ${p.label}`)
-          .join('\n')}`;
+          .join('\n')}${deferWrite ? `\n${PENDING_NOTE}` : ''}`;
       },
     ),
     tool(
@@ -536,9 +627,29 @@ export function createEditorTools(
         if (statSync(abs).isDirectory()) {
           return `拒绝：delete_file 只能删文件（目录请先清空）`;
         }
-        const before = tryReadText(abs);
+        const prior = priorEdit(path);
+        const before = prior ? prior.before : tryReadText(abs);
+        if (deferWrite) {
+          if (before === undefined) {
+            return `无法读取 ${path} 的文本内容（可能是二进制文件）。diff 审批模式不支持删除二进制文件，请让用户关闭文件审批后重试或手动删除。`;
+          }
+          const key = pendingKey(path);
+          pendingStore?.set(key, { before, after: '' });
+          onChange?.({
+            path: key,
+            kind: 'deleted',
+            before,
+            after: '',
+            pending: true,
+          });
+          return `已生成删除 ${path} 的改动，等待用户确认后执行${PENDING_NOTE}`;
+        }
         rmSync(abs);
-        onChange?.({ path: cleanPath(path), kind: 'deleted', before });
+        onChange?.({
+          path: pendingKey(path),
+          kind: 'deleted',
+          before,
+        });
         return `已删除 ${path}`;
       },
     ),
@@ -564,13 +675,33 @@ export function createEditorTools(
         const from = safeResolve(fromPath);
         const to = safeResolve(toPath);
         if (!existsSync(from)) return `源文件不存在：${fromPath}`;
-        const before = tryReadText(from);
+        const fromKey = pendingKey(fromPath);
+        const toKey = pendingKey(toPath);
+        const priorFrom = priorEdit(fromPath);
+        const before = priorFrom ? priorFrom.before : tryReadText(from);
+        // 本轮已有未落盘改动时，移动要带上最新内容，否则确认后会丢失
+        const next = priorFrom?.after ?? before;
+        if (deferWrite) {
+          pendingStore?.delete(fromKey);
+          if (next !== undefined) {
+            pendingStore?.set(toKey, { before, after: next });
+          }
+          onChange?.({
+            path: toKey,
+            kind: 'renamed',
+            from: fromKey,
+            before,
+            after: next,
+            pending: true,
+          });
+          return `已生成移动 ${fromPath} → ${toPath} 的改动，等待用户确认后执行${PENDING_NOTE}`;
+        }
         mkdirSync(dirname(to), { recursive: true });
         renameSync(from, to);
         onChange?.({
-          path: cleanPath(toPath),
+          path: toKey,
           kind: 'renamed',
-          from: cleanPath(fromPath),
+          from: fromKey,
           before,
           after: before,
         });
@@ -771,6 +902,125 @@ export function createEditorTools(
       {
         type: 'function',
         function: {
+          name: 'http_request',
+          description:
+            '发送 HTTP 请求调试接口（等价 curl）：返回状态码、耗时、响应头和响应体。支持 GET/POST/PUT/PATCH/DELETE 等；用于调试本地或远程 API，不要用它下载大文件。',
+          parameters: {
+            type: 'object',
+            properties: {
+              method: {
+                type: 'string',
+                description: 'HTTP 方法，默认 GET',
+              },
+              url: {
+                type: 'string',
+                description: '完整 URL，如 http://localhost:3000/api/users',
+              },
+              headers: {
+                type: 'object',
+                description: '请求头，如 {"Content-Type":"application/json"}',
+                additionalProperties: { type: 'string' },
+              },
+              body: {
+                type: 'string',
+                description: '请求体（JSON 字符串或表单文本）',
+              },
+              timeout_ms: {
+                type: 'number',
+                description: '超时毫秒数，默认 30000，最大 60000',
+              },
+            },
+            required: ['url'],
+          },
+        },
+      },
+      async (args, context) => {
+        const url = String(args.url ?? '').trim();
+        if (!/^https?:\/\//i.test(url)) {
+          return `URL 不被支持：只允许 http/https（收到：${url}）`;
+        }
+        const method = String(args.method ?? 'GET').toUpperCase();
+        const allowed = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
+        if (!allowed.includes(method)) {
+          return `不支持的 HTTP 方法：${method}`;
+        }
+        const rawHeaders =
+          args.headers && typeof args.headers === 'object'
+            ? (args.headers as Record<string, unknown>)
+            : {};
+        const headers: Record<string, string> = {};
+        for (const [key, value] of Object.entries(rawHeaders)) {
+          if (value !== undefined && value !== null) {
+            headers[key] = String(value);
+          }
+        }
+        const timeout = Math.min(
+          60000,
+          Math.max(1000, Number(args.timeout_ms) || 30000),
+        );
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeout);
+        timer.unref?.();
+        const signal = context.signal
+          ? AbortSignal.any([context.signal, controller.signal])
+          : controller.signal;
+        const startedAt = Date.now();
+        try {
+          const res = await fetch(url, {
+            method,
+            headers,
+            body:
+              method === 'GET' || method === 'HEAD'
+                ? undefined
+                : typeof args.body === 'string'
+                  ? args.body
+                  : undefined,
+            signal,
+            redirect: 'follow',
+          });
+          const elapsed = Date.now() - startedAt;
+          const contentType = res.headers.get('content-type') ?? '';
+          const raw = await readResponseBody(res);
+          let body = raw.text;
+          if (body.includes('\0')) {
+            body = `（二进制响应，已读取 ${raw.bytes} 字节，已省略内容）`;
+          } else if (/json/i.test(contentType) && body) {
+            try {
+              body = JSON.stringify(JSON.parse(body), null, 2);
+            } catch {
+              // 非法 JSON 原样返回
+            }
+          }
+          if (raw.truncated) {
+            body = `${body}\n…（响应体超过 ${raw.bytes} 字节上限，已截断）`;
+          }
+          if (body.length > MAX_RESULT_CHARS) {
+            body = `${body.slice(0, MAX_RESULT_CHARS)}\n…（响应体过长，已截断）`;
+          }
+          const headerLines = [...res.headers.entries()]
+            .slice(0, 30)
+            .map(([key, value]) => `${key}: ${value}`)
+            .join('\n');
+          return [
+            `HTTP ${res.status} ${res.statusText}（${elapsed}ms）`,
+            headerLines,
+            '',
+            body || '（空响应体）',
+          ].join('\n');
+        } catch (e: any) {
+          const elapsed = Date.now() - startedAt;
+          return `请求失败（${method} ${url}，${elapsed}ms）：${
+            e?.name === 'AbortError' ? `超时（${timeout}ms）` : e?.message || e
+          }`;
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+    ),
+    tool(
+      {
+        type: 'function',
+        function: {
           name: 'open_in_browser',
           description:
             '在内置浏览器中打开指定 URL（仅支持 http://localhost / 127.0.0.1）。启动 Web 项目后调用它让用户预览。',
@@ -804,7 +1054,8 @@ export function createEditorTools(
         type: 'function',
         function: {
           name: 'git_status',
-          description: '查看主工作区的 git 状态（git status --porcelain）。',
+          description:
+            '查看主工作区的 git 状态（git status --porcelain -b，含分支与未跟踪文件）。',
           parameters: { type: 'object', properties: {} },
         },
       },
@@ -812,7 +1063,7 @@ export function createEditorTools(
         try {
           const { stdout, stderr } = await execFileAsync(
             'git',
-            ['status', '--porcelain'],
+            ['status', '--porcelain=v1', '-b'],
             {
               cwd: primary,
               timeout: 15000,
@@ -833,21 +1084,40 @@ export function createEditorTools(
         type: 'function',
         function: {
           name: 'git_diff',
-          description: '查看主工作区的未提交改动（git diff），可指定单个路径。',
+          description:
+            '查看主工作区的未提交改动（默认 diff HEAD，含暂存与未暂存），可指定单个路径；staged=true 只看暂存区。未跟踪文件不在 diff 里，会单独列出。',
           parameters: {
             type: 'object',
             properties: {
               path: { type: 'string', description: '可选：只看某个文件/目录' },
+              staged: {
+                type: 'boolean',
+                description: '可选：只看已暂存的改动（git diff --cached）',
+              },
             },
           },
         },
       },
       async (args) => {
         const p = args.path ? String(args.path) : undefined;
+        const staged = Boolean(args.staged);
         try {
+          // 仓库还没有首个 commit 时没有 HEAD，退化为工作区 diff
+          let base = staged ? ['--cached'] : ['HEAD'];
+          if (!staged) {
+            try {
+              await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], {
+                cwd: primary,
+                timeout: 10000,
+                windowsHide: true,
+              });
+            } catch {
+              base = [];
+            }
+          }
           const { stdout, stderr } = await execFileAsync(
             'git',
-            ['diff', ...(p ? ['--', p] : [])],
+            ['diff', ...base, ...(p ? ['--', p] : [])],
             {
               cwd: primary,
               timeout: 15000,
@@ -857,7 +1127,35 @@ export function createEditorTools(
             },
           );
           const out = decodeProcOutput(stdout, stderr).trim();
-          return truncate(out || '（没有未提交改动）');
+          let untracked: string[] = [];
+          if (!p && !staged) {
+            try {
+              const others = await execFileAsync(
+                'git',
+                ['ls-files', '--others', '--exclude-standard'],
+                {
+                  cwd: primary,
+                  timeout: 15000,
+                  maxBuffer: 1024 * 1024,
+                  windowsHide: true,
+                  encoding: 'utf8',
+                },
+              );
+              untracked = others.stdout
+                .split('\n')
+                .map((line) => line.trim())
+                .filter(Boolean)
+                .slice(0, 30);
+            } catch {
+              // 非 git 仓库或命令失败时忽略未跟踪列表
+            }
+          }
+          const untrackedNote = untracked.length
+            ? `\n\n未跟踪文件（不在 diff 中）：\n${untracked.join('\n')}`
+            : '';
+          return truncate(
+            `${out || (untracked.length ? '（没有已跟踪文件的改动）' : '（没有未提交改动）')}${untrackedNote}`,
+          );
         } catch (e: any) {
           return `git diff 失败：${e?.message || e}`;
         }
@@ -1154,7 +1452,15 @@ export function restoreChanges(
       } else if (change.kind === 'renamed') {
         const from = change.from ? absolute(change.from) : undefined;
         const to = absolute(change.path);
-        if (from) write(from, change.before);
+        if (from && change.before === undefined) {
+          // 二进制/不可读文件没有 before：能移回就移回，避免写空内容
+          if (existsSync(to)) {
+            mkdirSync(dirname(from), { recursive: true });
+            renameSync(to, from);
+          }
+        } else if (from) {
+          write(from, change.before);
+        }
         remove(to);
         restored.push(`${change.from ?? ''} → ${change.path}`);
       }
@@ -1242,6 +1548,18 @@ export function previewApproval(
 
   if (toolName === 'run_terminal') {
     return [{ kind: 'command', command: str(args.command) }];
+  }
+
+  if (toolName === 'http_request') {
+    const method = str(args.method) || 'GET';
+    const url = str(args.url);
+    const body = str(args.body);
+    return [
+      {
+        kind: 'command',
+        command: `${method.toUpperCase()} ${url}${body ? `\n\n${body}` : ''}`,
+      },
+    ];
   }
 
   return [];

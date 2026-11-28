@@ -139,11 +139,13 @@ function toolIcon(name: string): string {
       return '🔍';
     case 'run_terminal':
       return '💻';
+    case 'http_request':
+      return '🌐';
     case 'git_status':
     case 'git_diff':
       return '🌿';
     default:
-      return '🔧';
+      return name.startsWith('mcp_') ? '🔌' : '🔧';
   }
 }
 
@@ -176,12 +178,16 @@ function toolSummary(name: string, args?: Record<string, unknown>): string {
       return `查找文件 ${s(a.pattern)}`;
     case 'run_terminal':
       return `执行 ${s(a.command)}`;
+    case 'http_request':
+      return `${s(a.method) || 'GET'} ${s(a.url)}`;
     case 'git_status':
       return 'git status';
     case 'git_diff':
       return `git diff ${s(a.path ?? '')}`.trim();
     default:
-      return name;
+      return name.startsWith('mcp_')
+        ? `MCP · ${name.slice(4).replace(/_/g, '/')}`
+        : name;
   }
 }
 
@@ -340,6 +346,8 @@ export const ChatMessage = memo(function ChatMessage({
   onApplyDiff,
   onRevertChanges,
   onSaveChanges,
+  onApplyPending,
+  onRevertPending,
 }: {
   msg: ChatMsg;
   streaming: boolean;
@@ -350,6 +358,10 @@ export const ChatMessage = memo(function ChatMessage({
   onApplyDiff?: (path: string, content: string) => void;
   onRevertChanges?: (changes: FileChange[]) => void;
   onSaveChanges?: () => void;
+  /** 批量确认 pending 改动（原子写入 + 失败回滚） */
+  onApplyPending?: (changes: FileChange[]) => void;
+  /** 批量放弃 pending 改动（不写盘） */
+  onRevertPending?: (changes: FileChange[]) => void;
 }) {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
@@ -548,9 +560,11 @@ export const ChatMessage = memo(function ChatMessage({
                   type="button"
                   className="message-changes-save"
                   onClick={() =>
-                    pendingChanges.forEach((c) =>
-                      onApplyDiff?.(c.path, c.after ?? ''),
-                    )
+                    onApplyPending
+                      ? onApplyPending(pendingChanges)
+                      : pendingChanges.forEach((c) =>
+                          onApplyDiff?.(c.path, c.after ?? ''),
+                        )
                   }
                   title="确认写入文件"
                 >
@@ -560,9 +574,11 @@ export const ChatMessage = memo(function ChatMessage({
                   type="button"
                   className="message-changes-revert"
                   onClick={() =>
-                    pendingChanges.forEach((c) =>
-                      onApplyDiff?.(c.path, c.before ?? ''),
-                    )
+                    onRevertPending
+                      ? onRevertPending(pendingChanges)
+                      : pendingChanges.forEach((c) =>
+                          onApplyDiff?.(c.path, c.before ?? ''),
+                        )
                   }
                   title="取消改动，恢复为修改前"
                 >

@@ -1,4 +1,5 @@
 import { FileTree, FolderIcon } from './FileTree';
+import { GitPanel } from './GitPanel';
 import type { WorkspaceNode, WorkspaceRootInfo } from '../mode/types';
 
 /** 左侧工作区栏：根目录操作 + 文件树 */
@@ -106,6 +107,11 @@ export function Sidebar({
           ) : null}
         </div>
       </div>
+      <GitPanel
+        enabled={roots.length > 0}
+        refreshKey={nodes}
+        onOpenFile={onOpenFile}
+      />
       <FileTree
         nodes={nodes}
         activePath={activeFile}

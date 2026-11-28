@@ -218,6 +218,7 @@ export function App() {
     resumeRun,
     respondApproval,
     respondClarification,
+    resolvePendingChanges,
     undoLastRun,
   } = useAgentRun({
     backend,
@@ -443,8 +444,109 @@ export function App() {
       setFileContent(content);
       setSavedContent(content);
     }
+    // 已写盘：清掉待确认标记，消息里不再显示「确认写入」
+    resolvePendingChanges([path], 'applied');
     // 写盘后刷新目录树：新建文件立即出现在侧边栏
     await reload();
+  };
+
+  /** 待确认改动逐个写盘；任一失败则回滚已写入的部分，避免半截状态 */
+  const applyPendingChanges = async (list: FileChange[]) => {
+    const pending = (list ?? []).filter((c) => c.pending);
+    if (!pending.length) return;
+
+    const writeOne = async (c: FileChange) => {
+      if (c.kind === 'renamed') {
+        if (!c.from) throw new Error('缺少重命名原路径');
+        await window.electron.workspace.rename(c.from, c.path);
+        // 重命名前有未落盘编辑时，把最新内容写到目标文件
+        if (c.after !== undefined && c.after !== c.before) {
+          await backend.workspace.writeFile?.(c.path, c.after);
+        }
+      } else if (c.kind === 'deleted') {
+        await window.electron.workspace.delete(c.path);
+      } else {
+        await backend.workspace.writeFile?.(c.path, c.after ?? '');
+      }
+    };
+
+    const undoOne = async (c: FileChange) => {
+      if (c.kind === 'created') {
+        await window.electron.workspace.delete(c.path);
+      } else if (c.kind === 'renamed') {
+        if (c.from) {
+          await window.electron.workspace.rename(c.path, c.from);
+          // 重命名时夹带的编辑要一并还原
+          if (c.before !== undefined && c.after !== c.before) {
+            await backend.workspace.writeFile?.(c.from, c.before);
+          }
+        }
+      } else {
+        if (c.before === undefined) {
+          throw new Error('缺少原始内容，无法回滚（可能是二进制文件）');
+        }
+        await backend.workspace.writeFile?.(c.path, c.before);
+      }
+    };
+
+    const applied: FileChange[] = [];
+    try {
+      for (const change of pending) {
+        await writeOne(change);
+        applied.push(change);
+      }
+    } catch (e: any) {
+      for (const change of [...applied].reverse()) {
+        try {
+          await undoOne(change);
+        } catch {
+          // 回滚失败时保留原始错误提示
+        }
+      }
+      setError(
+        `写入失败，已回滚 ${
+          applied.length ? `${applied.length} 个已写入文件` : '未写入文件'
+        }：${e?.message || String(e)}`,
+      );
+      return;
+    }
+
+    resolvePendingChanges(
+      pending.map((c) => c.path),
+      'applied',
+    );
+    // 同步已打开标签的内容（重命名/删除交给目录树刷新）
+    setEditorTabs((prev) =>
+      prev.map((tab) => {
+        const change = pending.find(
+          (c) =>
+            c.path === tab.path &&
+            (c.kind === 'created' || c.kind === 'modified'),
+        );
+        if (!change) return tab;
+        const next = change.after ?? '';
+        return { ...tab, content: next, savedContent: next };
+      }),
+    );
+    await reload();
+    if (activeFile) {
+      try {
+        const content = await backend.workspace.readFile(activeFile);
+        setFileContent(content);
+        setSavedContent(content);
+      } catch {
+        // 当前文件已被改动删除：关掉标签，不停留在旧内容上
+        const deleted = pending.some(
+          (c) => c.kind === 'deleted' && c.path === activeFile,
+        );
+        if (deleted) {
+          setEditorTabs((prev) => prev.filter((t) => t.path !== activeFile));
+          setActiveFile('');
+          setFileContent('');
+          setSavedContent('');
+        }
+      }
+    }
   };
 
   /** 回滚一条消息的改动：新建文件删除、修改/删除写回 before、重命名还原；
@@ -458,18 +560,29 @@ export function App() {
           await window.electron.workspace.delete(c.path);
         } else if (c.kind === 'renamed') {
           if (c.from) {
-            await backend.workspace.writeFile?.(c.from, c.before ?? '');
+            if (c.before === undefined) {
+              // 二进制/不可读文件：直接移回原路径，不能写空内容
+              await window.electron.workspace.rename(c.path, c.from);
+            } else {
+              await backend.workspace.writeFile?.(c.from, c.before);
+              await window.electron.workspace.delete(c.path);
+            }
+          } else {
+            await window.electron.workspace.delete(c.path);
           }
-          await window.electron.workspace.delete(c.path);
+        } else if (c.before === undefined) {
+          // 二进制/不可读文件没有 before：宁可报错也不能写空内容
+          failures.push(`${c.path}: 缺少原始内容，无法恢复`);
         } else {
-          await backend.workspace.writeFile?.(c.path, c.before ?? '');
+          await backend.workspace.writeFile?.(c.path, c.before);
         }
       } catch (e: any) {
         failures.push(`${c.path}: ${e?.message || String(e)}`);
       }
     }
     const reverted = new Set(list.map((c) => c.path));
-    setChanges((prev) => prev.filter((c) => !reverted.has(c.path)));
+    // 同步移除 pending 标记与会话消息里的改动记录
+    resolvePendingChanges([...reverted], 'reverted');
     // 当前打开的对比若属于被回滚的文件，直接关闭，避免停留在旧内容上
     setActiveDiff((prev) => (prev && reverted.has(prev.path) ? null : prev));
     await reload();
@@ -749,6 +862,8 @@ export function App() {
           onToggleApproval={toggleApproval}
           onOpenBrowser={openBrowser}
           onApplyDiff={(path, content) => void applyDiff(path, content)}
+          onApplyPending={(list) => void applyPendingChanges(list)}
+          onRevertPending={(list) => void revertChanges(list)}
           onRevertChanges={(list) => void revertChanges(list)}
           onSaveChanges={async () => {
             await saveAllDirty();

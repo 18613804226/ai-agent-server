@@ -17,6 +17,8 @@ import { LocalAgent } from './agent/local-agent.js';
 import { ensureDemoWorkspace } from './demo-workspace.js';
 import { browserManager } from './browser.js';
 import { getDatabaseManager } from './database.js';
+import { mcpManager } from './mcp.js';
+import { gitDiff, gitStatus } from './git.js';
 import type { DatabaseConnectionInput } from '../shared/database.js';
 import {
   getConfig,
@@ -85,8 +87,12 @@ export function registerIpc(): void {
     const saved = setConfig(next);
     // 配置变了，丢弃旧编排器，下次对话用新 key/baseURL 重建
     getAgent().reloadConfig();
+    // MCP 配置可能变了：重连服务并重建工具列表
+    void mcpManager.reload();
     return saved;
   });
+
+  ipcMain.handle('mcp:status', () => mcpManager.status());
 
   ipcMain.handle('providers:status', () => {
     const cfg = getConfig();
@@ -220,6 +226,16 @@ export function registerIpc(): void {
     terminalCwd = null;
     return { ok: true };
   });
+
+  ipcMain.handle('git:status', () => gitStatus(getAgent().roots));
+
+  ipcMain.handle(
+    'git:diff',
+    (
+      _event,
+      input: { gitPath: string; staged?: boolean; untracked?: boolean },
+    ) => gitDiff(getAgent().roots, input),
+  );
 
   ipcMain.handle('terminal:cwd', () => terminalCwd || getAgent().root || '');
 
@@ -553,4 +569,7 @@ export function registerIpc(): void {
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify(sessions), 'utf8');
   });
+
+  // 启动时按配置连接 MCP Server（连接完成后 LocalAgent 会重建工具列表）
+  void mcpManager.reload();
 }

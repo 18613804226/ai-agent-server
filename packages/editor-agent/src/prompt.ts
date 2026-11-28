@@ -9,6 +9,7 @@ export function buildEditorSystemPrompt(
   rootsInput: WorkspaceRootsInput,
   summary?: string,
   context?: AgentPromptContext,
+  deferWrite = false,
 ): string {
   const roots = normalizeRoots(rootsInput);
   const rootList = roots
@@ -43,11 +44,15 @@ ${context.selection ? `当前选区：\n${context.selection}\n` : ''}${context.a
     '5. 任务全部完成后，最后一轮回复必须给出简要总结：改了哪些文件、每处改了什么、验证结果如何。总结要简洁（分点列出），不要展开分析，也不要只输出计划。',
     '6. 需要的信息缺失时先问用户，不要臆测。',
     '7. 信息不足、存在多种合理方案或依赖用户偏好时，调用 ask_user 提问：question 写清问题，options 给 2-5 个具体选项（allowCustom 默认允许自定义输入），等用户回答后再继续；不要事事提问。',
-    '8. 修改文件后必须调用 verify_workspace 验证改动；如果验证失败，继续修复，不要直接结束。如果任务涉及测试，调用 verify_workspace 并传 scripts: ["test"]。',
+    deferWrite
+      ? '8. 当前为 diff 审批模式：文件改动不会立即写入磁盘，需要在最后总结里告诉用户「哪些改动待确认」，并提醒用户确认写入后再运行验证；不要反复调用 verify_workspace。'
+      : '8. 修改文件后必须调用 verify_workspace 验证改动；如果验证失败，继续修复，不要直接结束。如果任务涉及测试，调用 verify_workspace 并传 scripts: ["test"]。',
     '9. 用户要求启动 Web 项目时：先读 package.json 的 scripts，然后调用 run_terminal 执行启动命令（如 npm run dev、npm run serve、vite），并传 background: true 后台运行（长期进程，不要等待）；启动后调用 open_in_browser 打开预览。',
     '10. 没有 package.json 或 scripts 里没有 dev/serve 时，用 Node.js 启动静态服务器：cd <项目目录> && npx -y serve -l 3000 .（或 npx -y http-server -p 3000 .），不要用 python -m http.server。',
     '11. 工具调用后不要停下：只要任务还没完成（项目还没启动、文件还没改完、验证还没过），就必须继续调用工具；等任务全部完成后再输出总结，中间不要只输出分析或计划。',
     '12. 同一命令/操作失败不要原样重试超过 2 次：先分析原因（路径、依赖、网络、权限），换一种思路；仍失败就告诉用户需要哪些信息或权限，不要一直重试。',
     '13. 多步骤任务开始时调用 todo_write 列出计划清单，执行中及时更新状态（pending / in_progress / completed），任务完成后核对清单。',
+    '14. 调试 HTTP 接口用 http_request（method / url / headers / body），不要用 run_terminal 拼 curl；拿到状态码和响应体后再判断问题。',
+    '15. 工具名以 mcp_ 开头的是外部 MCP 工具，按工具描述调用；它们与内置工具一样受审批策略约束。',
   ].join('\n');
 }

@@ -552,6 +552,39 @@ export function useAgentRun(deps: UseAgentRunDeps) {
     [pendingClarification],
   );
 
+  /**
+   * 结束 pending 改动：
+   * - applied：已写盘，去掉 pending 标记（保留在改动列表）
+   * - reverted：放弃改动，从列表移除
+   * 同时同步当前会话里 assistant 消息挂的 changes，避免「待确认」残留。
+   */
+  const resolvePendingChanges = useCallback(
+    (paths: string[], outcome: 'applied' | 'reverted') => {
+      if (!paths.length) return;
+      const target = new Set(paths);
+      setChanges((prev) =>
+        outcome === 'applied'
+          ? prev.map((c) =>
+              target.has(c.path) ? { ...c, pending: false } : c,
+            )
+          : prev.filter((c) => !target.has(c.path)),
+      );
+      updateSession((prev) => ({
+        messages: prev.messages.map((msg) => {
+          if (!msg.changes?.length) return msg;
+          const changes =
+            outcome === 'applied'
+              ? msg.changes.map((c) =>
+                  target.has(c.path) ? { ...c, pending: false } : c,
+                )
+              : msg.changes.filter((c) => !target.has(c.path));
+          return { ...msg, changes };
+        }),
+      }));
+    },
+    [setChanges, updateSession],
+  );
+
   const undoLastRun = useCallback(async () => {
     if (!changes.length) return;
     const result = await window.electron.agent.undoAgent();
@@ -559,6 +592,10 @@ export function useAgentRun(deps: UseAgentRunDeps) {
       setError(`撤销失败：${result.failed.join('；')}`);
       return;
     }
+    resolvePendingChanges(
+      changes.map((c) => c.path),
+      'reverted',
+    );
     setChanges([]);
     setActiveDiff(null);
     if (activeFileRef.current) {
@@ -570,7 +607,7 @@ export function useAgentRun(deps: UseAgentRunDeps) {
         // 文件可能已被撤销删除
       }
     }
-  }, [changes, activeFileRef, backend, setError, setChanges, setActiveDiff, setFileContent, setSavedContent]);
+  }, [changes, activeFileRef, backend, setError, setChanges, resolvePendingChanges, setActiveDiff, setFileContent, setSavedContent]);
 
   return {
     messages,
@@ -596,6 +633,7 @@ export function useAgentRun(deps: UseAgentRunDeps) {
     resumeRun,
     respondApproval,
     respondClarification,
+    resolvePendingChanges,
     undoLastRun,
   };
 }

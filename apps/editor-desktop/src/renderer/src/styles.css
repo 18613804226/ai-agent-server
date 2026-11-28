@@ -4786,3 +4786,283 @@ button:disabled {
 :root[data-theme='light'] .lightbox-counter {
   color: #fff;
 }
+
+/* ---------- git panel ---------- */
+.git-panel {
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-side);
+}
+
+.git-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 6px 8px;
+}
+
+.git-panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 2px;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.git-panel-toggle svg {
+  transition: transform 0.15s ease;
+}
+
+.git-panel-toggle svg.rotated {
+  transform: rotate(90deg);
+}
+
+.git-branch {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.git-refresh {
+  width: 24px;
+  height: 24px;
+  flex: none;
+}
+
+.git-panel-body {
+  max-height: 40vh;
+  overflow: auto;
+  padding: 0 8px 8px;
+}
+
+.git-empty {
+  padding: 6px 4px;
+}
+
+.git-group {
+  margin-bottom: 6px;
+}
+
+.git-group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.git-group-count {
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 10px;
+}
+
+.git-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.git-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.git-row:hover {
+  background: var(--hover, rgba(127, 127, 127, 0.12));
+}
+
+.git-row.active {
+  background: var(--surface);
+}
+
+.git-status-badge {
+  flex: none;
+  width: 14px;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.git-status-added,
+.git-status-untracked {
+  color: #3fb950;
+}
+
+.git-status-modified {
+  color: #d29922;
+}
+
+.git-status-deleted {
+  color: #f85149;
+}
+
+.git-status-renamed {
+  color: #58a6ff;
+}
+
+.git-status-conflicted {
+  color: #db6d28;
+}
+
+.git-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.git-patch-wrap {
+  padding: 4px 4px 8px 20px;
+}
+
+.git-patch-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+
+.git-patch {
+  max-height: 260px;
+  margin: 0;
+  padding: 6px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+.git-patch-add {
+  color: #3fb950;
+}
+
+.git-patch-del {
+  color: #f85149;
+}
+
+.git-patch-hunk {
+  color: #58a6ff;
+}
+
+.git-patch-meta {
+  color: var(--text-dim);
+}
+
+.git-patch-same {
+  color: var(--text);
+}
+
+/* ---------- MCP settings ---------- */
+.mcp-list {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-server {
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.mcp-server-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.mcp-enabled {
+  display: flex !important;
+  align-items: center;
+  gap: 4px;
+  margin: 0 !important;
+  white-space: nowrap;
+}
+
+.mcp-name-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-section .mcp-server-head select {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.settings-section .mcp-field span {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.settings-section .mcp-server textarea {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  resize: vertical;
+  outline: none;
+}
+
+.mcp-server-status {
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.mcp-ok {
+  color: #3fb950;
+}
+
+.mcp-error {
+  color: #f85149;
+}
+
+.mcp-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.git-patch > div {
+  white-space: pre;
+}

@@ -63,6 +63,8 @@ export function ChatPanel({
   onApplyDiff,
   onRevertChanges,
   onSaveChanges,
+  onApplyPending,
+  onRevertPending,
 }: {
   mode: AgentMode;
   sessionId: string;
@@ -70,6 +72,8 @@ export function ChatPanel({
   onApplyDiff: (path: string, content: string) => void;
   onRevertChanges?: (changes: FileChange[]) => void;
   onSaveChanges: () => void;
+  onApplyPending?: (changes: FileChange[]) => void;
+  onRevertPending?: (changes: FileChange[]) => void;
   sessions: ChatSession[];
   activeId: string;
   onCreateSession: () => void;
@@ -199,6 +203,8 @@ export function ChatPanel({
             onApplyDiff={onApplyDiff}
             onRevertChanges={onRevertChanges}
             onSaveChanges={onSaveChanges}
+            onApplyPending={onApplyPending}
+            onRevertPending={onRevertPending}
           />
         ))}
         {streaming ? (

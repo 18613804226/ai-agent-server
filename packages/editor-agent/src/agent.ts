@@ -2,7 +2,7 @@ import type {
   AgentDefinition,
   VerifyHook,
 } from '@repo/agent-orchestrator';
-import { createEditorTools, type WorkspaceRootsInput } from './tools.js';
+import { createEditorTools, type WorkspaceRootsInput, type PendingEditStore } from './tools.js';
 import { createDatabaseTools, type DatabaseRunner } from './database.js';
 import { buildEditorSystemPrompt } from './prompt.js';
 import { createVerifier } from './verify.js';
@@ -30,6 +30,8 @@ export interface CreateEditorAgentOptions {
   deferWrite?: boolean;
   /** 数据库执行器（宿主注入）；未传时数据库工具提示未配置 */
   database?: DatabaseRunner;
+  /** 同一轮 pending 改动的叠加状态（宿主在每轮开始时清空） */
+  pendingEdits?: PendingEditStore;
 }
 
 /**
@@ -53,6 +55,7 @@ export function createEditorAgent(
     onChange,
     options.onBrowserOpen,
     options.deferWrite,
+    options.pendingEdits,
   );
   tools.push(...createDatabaseTools(options.database));
   tools.push({
@@ -76,7 +79,9 @@ export function createEditorAgent(
     },
     handler: async (args, context) => {
       if (!verifier) {
-        return '当前模式没有可用的验证脚本（typecheck / lint）。';
+        return options.deferWrite
+          ? '当前为 diff 审批模式：改动尚未写入磁盘，无法验证；请让用户先在消息里确认写入。'
+          : '当前模式没有可用的验证脚本（typecheck / lint）。';
       }
       const scripts = Array.isArray(args.scripts)
         ? args.scripts.map((s) => String(s))
@@ -94,7 +99,12 @@ export function createEditorAgent(
     id: 'editor',
     tools,
     buildSystemPrompt: (input) =>
-      buildEditorSystemPrompt(roots, undefined, input?.context),
+      buildEditorSystemPrompt(
+        roots,
+        undefined,
+        input?.context,
+        Boolean(options.deferWrite),
+      ),
     verifyAfterTools: verifier ?? undefined,
     editToolNames: DEFAULT_EDIT_TOOL_NAMES,
     // 编辑器任务（读文件 → 改 → 验证 → 再改…）链路长，给足循环轮数；

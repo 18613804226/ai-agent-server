@@ -3,10 +3,12 @@ import type {
   ChatEvent,
   DatabaseConfig,
   DatabaseConnectionInput,
+  McpServerStatus,
   ProviderConfig,
   ProviderStatus,
 } from './mode/types';
 import type { DatabaseSchema } from '@repo/editor-agent';
+import type { GitDiffResult, GitStatusResult } from '../../shared/git';
 
 export {};
 
@@ -51,6 +53,9 @@ declare global {
         }>;
         fetchModels(provider: ProviderConfig): Promise<string[]>;
       };
+      mcp: {
+        status(): Promise<McpServerStatus[]>;
+      };
       workspace: {
         roots(): Promise<Array<{ name: string; path: string }>>;
         open(): Promise<Array<{ name: string; path: string }>>;
@@ -67,6 +72,14 @@ declare global {
         delete(path: string): Promise<{ ok: boolean }>;
         rename(from: string, to: string): Promise<{ ok: boolean }>;
         clear(): Promise<{ ok: boolean }>;
+      };
+      git: {
+        status(): Promise<GitStatusResult>;
+        diff(input: {
+          gitPath: string;
+          staged?: boolean;
+          untracked?: boolean;
+        }): Promise<GitDiffResult>;
       };
       terminal: {
         cwd(): Promise<string>;

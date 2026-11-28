@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AppConfig,
   ProviderConfig,
@@ -6,7 +6,9 @@ import type {
 } from '../mode/types';
 import { ProviderModal } from './ProviderModal';
 import { DatabaseSettings } from './DatabaseSettings';
+import { McpSettings } from './McpSettings';
 import { DEFAULT_MODEL_ID } from '../../../shared/providers';
+import './SettingsModal.css';
 
 export function SettingsModal({
   config,
@@ -24,6 +26,10 @@ export function SettingsModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
+  // 是否有未保存的更改（不含 DatabaseSettings，它自行管理状态）
+  const initialSnapshot = useMemo(() => JSON.stringify(config), [config]);
+  const dirty = JSON.stringify(draft) !== initialSnapshot;
+
   const saveProvider = async (provider: ProviderConfig) => {
     setDraft((d) => {
       const exists = d.providers.some((p) => p.id === provider.id);
@@ -34,14 +40,22 @@ export function SettingsModal({
     });
   };
 
-  const removeProvider = (id: string) => {
+  const removeProvider = (p: ProviderConfig) => {
+    if (!window.confirm(`确定删除提供商「${p.name}」吗？`)) return;
     setDraft((d) => ({
       ...d,
-      providers: d.providers.filter((p) => p.id !== id),
+      providers: d.providers.filter((x) => x.id !== p.id),
     }));
   };
 
+  const requestClose = () => {
+    if (saving) return;
+    if (dirty && !window.confirm('有未保存的更改，确定放弃并关闭吗？')) return;
+    onClose();
+  };
+
   const save = async () => {
+    if (saving || !dirty) return;
     setSaving(true);
     setError('');
     try {
@@ -50,6 +64,7 @@ export function SettingsModal({
         commandApproval: draft.commandApproval ?? 'ask',
         fileApproval: draft.fileApproval ?? 'ask',
         databaseApproval: draft.databaseApproval ?? 'ask',
+        mcpServers: draft.mcpServers ?? [],
       });
       onClose();
     } catch (e: any) {
@@ -59,17 +74,43 @@ export function SettingsModal({
     }
   };
 
+  // 快捷键：Esc 关闭、Ctrl/Cmd+S 保存；子弹窗打开时不拦截
+  const keyHandlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  keyHandlerRef.current = (e: KeyboardEvent) => {
+    if (editing) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      requestClose();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      void save();
+    }
+  };
+  useEffect(() => {
+    const listener = (e: KeyboardEvent) => keyHandlerRef.current(e);
+    window.addEventListener('keydown', listener);
+    return () => window.removeEventListener('keydown', listener);
+  }, []);
+
   return (
-    <div className="modal-backdrop">
-      <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-backdrop"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) requestClose();
+      }}
+    >
+      <div
+        className="modal wide settings-modal"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <div className="modal-title">
           <span>设置</span>
           <button
             type="button"
             className="modal-close"
-            onClick={onClose}
+            onClick={requestClose}
             aria-label="关闭"
-            title="关闭"
+            title="关闭 (Esc)"
           >
             <svg
               viewBox="0 0 16 16"
@@ -93,57 +134,66 @@ export function SettingsModal({
                 className="ghost small"
                 onClick={() => setEditing('new')}
               >
-                添加提供商
+                + 添加提供商
               </button>
             </div>
 
             {draft.providers.length === 0 ? (
-              <div className="muted small">还没有提供商</div>
+              <div className="muted small">
+                还没有提供商，点击右上角「添加提供商」开始配置
+              </div>
             ) : (
               <ul className="provider-list">
                 {draft.providers.map((p) => {
                   const hasKey = status.find((s) => s.id === p.id)?.hasKey;
+                  const meta = [
+                    p.baseUrl,
+                    p.apiKeyEnv,
+                    `${p.models.length} 个模型`,
+                  ]
+                    .filter((s) => typeof s === 'string' && s.trim())
+                    .join(' · ');
                   return (
-                  <li key={p.id}>
-                    <div className="provider-info">
-                      <div className="provider-name">
-                        {p.name}{' '}
-                        <span className="muted small">{p.id}</span>
+                    <li key={p.id}>
+                      <div className="provider-info">
+                        <div className="provider-name">
+                          {p.name}{' '}
+                          <span className="muted small">{p.id}</span>{' '}
+                          <span
+                            className={`approval-state ${hasKey ? 'is-ask' : 'is-auto'}`}
+                          >
+                            {hasKey ? 'Key 已配置' : 'Key 未配置'}
+                          </span>
+                        </div>
+                        <div className="muted small" title={meta}>
+                          {meta}
+                        </div>
                       </div>
-                      <div className="muted small">
-                        {p.baseUrl} · {p.apiKeyEnv}
-                        {hasKey ? '（已配置）' : '（未配置）'} ·{' '}
-                        {p.models.length} 个模型
+                      <div className="provider-actions">
+                        <button
+                          className="ghost small"
+                          onClick={() => setEditing(p)}
+                        >
+                          编辑
+                        </button>
+                        <button
+                          className="ghost small"
+                          onClick={() => removeProvider(p)}
+                        >
+                          删除
+                        </button>
                       </div>
-                    </div>
-                    <div className="provider-actions">
-                      <button
-                        className="ghost small"
-                        onClick={() => setEditing(p)}
-                      >
-                        编辑
-                      </button>
-                      <button
-                        className="ghost small"
-                        onClick={() => removeProvider(p.id)}
-                      >
-                        删除
-                      </button>
-                    </div>
-                  </li>
+                    </li>
                   );
                 })}
               </ul>
             )}
 
             <p className="hint">
-              API Key 可直接填在提供商里（会保存到本地配置文件），也可只填环境变量名，从
+              API Key 可以直接填写（保存在本地配置），也可以只填环境变量名，从
               <code> apps/editor-desktop/.env </code>
-              读取（修改后需重启应用）。未配置 key 的提供商不会出现在模型选择里。
-            </p>
-            <p className="hint">
-              默认只内置免费模型 <code>{DEFAULT_MODEL_ID}</code>；通义/付费模型不预置，
-              需要更好的模型请自行添加提供商。
+              读取（修改后要重启）。没有 Key 的提供商不会出现在模型选择里。默认只内置免费模型
+              <code> {DEFAULT_MODEL_ID} </code>，需要其他模型请自行添加。
             </p>
           </section>
 
@@ -152,39 +202,50 @@ export function SettingsModal({
               <h4>工具审批</h4>
             </div>
             <p className="hint">
-              开关控制「执行前是否需要你确认」：<strong>开 = 每次询问</strong>
-              （弹出确认框，你可以拒绝），<strong>关 = 自动放行</strong>
-              （直接执行，不再询问）。只读操作（读文件、查询数据库）始终不询问。
+              <strong>开 = 每次询问</strong>，<strong>关 = 自动放行</strong>。只读操作始终不询问。
             </p>
             <ApprovalToggle
               title="命令执行"
-              description="run_terminal 执行命令前弹出确认（危险命令必须手动放行）"
+              description="run_terminal / http_request / MCP 工具"
               value={draft.commandApproval}
               onChange={(v) => setDraft((d) => ({ ...d, commandApproval: v }))}
             />
             <ApprovalToggle
               title="文件写操作"
-              description="写、删、移动文件前弹出确认，可在 diff 里逐块接受/拒绝"
+              description="开启后先生成 diff，可逐块接受或拒绝"
               value={draft.fileApproval}
               onChange={(v) => setDraft((d) => ({ ...d, fileApproval: v }))}
             />
             <ApprovalToggle
               title="数据库写操作"
-              description="execute_sql 执行写入前弹出确认；query_database 只读，始终放行"
+              description="execute_sql 写入前确认"
               value={draft.databaseApproval}
               onChange={(v) => setDraft((d) => ({ ...d, databaseApproval: v }))}
             />
           </section>
+
+          <McpSettings
+            servers={draft.mcpServers ?? []}
+            onChange={(mcpServers) => setDraft((d) => ({ ...d, mcpServers }))}
+          />
 
           <DatabaseSettings />
 
           {error ? <div className="modal-error">⚠️ {error}</div> : null}
         </div>
         <div className="modal-actions">
-          <button className="ghost" onClick={onClose}>
+          <span className="muted small" style={{ marginRight: 'auto' }}>
+            {dirty ? '有未保存的更改' : ''}
+          </span>
+          <button className="ghost" onClick={requestClose} disabled={saving}>
             取消
           </button>
-          <button onClick={() => void save()} disabled={saving}>
+          <button
+            className="settings-save"
+            onClick={() => void save()}
+            disabled={saving || !dirty}
+            title={dirty ? '保存 (Ctrl+S)' : '没有需要保存的更改'}
+          >
             {saving ? '保存中…' : '保存'}
           </button>
         </div>
@@ -203,8 +264,7 @@ export function SettingsModal({
 
 /**
  * 审批开关：开 = ask（每次询问），关 = auto（自动放行）。
- * 开关本身只有「要/不要确认」一种语义，旁边用文字徽标把当前状态写出来，
- * 避免用户猜「开着是放行还是拦截」。
+ * 当前状态通过悬停提示和 aria-label 给出，不再在开关旁重复显示文字。
  */
 function ApprovalToggle({
   title,
@@ -218,6 +278,9 @@ function ApprovalToggle({
   onChange: (value: 'ask' | 'auto') => void;
 }) {
   const ask = value === 'ask';
+  const stateText = ask
+    ? '当前：每次询问（点击改为自动放行）'
+    : '当前：自动放行（点击改为每次询问）';
   return (
     <div className="approval-row">
       <div className="approval-row-text">
@@ -225,13 +288,11 @@ function ApprovalToggle({
         <span className="muted small">{description}</span>
       </div>
       <div className="approval-row-control">
-        <span className={`approval-state ${ask ? 'is-ask' : 'is-auto'}`}>
-          {ask ? '每次询问' : '自动放行'}
-        </span>
-        <label className="switch">
+        <label className="switch" title={stateText}>
           <input
             type="checkbox"
             checked={ask}
+            aria-label={`${title}：${stateText}`}
             onChange={(e) => onChange(e.target.checked ? 'ask' : 'auto')}
           />
           <span className="switch-slider" />

@@ -13,15 +13,13 @@ import {
     type FileChange,
     type FileEdit,
   } from '@repo/agent-orchestrator';
-import {
-  createEditorAgent,
-  previewApproval,
-  restoreChanges,
-} from '@repo/editor-agent';
+import { createEditorAgent, previewApproval, restoreChanges } from '@repo/editor-agent';
+import type { PendingEditStore } from '@repo/editor-agent';
 import { ArtifactStore } from '@repo/agent-orchestrator';
 import { randomUUID } from 'node:crypto';
 import { getConfig } from '../config.js';
 import { getDatabaseManager } from '../database.js';
+import { mcpManager } from '../mcp.js';
 import { resolveModel } from './model.js';
 import { RunStore, type RunCheckpoint, type RunState } from './run-store.js';
 
@@ -48,6 +46,8 @@ export class LocalAgent {
   private agent: AgentDefinition | null = null;
   /** 本轮工具产生的文件改动 */
   private changes: FileChange[] = [];
+  /** 同一轮 pending 改动的叠加状态（后续编辑基于未落盘内容） */
+  private readonly pendingEdits: PendingEditStore = new Map();
   /** 文件操作审批开启：改动不直接落盘，产出 pending diff 等用户确认 */
   private deferWrite = false;
   /** 等待渲染层响应的审批请求 */
@@ -70,6 +70,8 @@ export class LocalAgent {
   constructor(initialRoots: string[]) {
     this.workspaceRoots = [...initialRoots];
     this.rebuildAgent();
+    // MCP 连接完成/配置变化后，重建工具列表
+    mcpManager.onChange(() => this.rebuildAgent());
   }
 
   get roots(): string[] {
@@ -104,6 +106,7 @@ export class LocalAgent {
     this.agent = null;
     this.orchestrator = null;
     this.changes = [];
+    this.pendingEdits.clear();
   }
 
   /** 设置变更后丢弃旧编排器，下次运行时用新配置重建 */
@@ -175,6 +178,7 @@ export class LocalAgent {
   /** 新一轮开始前清空改动收集 */
   resetChanges(): void {
     this.changes = [];
+    this.pendingEdits.clear();
   }
 
   getState(): { state: RunState; checkpoint: RunCheckpoint | null } {
@@ -215,7 +219,8 @@ export class LocalAgent {
 
   private needsApproval(name: string, args: Record<string, unknown>): boolean {
     const cfg = getConfig();
-    // 文件操作（写/删/移动）：由「文件操作审批」开关控制
+    // 文件操作（写/删/移动）：fileApproval=ask 时走 pending diff 审批
+    // （改动先不落盘，用户在消息里确认），不再重复弹审批框
     const fileTools = [
       'write_file',
       'edit_file',
@@ -224,12 +229,19 @@ export class LocalAgent {
       'move_file',
     ];
     if (fileTools.includes(name)) {
-      return cfg.fileApproval !== 'auto';
+      return false;
     }
-    // 命令执行：由「命令执行审批」开关控制（仅危险命令）
+    // 命令执行 / 接口调试：由「命令执行审批」开关控制（仅危险命令）
     if (name === 'run_terminal') {
       if (cfg.commandApproval === 'auto') return false;
       return RISKY_COMMAND.test(String(args.command ?? ''));
+    }
+    if (name === 'http_request') {
+      return cfg.commandApproval !== 'auto';
+    }
+    // MCP 工具可能有副作用：按命令执行审批处理
+    if (name.startsWith('mcp_')) {
+      return cfg.commandApproval !== 'auto';
     }
     // 数据库写操作：由「数据库操作审批」开关控制
     if (name === 'execute_sql') {
@@ -311,6 +323,7 @@ export class LocalAgent {
       this.agent = null;
       return;
     }
+    this.deferWrite = getConfig().fileApproval === 'ask';
     const base = createEditorAgent(
       this.workspaceRoots,
       (change) => this.changes.push(change),
@@ -318,12 +331,22 @@ export class LocalAgent {
         onBrowserOpen: (url) =>
           this.eventSink?.({ type: 'browser_open', url }),
         // 文件操作审批开启时：改动不直接落盘，产出 pending diff 等用户确认
-        deferWrite: getConfig().fileApproval === 'ask',
+        deferWrite: this.deferWrite,
+        // pending 改动还没写入磁盘，自动验证会读到旧内容，直接关掉
+        verifier: this.deferWrite ? null : undefined,
         // 数据库执行器：本地模式直接可用；云端模式由 tool_request 回到这里执行
         database: getDatabaseManager().getRunner(),
+        // 同一轮内多次编辑同一文件时，后续编辑基于未落盘内容计算
+        pendingEdits: this.pendingEdits,
       },
     );
-    this.deferWrite = getConfig().fileApproval === 'ask';
+    // MCP 工具动态注入；同名时保留内置工具
+    const builtinNames = new Set(
+      base.tools.map((t) => t.definition.function.name),
+    );
+    const mcpTools = mcpManager
+      .getTools()
+      .filter((t) => !builtinNames.has(t.definition.function.name));
     const approvalPolicy: ApprovalPolicy = (name, args) =>
       this.needsApproval(name, args) ? 'ask' : 'allow';
     const requestApproval: ApprovalHook = (context) =>
@@ -332,6 +355,7 @@ export class LocalAgent {
       this.requestClarification(context);
     this.agent = {
       ...base,
+      tools: [...base.tools, ...mcpTools],
       approvalPolicy,
       requestApproval,
       requestClarification,
@@ -382,7 +406,10 @@ export class LocalAgent {
   ): AsyncGenerator<AgentEvent> {
     const agent = this.ensureAgent();
     const orchestrator = this.ensureOrchestrator();
-    if (!this.resumeFrom) this.changes = [];
+    if (!this.resumeFrom) {
+      this.changes = [];
+      this.pendingEdits.clear();
+    }
 
     const complexity = classifyComplexity({
       userQuery: query,

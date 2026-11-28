@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { AgentEvent } from '@repo/agent-orchestrator';
 import type { AppConfig, ProviderConfig } from '../main/config.js';
+import type { McpServerStatus } from '../shared/mcp.js';
+import type { GitDiffResult, GitStatusResult } from '../shared/git.js';
 import type {
   DatabaseConfig,
   DatabaseConnectionInput,
@@ -58,6 +60,10 @@ const api = {
     fetchModels: (provider: ProviderConfig): Promise<string[]> =>
       ipcRenderer.invoke('providers:fetchModels', provider),
   },
+  mcp: {
+    status: (): Promise<McpServerStatus[]> =>
+      ipcRenderer.invoke('mcp:status'),
+  },
   workspace: {
     roots: (): Promise<Array<{ name: string; path: string }>> =>
       ipcRenderer.invoke('workspace:roots'),
@@ -86,6 +92,14 @@ const api = {
       ipcRenderer.invoke('workspace:rename', { from, to }),
     clear: (): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('workspace:clear'),
+  },
+  git: {
+    status: (): Promise<GitStatusResult> => ipcRenderer.invoke('git:status'),
+    diff: (input: {
+      gitPath: string;
+      staged?: boolean;
+      untracked?: boolean;
+    }): Promise<GitDiffResult> => ipcRenderer.invoke('git:diff', input),
   },
   terminal: {
     cwd: (): Promise<string> => ipcRenderer.invoke('terminal:cwd'),
